@@ -40,15 +40,21 @@ async function tinyFetch<T>(
   params?: Record<string, string>
 ): Promise<{ data: T; rateLimit: RateLimitInfo }> {
   const token = await getValidAccessToken();
-  const url = new URL(`${BASE_URL}${path}`);
 
+  // Monta a query string manualmente para evitar encode excessivo
+  // URLSearchParams codifica "/" e ":" que a Tiny não aceita encodados
+  let fullUrl = `${BASE_URL}${path}`;
   if (params) {
-    Object.entries(params).forEach(([key, value]) => {
-      if (value) url.searchParams.set(key, value);
-    });
+    const qs = Object.entries(params)
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}=${v.replace(/ /g, '%20')}`)
+      .join('&');
+    if (qs) fullUrl += `?${qs}`;
   }
 
-  const response = await fetch(url.toString(), {
+  console.log(`[tiny-api] GET ${fullUrl}`);
+
+  const response = await fetch(fullUrl, {
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
