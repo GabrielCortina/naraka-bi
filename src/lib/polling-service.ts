@@ -9,18 +9,6 @@ interface PollingResult {
   erro?: string;
 }
 
-// Busca o estado do último polling
-async function getPollingState() {
-  const supabase = createServiceClient();
-  const { data } = await supabase
-    .from('polling_state')
-    .select('*')
-    .eq('id', 1)
-    .single();
-
-  return data;
-}
-
 // Atualiza o estado do polling
 async function updatePollingState(updates: {
   ultima_verificacao?: string;
@@ -120,24 +108,21 @@ export async function executarPolling(): Promise<PollingResult> {
   try {
     await updatePollingState({ status: 'running' });
 
-    const state = await getPollingState();
-    // Fallback: últimos 7 dias se nunca fez polling
-    const fallback = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const ultimaVerificacao = state?.ultima_verificacao || fallback;
+    // Sempre busca pedidos atualizados no dia de hoje
+    const hoje = new Date().toISOString();
 
-    console.log(`[polling] Iniciando busca desde ${ultimaVerificacao}`);
+    console.log(`[polling] Buscando pedidos atualizados em ${hoje.split('T')[0]}`);
 
     let offset = 0;
     let totalProcessado = 0;
     let lastRateLimit: RateLimitInfo | null = null;
-    const agora = new Date().toISOString();
 
     // Pagina pelos resultados
     while (true) {
       if (lastRateLimit) await waitForRateLimit(lastRateLimit);
 
       const { data: listagem, rateLimit } = await listarPedidos({
-        dataAtualizacao: ultimaVerificacao,
+        dataAtualizacao: hoje,
         orderBy: 'asc',
         limit: 100,
         offset,
@@ -174,7 +159,7 @@ export async function executarPolling(): Promise<PollingResult> {
 
     await updatePollingState({
       status: 'idle',
-      ultima_verificacao: agora,
+      ultima_verificacao: hoje,
       pedidos_processados: pedidosProcessados,
       erro_mensagem: null,
     });

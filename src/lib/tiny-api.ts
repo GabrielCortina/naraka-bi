@@ -3,11 +3,9 @@ import type { TinyPedidoListResponse, TinyPedidoFull } from '@/types/tiny';
 
 const BASE_URL = 'https://api.tiny.com.br/public-api/v3';
 
-// Converte para formato ISO sem timezone e sem milissegundos: yyyy-MM-ddTHH:mm:ss
-// A API Tiny v3 retorna datas nesse formato, então provavelmente aceita como input
-function toTinyDateTime(dateStr: string): string {
-  const d = new Date(dateStr);
-  return d.toISOString().replace(/\.\d{3}Z$/, '');
+// Converte para formato aceito pela Tiny v3: yyyy-MM-dd (só data, sem hora)
+function toTinyDate(dateStr: string): string {
+  return new Date(dateStr).toISOString().split('T')[0];
 }
 
 interface RateLimitInfo {
@@ -41,20 +39,14 @@ async function tinyFetch<T>(
 ): Promise<{ data: T; rateLimit: RateLimitInfo }> {
   const token = await getValidAccessToken();
 
-  // Monta a query string manualmente para evitar encode excessivo
-  // URLSearchParams codifica "/" e ":" que a Tiny não aceita encodados
-  let fullUrl = `${BASE_URL}${path}`;
+  const url = new URL(`${BASE_URL}${path}`);
   if (params) {
-    const qs = Object.entries(params)
-      .filter(([, v]) => v)
-      .map(([k, v]) => `${k}=${v.replace(/ /g, '+')}`)
-      .join('&');
-    if (qs) fullUrl += `?${qs}`;
+    Object.entries(params).forEach(([k, v]) => {
+      if (v) url.searchParams.set(k, v);
+    });
   }
 
-  console.log(`[tiny-api] GET ${fullUrl}`);
-
-  const response = await fetch(fullUrl, {
+  const response = await fetch(url.toString(), {
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
@@ -82,7 +74,7 @@ export async function listarPedidos(params: {
 }): Promise<{ data: TinyPedidoListResponse; rateLimit: RateLimitInfo }> {
   const queryParams: Record<string, string> = {};
 
-  if (params.dataAtualizacao) queryParams.dataAtualizacao = toTinyDateTime(params.dataAtualizacao);
+  if (params.dataAtualizacao) queryParams.dataAtualizacao = toTinyDate(params.dataAtualizacao);
   if (params.situacao !== undefined) queryParams.situacao = String(params.situacao);
   if (params.orderBy) queryParams.orderBy = params.orderBy;
   if (params.limit) queryParams.limit = String(params.limit);
