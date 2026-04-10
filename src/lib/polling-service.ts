@@ -121,7 +121,9 @@ export async function executarPolling(): Promise<PollingResult> {
     await updatePollingState({ status: 'running' });
 
     const state = await getPollingState();
-    const ultimaVerificacao = state?.ultima_verificacao || '2024-01-01T00:00:00';
+    // Fallback: últimos 7 dias se nunca fez polling
+    const fallback = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const ultimaVerificacao = state?.ultima_verificacao || fallback;
 
     console.log(`[polling] Iniciando busca desde ${ultimaVerificacao}`);
 

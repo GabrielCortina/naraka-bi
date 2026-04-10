@@ -47,7 +47,7 @@ async function tinyFetch<T>(
   if (params) {
     const qs = Object.entries(params)
       .filter(([, v]) => v)
-      .map(([k, v]) => `${k}=${v.replace(/ /g, '%20')}`)
+      .map(([k, v]) => `${k}=${v.replace(/ /g, '+')}`)
       .join('&');
     if (qs) fullUrl += `?${qs}`;
   }
