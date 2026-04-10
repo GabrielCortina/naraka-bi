@@ -3,11 +3,11 @@ import type { TinyPedidoListResponse, TinyPedidoFull } from '@/types/tiny';
 
 const BASE_URL = 'https://api.tiny.com.br/public-api/v3';
 
-// Converte Date/ISO string para formato da Tiny: dd/MM/yyyy HH:mm:ss
+// Converte para formato ISO sem timezone e sem milissegundos: yyyy-MM-ddTHH:mm:ss
+// A API Tiny v3 retorna datas nesse formato, então provavelmente aceita como input
 function toTinyDateTime(dateStr: string): string {
   const d = new Date(dateStr);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return d.toISOString().replace(/\.\d{3}Z$/, '');
 }
 
 interface RateLimitInfo {
