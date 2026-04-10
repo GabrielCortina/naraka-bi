@@ -3,6 +3,13 @@ import type { TinyPedidoListResponse, TinyPedidoFull } from '@/types/tiny';
 
 const BASE_URL = 'https://api.tiny.com.br/public-api/v3';
 
+// Converte Date/ISO string para formato da Tiny: dd/MM/yyyy HH:mm:ss
+function toTinyDateTime(dateStr: string): string {
+  const d = new Date(dateStr);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 interface RateLimitInfo {
   limit: number;
   remaining: number;
@@ -69,7 +76,7 @@ export async function listarPedidos(params: {
 }): Promise<{ data: TinyPedidoListResponse; rateLimit: RateLimitInfo }> {
   const queryParams: Record<string, string> = {};
 
-  if (params.dataAtualizacao) queryParams.dataAtualizacao = params.dataAtualizacao;
+  if (params.dataAtualizacao) queryParams.dataAtualizacao = toTinyDateTime(params.dataAtualizacao);
   if (params.situacao !== undefined) queryParams.situacao = String(params.situacao);
   if (params.orderBy) queryParams.orderBy = params.orderBy;
   if (params.limit) queryParams.limit = String(params.limit);
