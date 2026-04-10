@@ -3,7 +3,8 @@ import { executarPolling } from '@/lib/polling-service';
 
 // GET /api/polling
 // Executa um ciclo de polling de pedidos da Tiny
-// Chamado pelo Vercel Cron Jobs (GET) — protegido por CRON_SECRET
+// Chamado pelo Vercel Cron Jobs (GET)
+// Se CRON_SECRET estiver definido, exige Authorization header — senão, permite livre (dev)
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;
