@@ -6,16 +6,31 @@ import { createServiceClient } from '@/lib/supabase-server';
 // Retorna status da conexão Tiny e dados do polling
 export async function GET() {
   try {
-    const [tinyStatus, pollingData, pedidosCount] = await Promise.all([
+    const [tinyStatus, pollingData, pedidosInfo] = await Promise.all([
       isTinyConnected(),
       getPollingState(),
-      getTotalPedidos(),
+      getPedidosInfo(),
     ]);
+
+    // Se status "running" há mais de 10 min, considera como finalizado
+    if (pollingData?.status === 'running') {
+      const updatedAt = new Date(pollingData.updated_at).getTime();
+      const dezMinAtras = Date.now() - 10 * 60 * 1000;
+      if (updatedAt < dezMinAtras) {
+        pollingData.status = 'idle';
+        // Atualiza no banco para destravar
+        const supabase = createServiceClient();
+        await supabase.from('polling_state').update({
+          status: 'idle',
+          updated_at: new Date().toISOString(),
+        }).eq('id', 1);
+      }
+    }
 
     return NextResponse.json({
       tiny: tinyStatus,
       polling: pollingData,
-      pedidos: { total: pedidosCount },
+      pedidos: pedidosInfo,
     });
   } catch (err) {
     console.error('[api/status] Erro:', err);
@@ -37,11 +52,17 @@ async function getPollingState() {
   return data;
 }
 
-async function getTotalPedidos() {
+async function getPedidosInfo() {
   const supabase = createServiceClient();
-  const { count } = await supabase
-    .from('pedidos')
-    .select('*', { count: 'exact', head: true });
 
-  return count || 0;
+  // Total de pedidos e última sincronização real (MAX de last_sync_at)
+  const [countResult, syncResult] = await Promise.all([
+    supabase.from('pedidos').select('*', { count: 'exact', head: true }),
+    supabase.from('pedidos').select('last_sync_at').order('last_sync_at', { ascending: false }).limit(1).single(),
+  ]);
+
+  return {
+    total: countResult.count || 0,
+    ultimaSincronizacao: syncResult.data?.last_sync_at || null,
+  };
 }

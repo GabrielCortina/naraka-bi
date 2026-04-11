@@ -11,7 +11,7 @@ interface AppStatus {
     status: string;
     erro_mensagem: string | null;
   } | null;
-  pedidos: { total: number };
+  pedidos: { total: number; ultimaSincronizacao: string | null };
 }
 
 export default function Home() {
@@ -105,8 +105,8 @@ export default function Home() {
             <StatusCard
               title="Última Sincronização"
               value={
-                status.polling
-                  ? formatDate(status.polling.ultima_verificacao)
+                status.pedidos.ultimaSincronizacao
+                  ? formatDate(status.pedidos.ultimaSincronizacao)
                   : 'Nunca'
               }
               valueColor={
