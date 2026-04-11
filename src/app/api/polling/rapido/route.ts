@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { pollingRapido } from '@/lib/polling-service';
 
 // GET /api/polling/rapido — Camada 1: a cada 5 min
-// Busca pedidos atualizados hoje e ontem
+// Cursor-based: busca pedidos de hoje com id > último cursor
+// Máximo 200 pedidos por execução
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;

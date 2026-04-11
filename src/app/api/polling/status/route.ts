@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { pollingStatus } from '@/lib/polling-service';
 
 // GET /api/polling/status — Camada 2: a cada 10 min
-// Atualiza pedidos "vivos" (situação não final) direto na Tiny
+// Atualiza pedidos "vivos" (situacao_final=false, last_sync_at > 10 min)
+// Máximo 50 pedidos por execução
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;

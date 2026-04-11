@@ -19,13 +19,27 @@ function emptyToNull<T>(value: T): T | null {
   return value;
 }
 
-// Atualiza o estado do polling
-async function updatePollingState(updates: {
-  ultima_verificacao?: string;
-  pedidos_processados?: number;
-  status: 'idle' | 'running' | 'error';
-  erro_mensagem?: string | null;
-}) {
+// Retorna data no formato yyyy-MM-dd, N dias atrás
+function dataDiasAtras(dias: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - dias);
+  return d.toISOString().split('T')[0];
+}
+
+// ============================================================
+// POLLING STATE: leitura e atualização
+// ============================================================
+async function getPollingState() {
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from('polling_state')
+    .select('*')
+    .eq('id', 1)
+    .single();
+  return data;
+}
+
+async function updatePollingState(updates: Record<string, unknown>) {
   const supabase = createServiceClient();
   await supabase.from('polling_state').upsert({
     id: 1,
@@ -36,7 +50,7 @@ async function updatePollingState(updates: {
 
 // ============================================================
 // CORE: Salva/atualiza um pedido completo no banco
-// Reutilizado por todas as 3 camadas
+// Reutilizado por todas as camadas
 // ============================================================
 export async function upsertPedido(pedido: TinyPedidoFull) {
   const supabase = createServiceClient();
@@ -113,7 +127,7 @@ export async function upsertPedido(pedido: TinyPedidoFull) {
 
 // ============================================================
 // Busca pedidos por data na Tiny, obtém detalhes e faz upsert
-// Reutilizado por Camada 1 (rápido) e Camada 3 (reconciliação)
+// Sem limite de quantidade — usado pela reconciliação
 // ============================================================
 async function buscarEProcessarPorData(
   data: string,
@@ -158,39 +172,95 @@ async function buscarEProcessarPorData(
   return processados;
 }
 
-// Retorna data no formato yyyy-MM-dd, N dias atrás
-function dataDiasAtras(dias: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - dias);
-  return d.toISOString().split('T')[0];
-}
-
 // ============================================================
 // CAMADA 1: Polling Rápido (a cada 5 min)
-// Busca pedidos atualizados hoje e ontem
+// Cursor-based: busca só pedidos com id > cursor_id no dia de hoje
+// Máximo 200 pedidos por execução
 // ============================================================
 export async function pollingRapido(): Promise<PollingResult> {
   let pedidosProcessados = 0;
+  const MAX_POR_EXECUCAO = 200;
 
   try {
     await updatePollingState({ status: 'running' });
 
+    const state = await getPollingState();
     const hoje = dataDiasAtras(0);
-    const ontem = dataDiasAtras(1);
 
-    console.log(`[rapido] Buscando pedidos atualizados em ${ontem} e ${hoje}`);
+    // Reseta cursor se mudou de dia
+    let cursorId: number = state?.cursor_id ?? 0;
+    const cursorData = state?.cursor_data;
+    if (!cursorData || cursorData !== hoje) {
+      console.log(`[rapido] Novo dia detectado (${cursorData} -> ${hoje}), resetando cursor`);
+      cursorId = 0;
+    }
 
-    pedidosProcessados += await buscarEProcessarPorData(ontem, 'rapido');
-    pedidosProcessados += await buscarEProcessarPorData(hoje, 'rapido');
+    console.log(`[rapido] Buscando pedidos de ${hoje} com id > ${cursorId} (max ${MAX_POR_EXECUCAO})`);
 
+    let offset = 0;
+    let lastRateLimit: RateLimitInfo | null = null;
+    let maiorIdProcessado = cursorId;
+
+    while (pedidosProcessados < MAX_POR_EXECUCAO) {
+      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+      const { data: listagem, rateLimit } = await listarPedidos({
+        dataAtualizacao: hoje,
+        orderBy: 'asc',
+        limit: 100,
+        offset,
+      });
+
+      lastRateLimit = rateLimit;
+
+      if (listagem.itens.length === 0) break;
+
+      // Filtra apenas pedidos com id > cursor
+      const novos = listagem.itens.filter(p => p.id > cursorId);
+
+      if (novos.length === 0) {
+        // Todos os pedidos desta página já foram processados, avança
+        if (offset + 100 < listagem.paginacao.total) {
+          offset += 100;
+          continue;
+        }
+        break;
+      }
+
+      for (const pedidoResumido of novos) {
+        if (pedidosProcessados >= MAX_POR_EXECUCAO) break;
+        if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+        try {
+          const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
+          lastRateLimit = rl;
+          await upsertPedido(pedidoCompleto);
+          pedidosProcessados++;
+
+          if (pedidoResumido.id > maiorIdProcessado) {
+            maiorIdProcessado = pedidoResumido.id;
+          }
+        } catch (err) {
+          console.error(`[rapido] Erro pedido ${pedidoResumido.id}:`, err);
+        }
+      }
+
+      // Se já processou todos ou atingiu o limite, para
+      if (offset + 100 >= listagem.paginacao.total) break;
+      offset += 100;
+    }
+
+    // Salva o cursor atualizado
     await updatePollingState({
       status: 'idle',
       ultima_verificacao: new Date().toISOString(),
       pedidos_processados: pedidosProcessados,
       erro_mensagem: null,
+      cursor_id: maiorIdProcessado,
+      cursor_data: hoje,
     });
 
-    console.log(`[rapido] Concluído: ${pedidosProcessados} pedidos`);
+    console.log(`[rapido] Concluído: ${pedidosProcessados} pedidos, cursor=${maiorIdProcessado}`);
     return { success: true, pedidosProcessados, camada: 'rapido' };
 
   } catch (err) {
@@ -203,25 +273,30 @@ export async function pollingRapido(): Promise<PollingResult> {
 
 // ============================================================
 // CAMADA 2: Atualização de Status (a cada 10 min)
-// Busca pedidos "vivos" no banco e atualiza direto na Tiny
+// Busca pedidos "vivos" que não foram sincronizados nos últimos 10 min
+// Máximo 50 pedidos por execução
 // ============================================================
 export async function pollingStatus(): Promise<PollingResult> {
   let pedidosProcessados = 0;
+  const MAX_POR_EXECUCAO = 50;
 
   try {
     const supabase = createServiceClient();
 
-    // Busca pedidos com situação não final
+    // Só processa pedidos com situacao_final=false E last_sync_at > 10 min atrás
+    const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
     const { data: pedidosVivos, error } = await supabase
       .from('pedidos')
       .select('id, numero_pedido')
       .eq('situacao_final', false)
-      .order('updated_at', { ascending: true })
-      .limit(200); // Limita para respeitar rate limit
+      .lt('last_sync_at', dezMinAtras)
+      .order('last_sync_at', { ascending: true })
+      .limit(MAX_POR_EXECUCAO);
 
     if (error) throw error;
     if (!pedidosVivos || pedidosVivos.length === 0) {
-      console.log('[status] Nenhum pedido vivo para atualizar');
+      console.log('[status] Nenhum pedido vivo pendente de atualização');
       return { success: true, pedidosProcessados: 0, camada: 'status' };
     }
 
@@ -254,7 +329,7 @@ export async function pollingStatus(): Promise<PollingResult> {
 
 // ============================================================
 // CAMADA 3: Reconciliação (1x por dia às 3h)
-// Busca pedidos dos últimos 3 dias para garantir consistência
+// Busca pedidos dos últimos 3 dias sem limite de quantidade
 // ============================================================
 export async function pollingReconciliacao(): Promise<PollingResult> {
   let pedidosProcessados = 0;
