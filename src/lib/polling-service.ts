@@ -3,10 +3,20 @@ import { listarPedidos, obterPedido, waitForRateLimit } from './tiny-api';
 import type { TinyPedidoFull } from '@/types/tiny';
 import type { RateLimitInfo } from './tiny-api';
 
-interface PollingResult {
+// Situações finais — pedidos que não mudam mais de status
+const SITUACOES_FINAIS = [1, 2, 5, 6, 9]; // Faturada, Cancelada, Enviada, Entregue, Não Entregue
+
+export interface PollingResult {
   success: boolean;
   pedidosProcessados: number;
+  camada: string;
   erro?: string;
+}
+
+// Converte strings vazias para null (a Tiny retorna "" em campos opcionais)
+function emptyToNull<T>(value: T): T | null {
+  if (value === '' || value === undefined || value === null) return null;
+  return value;
 }
 
 // Atualiza o estado do polling
@@ -24,17 +34,15 @@ async function updatePollingState(updates: {
   });
 }
 
-// Converte strings vazias para null (a Tiny retorna "" em campos opcionais)
-function emptyToNull<T>(value: T): T | null {
-  if (value === '' || value === undefined || value === null) return null;
-  return value;
-}
-
-// Salva ou atualiza um pedido completo no banco
-async function upsertPedido(pedido: TinyPedidoFull) {
+// ============================================================
+// CORE: Salva/atualiza um pedido completo no banco
+// Reutilizado por todas as 3 camadas
+// ============================================================
+export async function upsertPedido(pedido: TinyPedidoFull) {
   const supabase = createServiceClient();
+  const agora = new Date().toISOString();
+  const situacaoFinal = SITUACOES_FINAIS.includes(pedido.situacao);
 
-  // Upsert do pedido principal
   const { error: pedidoError } = await supabase.from('pedidos').upsert({
     id: pedido.id,
     numero_pedido: pedido.numeroPedido,
@@ -46,6 +54,7 @@ async function upsertPedido(pedido: TinyPedidoFull) {
     valor_frete: pedido.valorFrete ?? 0,
     valor_outras_despesas: pedido.valorOutrasDespesas ?? 0,
     situacao: pedido.situacao ?? 0,
+    situacao_final: situacaoFinal,
     data_pedido: emptyToNull(pedido.data) || new Date().toISOString().split('T')[0],
     data_entrega: emptyToNull(pedido.dataEntrega),
     data_prevista: emptyToNull(pedido.dataPrevista),
@@ -54,29 +63,24 @@ async function upsertPedido(pedido: TinyPedidoFull) {
     observacoes_internas: emptyToNull(pedido.observacoesInternas),
     numero_ordem_compra: emptyToNull(pedido.numeroOrdemCompra),
     origem_pedido: pedido.origemPedido ?? 0,
-    // Cliente
     cliente_id: pedido.cliente?.id ?? null,
     cliente_nome: emptyToNull(pedido.cliente?.nome),
     cliente_cpf_cnpj: emptyToNull(pedido.cliente?.cpfCnpj),
     cliente_email: emptyToNull(pedido.cliente?.email),
-    // E-commerce
     ecommerce_id: pedido.ecommerce?.id ?? null,
     ecommerce_nome: emptyToNull(pedido.ecommerce?.nome),
     numero_pedido_ecommerce: emptyToNull(pedido.ecommerce?.numeroPedidoEcommerce),
     canal_venda: emptyToNull(pedido.ecommerce?.canalVenda),
-    // Transportador
     transportador_id: pedido.transportador?.id ?? null,
     transportador_nome: emptyToNull(pedido.transportador?.nome),
     codigo_rastreamento: emptyToNull(pedido.transportador?.codigoRastreamento),
-    // Vendedor
     vendedor_id: pedido.vendedor?.id ?? null,
     vendedor_nome: emptyToNull(pedido.vendedor?.nome),
-    // Pagamento
     forma_pagamento: emptyToNull(pedido.pagamento?.formaRecebimento),
     meio_pagamento: emptyToNull(pedido.pagamento?.meioPagamento),
-    // JSON completo para consultas avançadas
     raw_data: pedido as unknown as Record<string, unknown>,
-    updated_at: new Date().toISOString(),
+    last_sync_at: agora,
+    updated_at: agora,
   });
 
   if (pedidoError) {
@@ -84,7 +88,7 @@ async function upsertPedido(pedido: TinyPedidoFull) {
     throw pedidoError;
   }
 
-  // Deleta itens antigos e insere os novos (replace completo)
+  // Replace completo dos itens
   if (pedido.itens && pedido.itens.length > 0) {
     await supabase.from('pedido_itens').delete().eq('pedido_id', pedido.id);
 
@@ -107,82 +111,177 @@ async function upsertPedido(pedido: TinyPedidoFull) {
   }
 }
 
-// Executa um ciclo de polling completo
-export async function executarPolling(): Promise<PollingResult> {
+// ============================================================
+// Busca pedidos por data na Tiny, obtém detalhes e faz upsert
+// Reutilizado por Camada 1 (rápido) e Camada 3 (reconciliação)
+// ============================================================
+async function buscarEProcessarPorData(
+  data: string,
+  label: string
+): Promise<number> {
+  let offset = 0;
+  let processados = 0;
+  let lastRateLimit: RateLimitInfo | null = null;
+
+  while (true) {
+    if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+    const { data: listagem, rateLimit } = await listarPedidos({
+      dataAtualizacao: data,
+      orderBy: 'asc',
+      limit: 100,
+      offset,
+    });
+
+    lastRateLimit = rateLimit;
+    console.log(`[${label}] data=${data} offset=${offset}: ${listagem.itens.length} pedidos (total: ${listagem.paginacao.total})`);
+
+    if (listagem.itens.length === 0) break;
+
+    for (const pedidoResumido of listagem.itens) {
+      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+      try {
+        const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
+        lastRateLimit = rl;
+        await upsertPedido(pedidoCompleto);
+        processados++;
+      } catch (err) {
+        console.error(`[${label}] Erro pedido ${pedidoResumido.id}:`, err);
+      }
+    }
+
+    if (processados >= listagem.paginacao.total) break;
+    offset += 100;
+  }
+
+  return processados;
+}
+
+// Retorna data no formato yyyy-MM-dd, N dias atrás
+function dataDiasAtras(dias: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - dias);
+  return d.toISOString().split('T')[0];
+}
+
+// ============================================================
+// CAMADA 1: Polling Rápido (a cada 5 min)
+// Busca pedidos atualizados hoje e ontem
+// ============================================================
+export async function pollingRapido(): Promise<PollingResult> {
   let pedidosProcessados = 0;
 
   try {
     await updatePollingState({ status: 'running' });
 
-    // Sempre busca pedidos atualizados no dia de hoje
-    const hoje = new Date().toISOString();
+    const hoje = dataDiasAtras(0);
+    const ontem = dataDiasAtras(1);
 
-    console.log(`[polling] Buscando pedidos atualizados em ${hoje.split('T')[0]}`);
+    console.log(`[rapido] Buscando pedidos atualizados em ${ontem} e ${hoje}`);
 
-    let offset = 0;
-    let totalProcessado = 0;
-    let lastRateLimit: RateLimitInfo | null = null;
-
-    // Pagina pelos resultados
-    while (true) {
-      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
-
-      const { data: listagem, rateLimit } = await listarPedidos({
-        dataAtualizacao: hoje,
-        orderBy: 'asc',
-        limit: 100,
-        offset,
-      });
-
-      lastRateLimit = rateLimit;
-      console.log(`[polling] Página offset=${offset}: ${listagem.itens.length} pedidos (total: ${listagem.paginacao.total})`);
-
-      if (listagem.itens.length === 0) break;
-
-      // Para cada pedido, busca detalhes completos
-      for (const pedidoResumido of listagem.itens) {
-        if (lastRateLimit) await waitForRateLimit(lastRateLimit);
-
-        try {
-          const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
-          lastRateLimit = rl;
-
-          await upsertPedido(pedidoCompleto);
-          pedidosProcessados++;
-          totalProcessado++;
-
-          console.log(`[polling] Pedido ${pedidoCompleto.numeroPedido} (${pedidoResumido.id}) salvo`);
-        } catch (err) {
-          console.error(`[polling] Erro ao processar pedido ${pedidoResumido.id}:`, err);
-          // Continua com o próximo pedido
-        }
-      }
-
-      // Se já processou tudo, para
-      if (totalProcessado >= listagem.paginacao.total) break;
-      offset += 100;
-    }
+    pedidosProcessados += await buscarEProcessarPorData(ontem, 'rapido');
+    pedidosProcessados += await buscarEProcessarPorData(hoje, 'rapido');
 
     await updatePollingState({
       status: 'idle',
-      ultima_verificacao: hoje,
+      ultima_verificacao: new Date().toISOString(),
       pedidos_processados: pedidosProcessados,
       erro_mensagem: null,
     });
 
-    console.log(`[polling] Concluído: ${pedidosProcessados} pedidos processados`);
-    return { success: true, pedidosProcessados };
+    console.log(`[rapido] Concluído: ${pedidosProcessados} pedidos`);
+    return { success: true, pedidosProcessados, camada: 'rapido' };
 
   } catch (err) {
     const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
-    console.error('[polling] Erro fatal:', mensagem);
-
-    await updatePollingState({
-      status: 'error',
-      pedidos_processados: pedidosProcessados,
-      erro_mensagem: mensagem,
-    });
-
-    return { success: false, pedidosProcessados, erro: mensagem };
+    console.error('[rapido] Erro fatal:', mensagem);
+    await updatePollingState({ status: 'error', pedidos_processados: pedidosProcessados, erro_mensagem: mensagem });
+    return { success: false, pedidosProcessados, camada: 'rapido', erro: mensagem };
   }
+}
+
+// ============================================================
+// CAMADA 2: Atualização de Status (a cada 10 min)
+// Busca pedidos "vivos" no banco e atualiza direto na Tiny
+// ============================================================
+export async function pollingStatus(): Promise<PollingResult> {
+  let pedidosProcessados = 0;
+
+  try {
+    const supabase = createServiceClient();
+
+    // Busca pedidos com situação não final
+    const { data: pedidosVivos, error } = await supabase
+      .from('pedidos')
+      .select('id, numero_pedido')
+      .eq('situacao_final', false)
+      .order('updated_at', { ascending: true })
+      .limit(200); // Limita para respeitar rate limit
+
+    if (error) throw error;
+    if (!pedidosVivos || pedidosVivos.length === 0) {
+      console.log('[status] Nenhum pedido vivo para atualizar');
+      return { success: true, pedidosProcessados: 0, camada: 'status' };
+    }
+
+    console.log(`[status] ${pedidosVivos.length} pedidos vivos para atualizar`);
+
+    let lastRateLimit: RateLimitInfo | null = null;
+
+    for (const pedido of pedidosVivos) {
+      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+      try {
+        const { data: pedidoCompleto, rateLimit } = await obterPedido(pedido.id);
+        lastRateLimit = rateLimit;
+        await upsertPedido(pedidoCompleto);
+        pedidosProcessados++;
+      } catch (err) {
+        console.error(`[status] Erro pedido ${pedido.id} (${pedido.numero_pedido}):`, err);
+      }
+    }
+
+    console.log(`[status] Concluído: ${pedidosProcessados}/${pedidosVivos.length} atualizados`);
+    return { success: true, pedidosProcessados, camada: 'status' };
+
+  } catch (err) {
+    const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
+    console.error('[status] Erro fatal:', mensagem);
+    return { success: false, pedidosProcessados, camada: 'status', erro: mensagem };
+  }
+}
+
+// ============================================================
+// CAMADA 3: Reconciliação (1x por dia às 3h)
+// Busca pedidos dos últimos 3 dias para garantir consistência
+// ============================================================
+export async function pollingReconciliacao(): Promise<PollingResult> {
+  let pedidosProcessados = 0;
+
+  try {
+    console.log('[reconciliacao] Iniciando reconciliação dos últimos 3 dias');
+
+    for (let i = 2; i >= 0; i--) {
+      const data = dataDiasAtras(i);
+      const processados = await buscarEProcessarPorData(data, 'reconciliacao');
+      pedidosProcessados += processados;
+      console.log(`[reconciliacao] ${data}: ${processados} pedidos`);
+    }
+
+    console.log(`[reconciliacao] Concluído: ${pedidosProcessados} pedidos total`);
+    return { success: true, pedidosProcessados, camada: 'reconciliacao' };
+
+  } catch (err) {
+    const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
+    console.error('[reconciliacao] Erro fatal:', mensagem);
+    return { success: false, pedidosProcessados, camada: 'reconciliacao', erro: mensagem };
+  }
+}
+
+// ============================================================
+// LEGACY: Mantém executarPolling para compatibilidade com /api/polling
+// ============================================================
+export async function executarPolling(): Promise<PollingResult> {
+  return pollingRapido();
 }
