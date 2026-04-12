@@ -3,8 +3,8 @@ import { listarPedidos, obterPedido, waitForRateLimit } from './tiny-api';
 import type { TinyPedidoFull } from '@/types/tiny';
 import type { RateLimitInfo } from './tiny-api';
 
-// Situações finais — pedidos que não mudam mais de status
-const SITUACOES_FINAIS = [1, 2, 5, 6, 9]; // Faturada, Cancelada, Enviada, Entregue, Não Entregue
+// Situações realmente finais — pedido não muda mais
+const SITUACOES_FINAIS = [2, 6, 9]; // Cancelado, Devolvido, Entregue
 
 export interface PollingResult {
   success: boolean;
@@ -281,7 +281,7 @@ export async function pollingStatus(): Promise<PollingResult> {
   let pedidosProcessados = 0;
   const MAX_POR_EXECUCAO = 100;
   // Situações monitoradas pelo polling (pré-envio)
-  const SITUACOES_MONITORADAS = [0, 1, 3, 4]; // Aberto, Aprovado, Preparando, Faturado
+  const SITUACOES_MONITORADAS = [0, 1, 3, 4, 8]; // Aberto, Aprovado, Preparando, Faturado, Dados Incompletos
 
   try {
     const supabase = createServiceClient();

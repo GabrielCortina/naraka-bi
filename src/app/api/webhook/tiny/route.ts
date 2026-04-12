@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 
-const SITUACOES_FINAIS = [1, 2, 5, 6, 9];
+const SITUACOES_FINAIS = [2, 6, 9]; // Cancelado, Devolvido, Entregue
 
 // POST /api/webhook/tiny
 // Recebe notificações de mudança de status da Tiny em tempo real.
