@@ -8,19 +8,49 @@ interface Props {
   loading: boolean;
 }
 
-function Linha({ item }: { item: ComparativoPeriodo }) {
-  const positivo = item.variacao >= 0;
+function formatBadge(variacao: number, temDados: boolean) {
+  if (!temDados) {
+    return (
+      <span className="text-[9px] font-medium py-px px-1.5 rounded"
+        style={{ background: 'var(--bg3, rgba(128,128,128,0.1))', color: 'var(--txt3, #9ca3af)' }}>
+        —
+      </span>
+    );
+  }
+
+  const capped = Math.min(Math.abs(variacao), 999);
+  const positivo = variacao >= 0;
+  const texto = capped >= 999 ? '+999%' : `${positivo ? '▲' : '▼'} ${capped.toFixed(1)}%`;
+
   return (
-    <div className="flex items-start justify-between py-2 min-h-[40px]">
-      <div className="flex flex-col justify-center">
-        <p className="text-xs font-medium leading-tight">{item.nome}</p>
-        <p className="text-[10px] opacity-40 leading-tight mt-0.5">{item.dateRange}</p>
+    <span className="text-[9px] font-medium py-px px-1.5 rounded"
+      style={positivo
+        ? { background: '#EAF3DE', color: '#3B6D11' }
+        : { background: '#FCEBEB', color: '#A32D2D' }
+      }>
+      {texto}
+    </span>
+  );
+}
+
+function Linha({ item, isLast }: { item: ComparativoPeriodo; isLast: boolean }) {
+  const temDados = item.valorComparado > 0;
+
+  return (
+    <div
+      className="flex items-start justify-between"
+      style={{
+        padding: '10px 0',
+        borderBottom: isLast ? 'none' : '.5px solid var(--bord, rgba(128,128,128,0.15))',
+      }}
+    >
+      <div className="flex flex-col" style={{ gap: 3 }}>
+        <p className="text-[11px]" style={{ color: 'var(--txt2, #9ca3af)' }}>{item.nome}</p>
+        <p className="text-[9px]" style={{ color: 'var(--txt3, #6b7280)' }}>{item.dateRange}</p>
       </div>
-      <div className="flex flex-col items-end justify-center">
-        <p className="text-xs font-medium leading-tight">{formatBRL(item.valor)}</p>
-        <p className={`text-[10px] font-medium leading-tight mt-0.5 ${positivo ? 'text-[#1D9E75]' : 'text-[#E24B4A]'}`}>
-          {positivo ? '▲' : '▼'} {Math.abs(item.variacao).toFixed(1)}%
-        </p>
+      <div className="flex flex-col items-end shrink-0" style={{ gap: 3 }}>
+        <p className="text-xs font-medium">{formatBRL(item.valor)}</p>
+        {formatBadge(item.variacao, temDados)}
       </div>
     </div>
   );
@@ -31,20 +61,13 @@ export function ComparativoPeriodos({ data, loading }: Props) {
     return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[160px] bg-current/5 rounded" /></div>;
   }
 
-  // Dividir em: semanas, meses, quinzena
-  const semanas = data.filter(d => d.nome.includes('Semana'));
-  const meses = data.filter(d => d.nome.includes('Mês'));
-  const quinzenas = data.filter(d => d.nome.includes('Quinzena'));
-
   return (
     <div className="card p-4 rounded-lg">
       <h3 className="text-xs font-medium mb-3 opacity-70">Comparativo período a período</h3>
-      <div className="divide-y divide-current/5">
-        {semanas.map(item => <Linha key={item.nome} item={item} />)}
-        {meses.length > 0 && <div className="pt-1" />}
-        {meses.map(item => <Linha key={item.nome} item={item} />)}
-        {quinzenas.length > 0 && <div className="pt-1" />}
-        {quinzenas.map(item => <Linha key={item.nome} item={item} />)}
+      <div>
+        {data.map((item, i) => (
+          <Linha key={item.nome} item={item} isLast={i === data.length - 1} />
+        ))}
       </div>
     </div>
   );

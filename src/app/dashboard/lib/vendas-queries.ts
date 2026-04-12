@@ -362,6 +362,7 @@ export async function getVendasPorMarketplace(
 
 // ============================================================
 // HEATMAP DE HORÁRIOS
+// Converte last_sync_at de UTC para America/Sao_Paulo (UTC-3)
 // ============================================================
 export async function getHeatmapHorarios(
   startDate: string, endDate: string, loja?: string
@@ -380,8 +381,10 @@ export async function getHeatmapHorarios(
   const mapa = new Map<string, number>();
   for (const p of pedidos) {
     if (!p.last_sync_at) continue;
-    const d = new Date(p.last_sync_at);
-    const key = `${d.getDay()}-${d.getHours()}`;
+    // Converter UTC para America/Sao_Paulo (UTC-3)
+    const utc = new Date(p.last_sync_at);
+    const sp = new Date(utc.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    const key = `${sp.getDay()}-${sp.getHours()}`;
     mapa.set(key, (mapa.get(key) || 0) + 1);
   }
 
@@ -393,6 +396,8 @@ export async function getHeatmapHorarios(
 
 // ============================================================
 // COMPARATIVO PERÍODO A PERÍODO (independente do filtro)
+// 3 linhas: Semana atual, Mês atual, Quinzena atual
+// Comparação: mesmo número de dias do período anterior
 // ============================================================
 export async function getComparativoPeriodos(): Promise<ComparativoPeriodo[]> {
   const now = new Date();
@@ -401,40 +406,42 @@ export async function getComparativoPeriodos(): Promise<ComparativoPeriodo[]> {
   const d = now.getDate();
   const dow = now.getDay(); // 0=Dom
 
-  // Helpers
   const fmt = (dt: Date) => dt.toISOString().split('T')[0];
   const fmtRange = (s: string, e: string) => {
     const sd = new Date(s + 'T12:00:00');
     const ed = new Date(e + 'T12:00:00');
-    return `${String(sd.getDate()).padStart(2, '0')}/${String(sd.getMonth() + 1).padStart(2, '0')} - ${String(ed.getDate()).padStart(2, '0')}/${String(ed.getMonth() + 1).padStart(2, '0')}`;
+    return `${String(sd.getDate()).padStart(2, '0')}/${String(sd.getMonth() + 1).padStart(2, '0')} – ${String(ed.getDate()).padStart(2, '0')}/${String(ed.getMonth() + 1).padStart(2, '0')}`;
   };
 
-  // Semana atual (seg-dom)
+  // SEMANA ATUAL: seg até hoje
   const inicioSemana = new Date(y, m, d - (dow === 0 ? 6 : dow - 1));
-  const fimSemana = new Date(inicioSemana.getTime() + 6 * 86400000);
+  const fimSemana = now;
+  // Período anterior: mesmo dia da semana passada (seg até mesmo dow)
   const inicioSemAnt = new Date(inicioSemana.getTime() - 7 * 86400000);
-  const fimSemAnt = new Date(inicioSemana.getTime() - 86400000);
-  const inicioSem2 = new Date(inicioSemAnt.getTime() - 7 * 86400000);
-  const fimSem2 = new Date(inicioSemAnt.getTime() - 86400000);
+  const fimSemAnt = new Date(fimSemana.getTime() - 7 * 86400000);
 
-  // Mês atual e anteriores
-  const inicioMesAtual = fmt(new Date(y, m, 1));
-  const fimMesAtual = fmt(now);
-  const inicioMesAnt = fmt(new Date(y, m - 1, 1));
-  const fimMesAnt = fmt(new Date(y, m, 0));
-  const inicioMes2 = fmt(new Date(y, m - 2, 1));
-  const fimMes2 = fmt(new Date(y, m - 1, 0));
+  // MÊS ATUAL: dia 1 até hoje
+  const inicioMes = new Date(y, m, 1);
+  // Mês anterior mesmo dia: dia 1 até dia d do mês anterior
+  const inicioMesAnt = new Date(y, m - 1, 1);
+  const fimMesAnt = new Date(y, m - 1, d);
 
-  // Quinzena atual
+  // QUINZENA ATUAL
   const diaQuinzena = d <= 15 ? 1 : 16;
-  const inicioQuinz = fmt(new Date(y, m, diaQuinzena));
-  const fimQuinz = fmt(now);
-  const inicioQuinzAnt = d <= 15
-    ? fmt(new Date(y, m - 1, 16))
-    : fmt(new Date(y, m, 1));
-  const fimQuinzAnt = d <= 15
-    ? fmt(new Date(y, m, 0))
-    : fmt(new Date(y, m, 15));
+  const diaRelativo = d <= 15 ? d : d - 15; // dia dentro da quinzena
+  const inicioQuinz = new Date(y, m, diaQuinzena);
+  // Quinzena anterior mesmo dia relativo
+  let inicioQuinzAnt: Date;
+  let fimQuinzAnt: Date;
+  if (d <= 15) {
+    // Estamos na 1ª quinzena → comparar com 2ª quinzena do mês anterior (16 até 16+diaRelativo-1)
+    inicioQuinzAnt = new Date(y, m - 1, 16);
+    fimQuinzAnt = new Date(y, m - 1, 16 + diaRelativo - 1);
+  } else {
+    // Estamos na 2ª quinzena → comparar com 1ª quinzena deste mês (1 até diaRelativo)
+    inicioQuinzAnt = new Date(y, m, 1);
+    fimQuinzAnt = new Date(y, m, diaRelativo);
+  }
 
   async function fat(start: string, end: string): Promise<number> {
     const { data } = await supabase().from('pedidos')
@@ -445,27 +452,37 @@ export async function getComparativoPeriodos(): Promise<ComparativoPeriodo[]> {
     return (data || []).reduce((s, r) => s + (r.valor_total_pedido || 0), 0);
   }
 
-  const [
-    semAtual, semAnt, sem2,
-    mesAtual, mesAnt, mes2,
-    quinzAtual, quinzAnt,
-  ] = await Promise.all([
+  const [semAtual, semAntVal, mesAtual, mesAntVal, quinzAtual, quinzAntVal] = await Promise.all([
     fat(fmt(inicioSemana), fmt(fimSemana)),
     fat(fmt(inicioSemAnt), fmt(fimSemAnt)),
-    fat(fmt(inicioSem2), fmt(fimSem2)),
-    fat(inicioMesAtual, fimMesAtual),
-    fat(inicioMesAnt, fimMesAnt),
-    fat(inicioMes2, fimMes2),
-    fat(inicioQuinz, fimQuinz),
-    fat(inicioQuinzAnt, fimQuinzAnt),
+    fat(fmt(inicioMes), fmt(now)),
+    fat(fmt(inicioMesAnt), fmt(fimMesAnt)),
+    fat(fmt(inicioQuinz), fmt(now)),
+    fat(fmt(inicioQuinzAnt), fmt(fimQuinzAnt)),
   ]);
 
   return [
-    { nome: 'Semana atual', dateRange: fmtRange(fmt(inicioSemana), fmt(fimSemana)), valor: semAtual, valorComparado: semAnt, variacao: calcVariacao(semAtual, semAnt) },
-    { nome: 'Semana anterior', dateRange: fmtRange(fmt(inicioSemAnt), fmt(fimSemAnt)), valor: semAnt, valorComparado: sem2, variacao: calcVariacao(semAnt, sem2) },
-    { nome: 'Mês atual', dateRange: fmtRange(inicioMesAtual, fimMesAtual), valor: mesAtual, valorComparado: mesAnt, variacao: calcVariacao(mesAtual, mesAnt) },
-    { nome: 'Mês anterior', dateRange: fmtRange(inicioMesAnt, fimMesAnt), valor: mesAnt, valorComparado: mes2, variacao: calcVariacao(mesAnt, mes2) },
-    { nome: 'Quinzena atual', dateRange: fmtRange(inicioQuinz, fimQuinz), valor: quinzAtual, valorComparado: quinzAnt, variacao: calcVariacao(quinzAtual, quinzAnt) },
+    {
+      nome: 'Semana atual',
+      dateRange: fmtRange(fmt(inicioSemana), fmt(now)),
+      valor: semAtual,
+      valorComparado: semAntVal,
+      variacao: calcVariacao(semAtual, semAntVal),
+    },
+    {
+      nome: 'Mês atual',
+      dateRange: fmtRange(fmt(inicioMes), fmt(now)),
+      valor: mesAtual,
+      valorComparado: mesAntVal,
+      variacao: calcVariacao(mesAtual, mesAntVal),
+    },
+    {
+      nome: 'Quinzena atual',
+      dateRange: fmtRange(fmt(inicioQuinz), fmt(now)),
+      valor: quinzAtual,
+      valorComparado: quinzAntVal,
+      variacao: calcVariacao(quinzAtual, quinzAntVal),
+    },
   ];
 }
 
