@@ -118,19 +118,24 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 overflow-hidden" onClick={onClose}>
       <div
-        className="card p-6 rounded-lg max-w-3xl w-full mx-4 max-h-[85vh] overflow-auto"
+        className="card rounded-lg max-w-3xl w-full mx-4 max-h-[80vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="text-sm font-semibold">Configurar lojas</h2>
-          <button onClick={onClose} className="text-lg opacity-50 hover:opacity-100">×</button>
+        {/* Header fixo */}
+        <div className="p-6 pb-0 shrink-0">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-sm font-semibold">Configurar lojas</h2>
+            <button onClick={onClose} className="text-lg opacity-50 hover:opacity-100">×</button>
+          </div>
+          <p className="text-[10px] opacity-40 mb-4">
+            Mapeie cada loja para o marketplace correto e defina o nome de exibição
+          </p>
         </div>
-        <p className="text-[10px] opacity-40 mb-4">
-          Mapeie cada loja para o marketplace correto e defina o nome de exibição
-        </p>
 
+        {/* Corpo scrollável */}
+        <div className="px-6 overflow-y-auto flex-1 min-h-0">
         {loading ? (
           <div className="animate-pulse h-40 bg-current/5 rounded" />
         ) : (
@@ -189,8 +194,10 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
             ))}
           </div>
         )}
+        </div>
 
-        {/* Rodapé */}
+        {/* Rodapé fixo */}
+        <div className="p-6 pt-0 shrink-0">
         <div className="flex items-center justify-between mt-4 pt-3 border-t border-current/5">
           {toast && <span className="text-xs text-[#1D9E75]">{toast}</span>}
           <div className="flex-1" />
@@ -201,6 +208,7 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
           >
             {saving ? 'Salvando...' : 'Salvar configurações'}
           </button>
+        </div>
         </div>
       </div>
     </div>
