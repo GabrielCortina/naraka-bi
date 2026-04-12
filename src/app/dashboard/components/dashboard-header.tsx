@@ -1,8 +1,11 @@
 'use client';
 
 import type { PeriodFilter } from '../types';
-import { LOJAS } from '../types';
 import type { Theme } from '../hooks/use-theme';
+
+interface LojaOption {
+  nome_exibicao: string;
+}
 
 interface Props {
   filter: PeriodFilter;
@@ -15,6 +18,8 @@ interface Props {
   customEnd: string;
   onCustomStartChange: (v: string) => void;
   onCustomEndChange: (v: string) => void;
+  lojas: LojaOption[];
+  onOpenConfig: () => void;
 }
 
 const FILTERS: { value: PeriodFilter; label: string }[] = [
@@ -31,6 +36,7 @@ export function DashboardHeader({
   filter, onFilterChange, loja, onLojaChange,
   theme, onToggleTheme, customStart, customEnd,
   onCustomStartChange, onCustomEndChange,
+  lojas, onOpenConfig,
 }: Props) {
   return (
     <div className="mb-6">
@@ -43,12 +49,20 @@ export function DashboardHeader({
             Atualizado às {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · Tiny ERP sync
           </p>
         </div>
-        <button
-          onClick={onToggleTheme}
-          className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
-        >
-          {theme === 'dark' ? '☀ Claro' : '☾ Escuro'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onOpenConfig}
+            className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
+          >
+            ⚙ Lojas
+          </button>
+          <button
+            onClick={onToggleTheme}
+            className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
+          >
+            {theme === 'dark' ? '☀ Claro' : '☾ Escuro'}
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -89,15 +103,15 @@ export function DashboardHeader({
         {/* Separador */}
         <div className="w-px h-6 bg-current/10 mx-1" />
 
-        {/* Seletor de loja */}
+        {/* Seletor de loja — usa loja_config */}
         <select
           value={loja}
           onChange={e => onLojaChange(e.target.value)}
           className="px-3 py-1.5 text-xs rounded-md border border-current/10 bg-transparent"
         >
           <option value="">Todas as lojas</option>
-          {LOJAS.map(l => (
-            <option key={l} value={l}>{l}</option>
+          {lojas.map(l => (
+            <option key={l.nome_exibicao} value={l.nome_exibicao}>{l.nome_exibicao}</option>
           ))}
         </select>
       </div>

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { createBrowserClient } from '@/lib/supabase-browser';
 import { usePeriodFilter } from '../hooks/use-period-filter';
 import { useTheme } from '../hooks/use-theme';
 import { useVendasData } from '../hooks/use-vendas-data';
@@ -14,7 +15,12 @@ import { RankingLojas } from './ranking-lojas';
 import { MarketplaceChart } from './marketplace-chart';
 import { HeatmapHorarios } from './heatmap-horarios';
 import { HistoricoDias } from './historico-dias';
+import { LojaConfigModal } from './loja-config-modal';
 import { hoje } from '../lib/date-utils';
+
+interface LojaOption {
+  nome_exibicao: string;
+}
 
 export function DashboardClient() {
   const { theme, toggleTheme } = useTheme();
@@ -23,6 +29,35 @@ export function DashboardClient() {
 
   const [customStart, setCustomStart] = useState(hoje());
   const [customEnd, setCustomEnd] = useState(hoje());
+  const [configOpen, setConfigOpen] = useState(false);
+  const [lojas, setLojas] = useState<LojaOption[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Carrega lojas do loja_config
+  const loadLojas = useCallback(async () => {
+    const db = createBrowserClient();
+    const { data: configs } = await db.from('loja_config')
+      .select('nome_exibicao')
+      .eq('ativo', true)
+      .order('nome_exibicao');
+
+    if (configs && configs.length > 0) {
+      // Nomes únicos (Full + Coleta agrupam pelo mesmo nome_exibicao)
+      const unicos = Array.from(new Set(configs.map(c => c.nome_exibicao)));
+      setLojas(unicos.map(nome => ({ nome_exibicao: nome })));
+    } else {
+      // Fallback: nomes distintos da tabela pedidos
+      const { data: pedidos } = await db.from('pedidos')
+        .select('ecommerce_nome')
+        .not('ecommerce_nome', 'is', null);
+      const nomes = Array.from(new Set((pedidos || []).map(p => p.ecommerce_nome).filter(Boolean))).sort();
+      setLojas(nomes.map(nome => ({ nome_exibicao: nome })));
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLojas();
+  }, [loadLojas, refreshKey]);
 
   function handleCustomStartChange(v: string) {
     setCustomStart(v);
@@ -34,7 +69,11 @@ export function DashboardClient() {
     setCustomRange({ start: customStart, end: v });
   }
 
-  // Tema via classes CSS
+  function handleConfigSaved() {
+    setRefreshKey(k => k + 1);
+    setConfigOpen(false);
+  }
+
   const themeClass = theme === 'dark' ? 'theme-dark' : 'theme-light';
 
   return (
@@ -60,7 +99,6 @@ export function DashboardClient() {
       `}</style>
 
       <div className="max-w-[1400px] mx-auto p-4 md:p-6">
-        {/* Header */}
         <DashboardHeader
           filter={filter}
           onFilterChange={setFilter}
@@ -72,21 +110,18 @@ export function DashboardClient() {
           customEnd={customEnd}
           onCustomStartChange={handleCustomStartChange}
           onCustomEndChange={handleCustomEndChange}
+          lojas={lojas}
+          onOpenConfig={() => setConfigOpen(true)}
         />
 
-        {/* KPIs Hero */}
         <KpisHero data={data.resumoHero} loading={data.loading} />
-
-        {/* KPIs Secundários */}
         <KpisSecundarios data={data.kpisSecundarios} loading={data.loading} />
 
-        {/* Gráfico + Comparativo */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
           <GraficoVendas atual={data.vendasPorDia} anterior={data.vendasPorDiaAnterior} loading={data.loading} />
           <ComparativoPeriodos data={data.comparativo} loading={data.loading} />
         </div>
 
-        {/* Top SKUs + Ranking/Marketplace + Heatmap */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
           <TopSkus
             data={data.topSkus}
@@ -102,9 +137,14 @@ export function DashboardClient() {
           <HeatmapHorarios data={data.heatmap} loading={data.loading} />
         </div>
 
-        {/* Histórico por dia */}
         <HistoricoDias data={data.historico} loading={data.loading} />
       </div>
+
+      <LojaConfigModal
+        open={configOpen}
+        onClose={() => setConfigOpen(false)}
+        onSaved={handleConfigSaved}
+      />
     </div>
   );
 }
