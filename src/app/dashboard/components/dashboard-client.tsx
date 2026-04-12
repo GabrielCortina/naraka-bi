@@ -37,13 +37,14 @@ export function DashboardClient() {
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
     const { data: configs } = await db.from('loja_config')
-      .select('nome_exibicao')
+      .select('nome_exibicao, nome_loja')
       .eq('ativo', true)
       .order('nome_exibicao');
 
     if (configs && configs.length > 0) {
-      // Nomes únicos (Full + Coleta agrupam pelo mesmo nome_exibicao)
-      const unicos = Array.from(new Set(configs.map(c => c.nome_exibicao)));
+      // Usa nome_loja quando preenchido, senão nome_exibicao
+      const nomes = configs.map(c => c.nome_loja || c.nome_exibicao);
+      const unicos = Array.from(new Set(nomes)).sort();
       setLojas(unicos.map(nome => ({ nome_exibicao: nome })));
     } else {
       // Fallback: nomes distintos da tabela pedidos (paginado)

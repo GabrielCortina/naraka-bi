@@ -6,6 +6,7 @@ import { createBrowserClient } from '@/lib/supabase-browser';
 interface LojaConfig {
   ecommerce_nome_tiny: string;
   nome_exibicao: string;
+  nome_loja: string;
   marketplace: string;
   tipo_ml: string | null;
   ativo: boolean;
@@ -68,6 +69,7 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
         return {
           ecommerce_nome_tiny: existing.ecommerce_nome_tiny,
           nome_exibicao: existing.nome_exibicao,
+          nome_loja: existing.nome_loja || '',
           marketplace: existing.marketplace,
           tipo_ml: existing.tipo_ml,
           ativo: existing.ativo,
@@ -83,6 +85,7 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
       return {
         ecommerce_nome_tiny: nome,
         nome_exibicao: nome,
+        nome_loja: '',
         marketplace: mp,
         tipo_ml: mp === 'mercado_livre' ? (lower.includes('full') ? 'full' : 'coleta') : null,
         ativo: true,
@@ -113,6 +116,7 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
       await db.from('loja_config').upsert({
         ecommerce_nome_tiny: config.ecommerce_nome_tiny,
         nome_exibicao: config.nome_exibicao,
+        nome_loja: config.nome_loja || null,
         marketplace: config.marketplace,
         tipo_ml: config.tipo_ml,
         ativo: config.ativo,
@@ -154,13 +158,22 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
             {configs.map((config, idx) => (
               <div key={config.ecommerce_nome_tiny} className="card-secondary p-3 rounded-lg">
                 <p className="text-[9px] opacity-40 mb-2 font-mono">{config.ecommerce_nome_tiny}</p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
                   {/* Nome de exibição */}
                   <input
                     type="text"
                     value={config.nome_exibicao}
                     onChange={e => updateConfig(idx, 'nome_exibicao', e.target.value)}
                     placeholder="Nome de exibição"
+                    className="px-2 py-1.5 text-xs rounded border border-current/10 bg-transparent"
+                  />
+
+                  {/* Nome da loja (agrupador) */}
+                  <input
+                    type="text"
+                    value={config.nome_loja}
+                    onChange={e => updateConfig(idx, 'nome_loja', e.target.value)}
+                    placeholder="Nome da loja"
                     className="px-2 py-1.5 text-xs rounded border border-current/10 bg-transparent"
                   />
 
