@@ -251,21 +251,14 @@ function CorTable({ detalhes }: { detalhes: SkuDetalhe[] }) {
         {agrupadas.map((c, idx) => (
           <tr key={c.cor} className="border-t border-current/5">
             <td className="py-1.5">
-              <div className="flex items-center" style={{ gap: 6 }}>
-                <span style={{
-                  fontSize: 10, fontWeight: 500, padding: '2px 8px', borderRadius: 4,
-                  background: COR_PALETTE[idx % COR_PALETTE.length].bg,
-                  color: COR_PALETTE[idx % COR_PALETTE.length].text,
-                  display: 'inline-block',
-                }}>
-                  {c.cor}
-                </span>
-                {c.cor !== '—' && (
-                  <span style={{ fontSize: 9, color: 'var(--txt3, #6b7280)' }}>
-                    {c.variacoes.join(' · ')}
-                  </span>
-                )}
-              </div>
+              <span style={{
+                fontSize: 10, fontWeight: 500, padding: '2px 8px', borderRadius: 4,
+                background: COR_PALETTE[idx % COR_PALETTE.length].bg,
+                color: COR_PALETTE[idx % COR_PALETTE.length].text,
+                display: 'inline-block',
+              }}>
+                {c.cor}
+              </span>
             </td>
             <td className="py-1.5 text-right">{formatNumero(c.quantidade)}</td>
             <td className={`py-1.5 text-right font-medium ${c.faturamento === maxFat ? 'text-[#1D9E75]' : ''}`}>
