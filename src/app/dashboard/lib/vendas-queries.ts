@@ -33,6 +33,35 @@ async function batchIn<T>(
   return results;
 }
 
+// Supabase retorna max 1000 rows por padrão — pagina para buscar tudo
+const PAGE_SIZE = 1000;
+async function fetchAllPedidos<T>(
+  selectFields: string,
+  situacoes: number[],
+  start: string,
+  end: string,
+  loja?: string,
+): Promise<T[]> {
+  const db = supabase();
+  const results: T[] = [];
+  let offset = 0;
+  while (true) {
+    let query = db.from('pedidos')
+      .select(selectFields)
+      .in('situacao', situacoes)
+      .gte('data_pedido', start)
+      .lte('data_pedido', end)
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (loja) query = query.eq('ecommerce_nome', loja);
+    const { data } = await query;
+    if (!data || data.length === 0) break;
+    results.push(...(data as T[]));
+    if (data.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return results;
+}
+
 // ============================================================
 // RESUMO HERO — 4 KPIs principais + período anterior
 // ============================================================
@@ -62,16 +91,9 @@ export async function getResumoHero(
 }
 
 async function fetchResumo(start: string, end: string, loja?: string) {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('valor_total_pedido, id')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', start)
-    .lte('data_pedido', end);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data } = await query;
-  const rows = data || [];
+  const rows = await fetchAllPedidos<{ valor_total_pedido: number; id: number }>(
+    'valor_total_pedido, id', SITUACOES_APROVADAS, start, end, loja
+  );
   return {
     faturamento: rows.reduce((sum, r) => sum + (r.valor_total_pedido || 0), 0),
     pedidos: rows.length,
@@ -79,17 +101,10 @@ async function fetchResumo(start: string, end: string, loja?: string) {
 }
 
 async function fetchPecas(start: string, end: string, loja?: string) {
-  const db = supabase();
-  // Busca IDs dos pedidos aprovados no período
-  let pedidoQuery = db.from('pedidos')
-    .select('id')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', start)
-    .lte('data_pedido', end);
-  if (loja) pedidoQuery = pedidoQuery.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await pedidoQuery;
-  if (!pedidos || pedidos.length === 0) return 0;
+  const pedidos = await fetchAllPedidos<{ id: number }>(
+    'id', SITUACOES_APROVADAS, start, end, loja
+  );
+  if (pedidos.length === 0) return 0;
 
   const ids = pedidos.map(p => p.id);
   const itens = await batchIn<{ quantidade: number }>('pedido_itens', 'pedido_id', ids, 'quantidade');
@@ -143,16 +158,9 @@ export async function getKpisSecundarios(
 }
 
 async function fetchCancelados(start: string, end: string, loja?: string) {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('valor_total_pedido')
-    .in('situacao', SITUACOES_CANCELADAS)
-    .gte('data_pedido', start)
-    .lte('data_pedido', end);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data } = await query;
-  const rows = data || [];
+  const rows = await fetchAllPedidos<{ valor_total_pedido: number }>(
+    'valor_total_pedido', SITUACOES_CANCELADAS, start, end, loja
+  );
   return {
     count: rows.length,
     valor: rows.reduce((s, r) => s + (r.valor_total_pedido || 0), 0),
@@ -165,17 +173,10 @@ async function fetchCancelados(start: string, end: string, loja?: string) {
 export async function getVendasPorDia(
   startDate: string, endDate: string, loja?: string
 ): Promise<VendaDia[]> {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('id, data_pedido, valor_total_pedido')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate)
-    .order('data_pedido', { ascending: true });
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await query;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ id: number; data_pedido: string; valor_total_pedido: number }>(
+    'id, data_pedido, valor_total_pedido', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   // Busca peças
   const ids = pedidos.map(p => p.id);
@@ -206,16 +207,10 @@ export async function getVendasPorDia(
 export async function getTopSkus(
   startDate: string, endDate: string, loja?: string, orderBy: 'faturamento' | 'quantidade' = 'faturamento'
 ): Promise<SkuPaiAgrupado[]> {
-  const db = supabase();
-  let pedidoQuery = db.from('pedidos')
-    .select('id')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate);
-  if (loja) pedidoQuery = pedidoQuery.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await pedidoQuery;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ id: number }>(
+    'id', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
   const itens = await batchIn<{ sku: string; quantidade: number; valor_total: number }>('pedido_itens', 'pedido_id', ids, 'sku, quantidade, valor_total');
@@ -239,15 +234,10 @@ export async function getSkuDetalhes(
   skuPai: string, startDate: string, endDate: string, loja?: string
 ): Promise<SkuDetalhe[]> {
   const db = supabase();
-  let pedidoQuery = db.from('pedidos')
-    .select('id')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate);
-  if (loja) pedidoQuery = pedidoQuery.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await pedidoQuery;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ id: number }>(
+    'id', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
   // Batch + filtro like no SKU pai
@@ -291,16 +281,10 @@ export async function getSkuDetalhes(
 export async function getRankingLojas(
   startDate: string, endDate: string, loja?: string
 ): Promise<LojaRanking[]> {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('id, ecommerce_nome, valor_total_pedido')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await query;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ id: number; ecommerce_nome: string; valor_total_pedido: number }>(
+    'id, ecommerce_nome, valor_total_pedido', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
   const itens = await batchIn<{ pedido_id: number; quantidade: number }>('pedido_itens', 'pedido_id', ids, 'pedido_id, quantidade');
@@ -339,16 +323,10 @@ function inferirMarketplace(ecommerceNome: string, canalVenda: string): string {
 export async function getVendasPorMarketplace(
   startDate: string, endDate: string, loja?: string
 ): Promise<MarketplaceData[]> {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('ecommerce_nome, canal_venda, valor_total_pedido')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await query;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ ecommerce_nome: string; canal_venda: string; valor_total_pedido: number }>(
+    'ecommerce_nome, canal_venda, valor_total_pedido', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   const mapa = new Map<string, number>();
   let total = 0;
@@ -383,16 +361,10 @@ export async function getVendasPorMarketplace(
 export async function getHeatmapHorarios(
   startDate: string, endDate: string, loja?: string
 ): Promise<HeatmapCell[]> {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('last_sync_at')
-    .in('situacao', SITUACOES_APROVADAS)
-    .gte('data_pedido', startDate)
-    .lte('data_pedido', endDate);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data: pedidos } = await query;
-  if (!pedidos || pedidos.length === 0) return [];
+  const pedidos = await fetchAllPedidos<{ last_sync_at: string }>(
+    'last_sync_at', SITUACOES_APROVADAS, startDate, endDate, loja
+  );
+  if (pedidos.length === 0) return [];
 
   const mapa = new Map<string, number>();
   for (const p of pedidos) {
@@ -530,17 +502,11 @@ export async function getHistoricoDias(
 }
 
 async function fetchCanceladosPorDia(start: string, end: string, loja?: string) {
-  const db = supabase();
-  let query = db.from('pedidos')
-    .select('data_pedido, valor_total_pedido')
-    .in('situacao', SITUACOES_CANCELADAS)
-    .gte('data_pedido', start)
-    .lte('data_pedido', end);
-  if (loja) query = query.eq('ecommerce_nome', loja);
-
-  const { data } = await query;
+  const data = await fetchAllPedidos<{ data_pedido: string; valor_total_pedido: number }>(
+    'data_pedido, valor_total_pedido', SITUACOES_CANCELADAS, start, end, loja
+  );
   const mapa = new Map<string, { cancelamentos: number; fatCancelado: number }>();
-  for (const r of (data || [])) {
+  for (const r of data) {
     const entry = mapa.get(r.data_pedido) || { cancelamentos: 0, fatCancelado: 0 };
     entry.cancelamentos += 1;
     entry.fatCancelado += r.valor_total_pedido || 0;
