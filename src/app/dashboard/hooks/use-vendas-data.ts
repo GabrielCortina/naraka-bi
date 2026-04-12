@@ -50,32 +50,46 @@ export function useVendasData(dateRange: DateRange, loja: string) {
     const antStart = anteriorStart.toISOString().split('T')[0];
     const antEnd = anteriorEnd.toISOString().split('T')[0];
 
-    try {
-      const [
-        resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
-        topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
-      ] = await Promise.all([
-        queries.getResumoHero(start, end, lojaParam),
-        queries.getKpisSecundarios(start, end, lojaParam),
-        queries.getVendasPorDia(start, end, lojaParam),
-        queries.getVendasPorDia(antStart, antEnd, lojaParam),
-        queries.getTopSkus(start, end, lojaParam),
-        queries.getRankingLojas(start, end, lojaParam),
-        queries.getVendasPorMarketplace(start, end, lojaParam),
-        queries.getHeatmapHorarios(start, end, lojaParam),
-        queries.getComparativoPeriodos(),
-        queries.getHistoricoDias(start, end, lojaParam),
-      ]);
-
-      setData({
-        resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
-        topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
-        loading: false,
-      });
-    } catch (err) {
-      console.error('[dashboard] Erro ao buscar dados:', err);
-      setData(prev => ({ ...prev, loading: false }));
+    // Cada query independente — se uma falha, as outras continuam
+    async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promise<T> {
+      try {
+        return await fn();
+      } catch (err) {
+        console.error(`[dashboard] Erro em ${label}:`, err);
+        return fallback;
+      }
     }
+
+    const emptyHero: ResumoHero = {
+      faturamento: 0, pedidos: 0, ticketMedio: 0, pecasVendidas: 0,
+      faturamentoAnterior: 0, pedidosAnterior: 0, ticketMedioAnterior: 0, pecasAnterior: 0,
+    };
+    const emptyKpis: KpisSecundarios = {
+      mediaDiariaRs: 0, melhorDia: { data: '', valor: 0 }, projecaoMesRs: null,
+      mediaDiariaPecas: 0, projecaoMesPecas: null, cancelamentos: 0, valorCancelado: 0,
+    };
+
+    const [
+      resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
+      topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
+    ] = await Promise.all([
+      safe(() => queries.getResumoHero(start, end, lojaParam), emptyHero, 'resumoHero'),
+      safe(() => queries.getKpisSecundarios(start, end, lojaParam), emptyKpis, 'kpisSecundarios'),
+      safe(() => queries.getVendasPorDia(start, end, lojaParam), [], 'vendasPorDia'),
+      safe(() => queries.getVendasPorDia(antStart, antEnd, lojaParam), [], 'vendasPorDiaAnterior'),
+      safe(() => queries.getTopSkus(start, end, lojaParam), [], 'topSkus'),
+      safe(() => queries.getRankingLojas(start, end, lojaParam), [], 'rankingLojas'),
+      safe(() => queries.getVendasPorMarketplace(start, end, lojaParam), [], 'marketplace'),
+      safe(() => queries.getHeatmapHorarios(start, end, lojaParam), [], 'heatmap'),
+      safe(() => queries.getComparativoPeriodos(), [], 'comparativo'),
+      safe(() => queries.getHistoricoDias(start, end, lojaParam), [], 'historico'),
+    ]);
+
+    setData({
+      resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
+      topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
+      loading: false,
+    });
   }, [dateRange, loja]);
 
   useEffect(() => {

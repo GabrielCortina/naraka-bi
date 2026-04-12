@@ -15,6 +15,24 @@ function supabase() {
   return createBrowserClient();
 }
 
+// Supabase .in() tem limite de URL — batcheia arrays grandes
+const BATCH_SIZE = 500;
+async function batchIn<T>(
+  table: string,
+  column: string,
+  ids: number[],
+  selectFields: string,
+): Promise<T[]> {
+  const db = supabase();
+  const results: T[] = [];
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE);
+    const { data } = await db.from(table).select(selectFields).in(column, chunk);
+    if (data) results.push(...(data as T[]));
+  }
+  return results;
+}
+
 // ============================================================
 // RESUMO HERO — 4 KPIs principais + período anterior
 // ============================================================
@@ -74,11 +92,9 @@ async function fetchPecas(start: string, end: string, loja?: string) {
   if (!pedidos || pedidos.length === 0) return 0;
 
   const ids = pedidos.map(p => p.id);
-  const { data: itens } = await db.from('pedido_itens')
-    .select('quantidade')
-    .in('pedido_id', ids);
+  const itens = await batchIn<{ quantidade: number }>('pedido_itens', 'pedido_id', ids, 'quantidade');
 
-  return (itens || []).reduce((sum, i) => sum + (i.quantidade || 0), 0);
+  return itens.reduce((sum, i) => sum + (i.quantidade || 0), 0);
 }
 
 // ============================================================
@@ -163,12 +179,10 @@ export async function getVendasPorDia(
 
   // Busca peças
   const ids = pedidos.map(p => p.id);
-  const { data: itens } = await db.from('pedido_itens')
-    .select('pedido_id, quantidade')
-    .in('pedido_id', ids);
+  const itens = await batchIn<{ pedido_id: number; quantidade: number }>('pedido_itens', 'pedido_id', ids, 'pedido_id, quantidade');
 
   const pecasPorPedido = new Map<number, number>();
-  for (const item of (itens || [])) {
+  for (const item of itens) {
     pecasPorPedido.set(item.pedido_id, (pecasPorPedido.get(item.pedido_id) || 0) + (item.quantidade || 0));
   }
 
@@ -204,11 +218,9 @@ export async function getTopSkus(
   if (!pedidos || pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
-  const { data: itens } = await db.from('pedido_itens')
-    .select('sku, quantidade, valor_total')
-    .in('pedido_id', ids);
+  const itens = await batchIn<{ sku: string; quantidade: number; valor_total: number }>('pedido_itens', 'pedido_id', ids, 'sku, quantidade, valor_total');
 
-  if (!itens || itens.length === 0) return [];
+  if (itens.length === 0) return [];
 
   const agrupados = agruparPorSkuPai(itens);
   agrupados.sort((a, b) =>
@@ -238,12 +250,18 @@ export async function getSkuDetalhes(
   if (!pedidos || pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
-  const { data: itens } = await db.from('pedido_itens')
-    .select('sku, descricao, quantidade, valor_total')
-    .in('pedido_id', ids)
-    .like('sku', `${skuPai}%`);
+  // Batch + filtro like no SKU pai
+  const itens: { sku: string; descricao: string; quantidade: number; valor_total: number }[] = [];
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE);
+    const { data } = await db.from('pedido_itens')
+      .select('sku, descricao, quantidade, valor_total')
+      .in('pedido_id', chunk)
+      .like('sku', `${skuPai}%`);
+    if (data) itens.push(...data);
+  }
 
-  if (!itens || itens.length === 0) return [];
+  if (itens.length === 0) return [];
 
   // Agrupa por SKU individual
   const mapa = new Map<string, { descricao: string; quantidade: number; faturamento: number }>();
@@ -285,12 +303,10 @@ export async function getRankingLojas(
   if (!pedidos || pedidos.length === 0) return [];
 
   const ids = pedidos.map(p => p.id);
-  const { data: itens } = await db.from('pedido_itens')
-    .select('pedido_id, quantidade')
-    .in('pedido_id', ids);
+  const itens = await batchIn<{ pedido_id: number; quantidade: number }>('pedido_itens', 'pedido_id', ids, 'pedido_id, quantidade');
 
   const pecasPorPedido = new Map<number, number>();
-  for (const item of (itens || [])) {
+  for (const item of itens) {
     pecasPorPedido.set(item.pedido_id, (pecasPorPedido.get(item.pedido_id) || 0) + (item.quantidade || 0));
   }
 
