@@ -39,12 +39,23 @@ export function LojaConfigModal({ open, onClose, onSaved }: Props) {
     setLoading(true);
     const db = createBrowserClient();
 
-    // Busca nomes distintos de lojas nos pedidos
-    const { data: pedidos } = await db.from('pedidos')
-      .select('ecommerce_nome')
-      .not('ecommerce_nome', 'is', null);
-
-    const nomesUnicos = Array.from(new Set((pedidos || []).map(p => p.ecommerce_nome).filter(Boolean))).sort();
+    // Busca TODOS os ecommerce_nome distintos paginando para evitar limite de 1000 rows
+    const nomesSet = new Set<string>();
+    let offset = 0;
+    const PAGE = 1000;
+    while (true) {
+      const { data: page } = await db.from('pedidos')
+        .select('ecommerce_nome')
+        .not('ecommerce_nome', 'is', null)
+        .range(offset, offset + PAGE - 1);
+      if (!page || page.length === 0) break;
+      for (const p of page) {
+        if (p.ecommerce_nome) nomesSet.add(p.ecommerce_nome);
+      }
+      if (page.length < PAGE) break;
+      offset += PAGE;
+    }
+    const nomesUnicos = Array.from(nomesSet).sort();
 
     // Busca configs salvas
     const { data: saved } = await db.from('loja_config').select('*');

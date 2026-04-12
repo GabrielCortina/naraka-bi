@@ -46,11 +46,20 @@ export function DashboardClient() {
       const unicos = Array.from(new Set(configs.map(c => c.nome_exibicao)));
       setLojas(unicos.map(nome => ({ nome_exibicao: nome })));
     } else {
-      // Fallback: nomes distintos da tabela pedidos
-      const { data: pedidos } = await db.from('pedidos')
-        .select('ecommerce_nome')
-        .not('ecommerce_nome', 'is', null);
-      const nomes = Array.from(new Set((pedidos || []).map(p => p.ecommerce_nome).filter(Boolean))).sort();
+      // Fallback: nomes distintos da tabela pedidos (paginado)
+      const nomesSet = new Set<string>();
+      let offset = 0;
+      while (true) {
+        const { data: page } = await db.from('pedidos')
+          .select('ecommerce_nome')
+          .not('ecommerce_nome', 'is', null)
+          .range(offset, offset + 999);
+        if (!page || page.length === 0) break;
+        for (const p of page) { if (p.ecommerce_nome) nomesSet.add(p.ecommerce_nome); }
+        if (page.length < 1000) break;
+        offset += 1000;
+      }
+      const nomes = Array.from(nomesSet).sort();
       setLojas(nomes.map(nome => ({ nome_exibicao: nome })));
     }
   }, []);
