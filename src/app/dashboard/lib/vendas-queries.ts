@@ -309,47 +309,54 @@ export async function getRankingLojas(
 
 // ============================================================
 // VENDAS POR MARKETPLACE
+// Usa loja_config para mapear ecommerce_nome → marketplace
 // ============================================================
-function inferirMarketplace(ecommerceNome: string, canalVenda: string): string {
-  const nome = (ecommerceNome || '').toLowerCase();
-  const canal = (canalVenda || '').toLowerCase();
-  if (nome.includes('meli') || canal.includes('mercado')) return 'Mercado Livre';
-  if (nome.includes('shopee') || canal.includes('shopee')) return 'Shopee';
-  if (nome.includes('tiktok') || canal.includes('tiktok')) return 'TikTok Shop';
-  if (nome.includes('shein') || canal.includes('shein')) return 'Shein';
-  return 'Outro';
-}
+const MARKETPLACE_LABELS: Record<string, string> = {
+  mercado_livre: 'Mercado Livre',
+  shopee: 'Shopee',
+  tiktok: 'TikTok Shop',
+  shein: 'Shein',
+};
+
+const MARKETPLACE_CORES: Record<string, string> = {
+  mercado_livre: '#378ADD',
+  shopee: '#EF9F27',
+  tiktok: '#1D9E75',
+  shein: '#D4537E',
+};
 
 export async function getVendasPorMarketplace(
   startDate: string, endDate: string, loja?: string
 ): Promise<MarketplaceData[]> {
-  const pedidos = await fetchAllPedidos<{ ecommerce_nome: string; canal_venda: string; valor_total_pedido: number }>(
-    'ecommerce_nome, canal_venda, valor_total_pedido', SITUACOES_APROVADAS, startDate, endDate, loja
+  const db = supabase();
+
+  // Carrega mapa de loja_config: ecommerce_nome_tiny → marketplace
+  const { data: configs } = await db.from('loja_config').select('ecommerce_nome_tiny, marketplace');
+  const configMap = new Map<string, string>();
+  for (const c of (configs || [])) {
+    configMap.set(c.ecommerce_nome_tiny, c.marketplace);
+  }
+
+  const pedidos = await fetchAllPedidos<{ ecommerce_nome: string; valor_total_pedido: number }>(
+    'ecommerce_nome, valor_total_pedido', SITUACOES_APROVADAS, startDate, endDate, loja
   );
   if (pedidos.length === 0) return [];
 
+  // Agrupa por marketplace do loja_config (ou 'outro' se não configurada)
   const mapa = new Map<string, number>();
   let total = 0;
   for (const p of pedidos) {
-    const mp = inferirMarketplace(p.ecommerce_nome || '', p.canal_venda || '');
-    mapa.set(mp, (mapa.get(mp) || 0) + (p.valor_total_pedido || 0));
+    const mpKey = configMap.get(p.ecommerce_nome || '') || 'outro';
+    mapa.set(mpKey, (mapa.get(mpKey) || 0) + (p.valor_total_pedido || 0));
     total += p.valor_total_pedido || 0;
   }
 
-  const cores: Record<string, string> = {
-    'Mercado Livre': '#378ADD',
-    'Shopee': '#EF9F27',
-    'TikTok Shop': '#1D9E75',
-    'Shein': '#D4537E',
-    'Outro': '#6b7280',
-  };
-
   return Array.from(mapa.entries())
-    .map(([marketplace, faturamento]) => ({
-      marketplace,
+    .map(([key, faturamento]) => ({
+      marketplace: MARKETPLACE_LABELS[key] || 'Outro',
       faturamento,
       percentual: total > 0 ? (faturamento / total) * 100 : 0,
-      cor: cores[marketplace] || '#6b7280',
+      cor: MARKETPLACE_CORES[key] || '#888888',
     }))
     .sort((a, b) => b.faturamento - a.faturamento);
 }
