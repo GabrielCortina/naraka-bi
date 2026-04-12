@@ -11,16 +11,16 @@ interface Props {
 function Linha({ item }: { item: ComparativoPeriodo }) {
   const positivo = item.variacao >= 0;
   return (
-    <div className="flex items-center justify-between py-2">
-      <div>
-        <p className="text-xs font-medium">{item.nome}</p>
-        <p className="text-[10px] opacity-40">{item.dateRange}</p>
+    <div className="flex items-start justify-between py-2 min-h-[40px]">
+      <div className="flex flex-col justify-center">
+        <p className="text-xs font-medium leading-tight">{item.nome}</p>
+        <p className="text-[10px] opacity-40 leading-tight mt-0.5">{item.dateRange}</p>
       </div>
-      <div className="text-right">
-        <p className="text-xs font-medium">{formatBRL(item.valor)}</p>
-        <span className={`text-[10px] font-medium ${positivo ? 'text-[#1D9E75]' : 'text-[#E24B4A]'}`}>
+      <div className="flex flex-col items-end justify-center">
+        <p className="text-xs font-medium leading-tight">{formatBRL(item.valor)}</p>
+        <p className={`text-[10px] font-medium leading-tight mt-0.5 ${positivo ? 'text-[#1D9E75]' : 'text-[#E24B4A]'}`}>
           {positivo ? '▲' : '▼'} {Math.abs(item.variacao).toFixed(1)}%
-        </span>
+        </p>
       </div>
     </div>
   );
