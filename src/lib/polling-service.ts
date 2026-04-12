@@ -288,13 +288,15 @@ export async function pollingStatus(): Promise<PollingResult> {
 
     const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
+    // NULLS FIRST: pedidos nunca sincronizados têm prioridade
+    // .or() inclui tanto last_sync_at < 10min atrás quanto IS NULL
     const { data: pedidosVivos, error } = await supabase
       .from('pedidos')
       .select('id, numero_pedido')
       .eq('situacao_final', false)
       .in('situacao', SITUACOES_MONITORADAS)
-      .lt('last_sync_at', dezMinAtras)
-      .order('last_sync_at', { ascending: true })
+      .or(`last_sync_at.lt.${dezMinAtras},last_sync_at.is.null`)
+      .order('last_sync_at', { ascending: true, nullsFirst: true })
       .limit(MAX_POR_EXECUCAO);
 
     if (error) throw error;
