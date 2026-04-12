@@ -273,23 +273,26 @@ export async function pollingRapido(): Promise<PollingResult> {
 
 // ============================================================
 // CAMADA 2: Atualização de Status (a cada 10 min)
-// Busca pedidos "vivos" que não foram sincronizados nos últimos 10 min
-// Máximo 50 pedidos por execução
+// Monitora apenas pedidos em estados pré-envio (0, 1, 3, 4)
+// Webhook assume a partir do status 7 (Enviado)
+// Máximo 100 pedidos por execução
 // ============================================================
 export async function pollingStatus(): Promise<PollingResult> {
   let pedidosProcessados = 0;
-  const MAX_POR_EXECUCAO = 50;
+  const MAX_POR_EXECUCAO = 100;
+  // Situações monitoradas pelo polling (pré-envio)
+  const SITUACOES_MONITORADAS = [0, 1, 3, 4]; // Aberto, Aprovado, Preparando, Faturado
 
   try {
     const supabase = createServiceClient();
 
-    // Só processa pedidos com situacao_final=false E last_sync_at > 10 min atrás
     const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
     const { data: pedidosVivos, error } = await supabase
       .from('pedidos')
       .select('id, numero_pedido')
       .eq('situacao_final', false)
+      .in('situacao', SITUACOES_MONITORADAS)
       .lt('last_sync_at', dezMinAtras)
       .order('last_sync_at', { ascending: true })
       .limit(MAX_POR_EXECUCAO);
