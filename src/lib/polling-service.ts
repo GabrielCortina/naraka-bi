@@ -286,20 +286,28 @@ export async function pollingStatus(): Promise<PollingResult> {
   try {
     const supabase = createServiceClient();
 
-    const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-
-    // NULLS FIRST: pedidos nunca sincronizados têm prioridade
-    // .or() inclui tanto last_sync_at < 10min atrás quanto IS NULL
-    const { data: pedidosVivos, error } = await supabase
+    // Busca pedidos não-finais em situações monitoradas
+    // Ordenados por last_sync_at ASC (mais antigos primeiro, NULLs primeiro)
+    // O filtro de 10 min é aplicado no JS para evitar problemas com .or() no PostgREST
+    const { data: candidatos, error } = await supabase
       .from('pedidos')
-      .select('id, numero_pedido')
+      .select('id, numero_pedido, last_sync_at')
       .eq('situacao_final', false)
       .in('situacao', SITUACOES_MONITORADAS)
-      .or(`last_sync_at.lt.${dezMinAtras},last_sync_at.is.null`)
       .order('last_sync_at', { ascending: true, nullsFirst: true })
-      .limit(MAX_POR_EXECUCAO);
+      .limit(MAX_POR_EXECUCAO * 2); // busca mais para filtrar no JS
 
-    if (error) throw error;
+    if (error) {
+      console.error('[status] Erro na query:', error);
+      throw error;
+    }
+
+    // Filtra: last_sync_at NULL ou > 10 min atrás
+    const dezMinAtras = Date.now() - 10 * 60 * 1000;
+    const pedidosVivos = (candidatos || []).filter(p => {
+      if (!p.last_sync_at) return true;
+      return new Date(p.last_sync_at).getTime() < dezMinAtras;
+    }).slice(0, MAX_POR_EXECUCAO);
     if (!pedidosVivos || pedidosVivos.length === 0) {
       console.log('[status] Nenhum pedido vivo pendente de atualização');
       return { success: true, pedidosProcessados: 0, camada: 'status' };
