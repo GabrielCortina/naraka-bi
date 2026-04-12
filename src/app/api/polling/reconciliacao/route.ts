@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pollingReconciliacao } from '@/lib/polling-service';
+import { iniciarLog, finalizarLogSucesso, finalizarLogErro } from '@/lib/polling-logger';
 
-// GET /api/polling/reconciliacao — Camada 3: 1x por dia às 03:00
-// Reconcilia pedidos dos últimos 3 dias
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;
@@ -11,11 +10,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
   }
 
+  const { logId, startTime } = await iniciarLog('reconciliacao');
+
   try {
     const resultado = await pollingReconciliacao();
+    await finalizarLogSucesso(logId, startTime, resultado);
     return NextResponse.json(resultado);
   } catch (err) {
     const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
+    await finalizarLogErro(logId, startTime, mensagem);
     return NextResponse.json({ success: false, camada: 'reconciliacao', erro: mensagem }, { status: 500 });
   }
 }

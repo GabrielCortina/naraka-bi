@@ -42,6 +42,13 @@ export function DashboardClient() {
     return () => clearInterval(interval);
   }, []);
 
+  // Escuta evento da sidebar para abrir config de lojas
+  useEffect(() => {
+    const handler = () => setConfigOpen(true);
+    window.addEventListener('naraka:open-loja-config', handler);
+    return () => window.removeEventListener('naraka:open-loja-config', handler);
+  }, []);
+
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
     const { data: configs } = await db.from('loja_config')
