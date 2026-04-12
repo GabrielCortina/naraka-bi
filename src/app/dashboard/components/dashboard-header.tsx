@@ -40,7 +40,7 @@ export function DashboardHeader({
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-xl font-semibold">
-            VENDAS | <span className="text-[#378ADD]">Dashboard</span>
+            NARAKA | <span className="text-[#378ADD]">Dashboard</span>
           </h1>
           <p className="text-xs mt-0.5 opacity-50">
             Atualizado às {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · Tiny ERP sync
