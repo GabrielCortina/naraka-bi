@@ -3,11 +3,52 @@
 @tailwind utilities;
 
 :root {
-  --background: #09090b;
-  --foreground: #fafafa;
+  --background: #f8f9fa;
+  --foreground: #111827;
+  --bord: rgba(0,0,0,0.08);
+  --bg3: #f1f3f5;
+  --txt2: #6b7280;
+  --txt3: #9ca3af;
+}
+
+html.dark {
+  --background: #0f1117;
+  --foreground: #ffffff;
+  --bord: rgba(255,255,255,0.08);
+  --bg3: #222536;
+  --txt2: #9ca3af;
+  --txt3: #6b7280;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
+}
+
+/* Classes de card globais */
+.card {
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,0.08);
+}
+html.dark .card {
+  background: #1a1d27;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.card-secondary {
+  background: #f1f3f5;
+  border: 1px solid rgba(0,0,0,0.05);
+}
+html.dark .card-secondary {
+  background: #222536;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+
+select option {
+  background: #ffffff;
+  color: #111827;
+}
+html.dark select option {
+  background: #1a1d27;
+  color: #ffffff;
 }

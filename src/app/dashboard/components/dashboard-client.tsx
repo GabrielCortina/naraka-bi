@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createBrowserClient } from '@/lib/supabase-browser';
 import { usePeriodFilter } from '../hooks/use-period-filter';
-import { useTheme } from '../hooks/use-theme';
 import { useVendasData } from '../hooks/use-vendas-data';
 import { DashboardHeader } from './dashboard-header';
 import { KpisHero } from './kpis-hero';
@@ -23,7 +22,6 @@ interface LojaOption {
 }
 
 export function DashboardClient() {
-  const { theme, toggleTheme } = useTheme();
   const { filter, setFilter, dateRange, loja, setLoja, setCustomRange } = usePeriodFilter();
   const data = useVendasData(dateRange, loja);
 
@@ -33,7 +31,6 @@ export function DashboardClient() {
   const [lojas, setLojas] = useState<LojaOption[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Carrega lojas do loja_config
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
     const { data: configs } = await db.from('loja_config')
@@ -42,12 +39,10 @@ export function DashboardClient() {
       .order('nome_exibicao');
 
     if (configs && configs.length > 0) {
-      // Usa nome_loja quando preenchido, senão nome_exibicao
       const nomes = configs.map(c => c.nome_loja || c.nome_exibicao);
       const unicos = Array.from(new Set(nomes)).sort();
       setLojas(unicos.map(nome => ({ nome_exibicao: nome })));
     } else {
-      // Fallback: nomes distintos da tabela pedidos (paginado)
       const nomesSet = new Set<string>();
       let offset = 0;
       while (true) {
@@ -84,38 +79,14 @@ export function DashboardClient() {
     setConfigOpen(false);
   }
 
-  const themeClass = theme === 'dark' ? 'theme-dark' : 'theme-light';
-
   return (
-    <div className={`${themeClass} min-h-screen transition-colors duration-200`}
-      style={{
-        backgroundColor: theme === 'dark' ? '#0f1117' : '#f8f9fa',
-        color: theme === 'dark' ? '#ffffff' : '#111827',
-      }}
-    >
-      <style>{`
-        .${themeClass} .card {
-          background: ${theme === 'dark' ? '#1a1d27' : '#ffffff'};
-          border: 1px solid ${theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'};
-        }
-        .${themeClass} .card-secondary {
-          background: ${theme === 'dark' ? '#222536' : '#f1f3f5'};
-          border: 1px solid ${theme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'};
-        }
-        .${themeClass} select option {
-          background: ${theme === 'dark' ? '#1a1d27' : '#ffffff'};
-          color: ${theme === 'dark' ? '#ffffff' : '#111827'};
-        }
-      `}</style>
-
+    <>
       <div className="max-w-[1400px] mx-auto p-4 md:p-6">
         <DashboardHeader
           filter={filter}
           onFilterChange={setFilter}
           loja={loja}
           onLojaChange={setLoja}
-          theme={theme}
-          onToggleTheme={toggleTheme}
           customStart={customStart}
           customEnd={customEnd}
           onCustomStartChange={handleCustomStartChange}
@@ -155,6 +126,6 @@ export function DashboardClient() {
         onClose={() => setConfigOpen(false)}
         onSaved={handleConfigSaved}
       />
-    </div>
+    </>
   );
 }

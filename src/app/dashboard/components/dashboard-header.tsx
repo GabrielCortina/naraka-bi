@@ -1,7 +1,6 @@
 'use client';
 
 import type { PeriodFilter } from '../types';
-import type { Theme } from '../hooks/use-theme';
 
 interface LojaOption {
   nome_exibicao: string;
@@ -12,8 +11,6 @@ interface Props {
   onFilterChange: (f: PeriodFilter) => void;
   loja: string;
   onLojaChange: (l: string) => void;
-  theme: Theme;
-  onToggleTheme: () => void;
   customStart: string;
   customEnd: string;
   onCustomStartChange: (v: string) => void;
@@ -34,7 +31,7 @@ const FILTERS: { value: PeriodFilter; label: string }[] = [
 
 export function DashboardHeader({
   filter, onFilterChange, loja, onLojaChange,
-  theme, onToggleTheme, customStart, customEnd,
+  customStart, customEnd,
   onCustomStartChange, onCustomEndChange,
   lojas, onOpenConfig,
 }: Props) {
@@ -49,24 +46,15 @@ export function DashboardHeader({
             Atualizado às {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · Tiny ERP sync
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onOpenConfig}
-            className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
-          >
-            ⚙ Lojas
-          </button>
-          <button
-            onClick={onToggleTheme}
-            className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
-          >
-            {theme === 'dark' ? '☀ Claro' : '☾ Escuro'}
-          </button>
-        </div>
+        <button
+          onClick={onOpenConfig}
+          className="px-3 py-1.5 text-xs rounded-md border border-current/10 hover:opacity-80 transition-opacity"
+        >
+          ⚙ Lojas
+        </button>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {/* Filtros de período */}
         {FILTERS.map(f => (
           <button
             key={f.value}
@@ -81,7 +69,6 @@ export function DashboardHeader({
           </button>
         ))}
 
-        {/* Date pickers para personalizado */}
         {filter === 'personalizado' && (
           <div className="flex items-center gap-1 ml-2">
             <input
@@ -100,10 +87,8 @@ export function DashboardHeader({
           </div>
         )}
 
-        {/* Separador */}
         <div className="w-px h-6 bg-current/10 mx-1" />
 
-        {/* Seletor de loja — usa loja_config */}
         <select
           value={loja}
           onChange={e => onLojaChange(e.target.value)}
