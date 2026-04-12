@@ -1,85 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 
-const SITUACOES_FINAIS = [2, 6, 9]; // Cancelado, Devolvido, Entregue
-
 // POST /api/webhook/tiny
-// Recebe notificações de mudança de status da Tiny em tempo real.
-// SEMPRE retorna 200 — a Tiny para de reenviar se receber erro.
+// Modo discovery: loga o payload completo para descobrir o formato real da Tiny.
+// SEMPRE retorna 200.
 export async function POST(request: NextRequest) {
-  // Retorna 200 imediatamente e processa em background
-  const response = NextResponse.json({ status: 'ok' });
+  let body: unknown = null;
 
   try {
-    const payload = await request.json();
-    processarWebhook(payload).catch(err =>
-      console.error('[webhook] Erro no processamento:', err)
-    );
+    body = await request.json();
   } catch {
-    console.error('[webhook] Payload inválido');
-  }
-
-  return response;
-}
-
-async function processarWebhook(payload: { tipo?: string; dados?: { id?: number; situacao?: number } }) {
-  const supabase = createServiceClient();
-
-  const tipo = payload?.tipo;
-  const idPedido = payload?.dados?.id;
-  const novaSituacao = payload?.dados?.situacao;
-
-  if (!tipo || !idPedido || novaSituacao === undefined) {
-    console.error('[webhook] Payload incompleto:', JSON.stringify(payload));
-    await logWebhook(supabase, 'error', 'Payload incompleto', payload);
-    return;
-  }
-
-  try {
-    const situacaoFinal = SITUACOES_FINAIS.includes(novaSituacao);
-
-    const { error } = await supabase
-      .from('pedidos')
-      .update({
-        situacao: novaSituacao,
-        situacao_final: situacaoFinal,
-        last_sync_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', idPedido);
-
-    if (error) {
-      console.error(`[webhook] Erro ao atualizar pedido ${idPedido}:`, error);
-      await logWebhook(supabase, 'error', error.message, { tipo, id: idPedido, situacao: novaSituacao });
-      return;
+    // Se não for JSON, tenta ler como texto
+    try {
+      body = await request.text();
+    } catch {
+      body = null;
     }
-
-    console.log(`[webhook] Pedido ${idPedido} → situação ${novaSituacao} (final: ${situacaoFinal})`);
-    await logWebhook(supabase, 'success', null, { tipo, id: idPedido, situacao: novaSituacao });
-
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Erro desconhecido';
-    console.error(`[webhook] Erro fatal:`, msg);
-    await logWebhook(supabase, 'error', msg, { tipo, id: idPedido, situacao: novaSituacao });
   }
-}
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function logWebhook(supabase: any, status: string, erro: string | null, detalhes: Record<string, unknown>) {
+  console.log('[webhook] Payload recebido:', JSON.stringify(body));
+
+  // Loga o payload completo no banco para análise
   try {
+    const supabase = createServiceClient();
     const agora = new Date().toISOString();
     await supabase.from('polling_logs').insert({
       camada: 'webhook',
       iniciado_em: agora,
       finalizado_em: agora,
       duracao_ms: 0,
-      pedidos_processados: status === 'success' ? 1 : 0,
-      pedidos_erro: status === 'error' ? 1 : 0,
-      status,
-      erro_mensagem: erro,
-      detalhes,
+      pedidos_processados: 0,
+      pedidos_erro: 0,
+      status: 'success',
+      erro_mensagem: null,
+      detalhes: { payload_raw: body },
     });
-  } catch {
-    console.error('[webhook] Falha ao salvar log');
+  } catch (err) {
+    console.error('[webhook] Falha ao salvar log:', err);
   }
+
+  return NextResponse.json({ status: 'ok' });
 }
