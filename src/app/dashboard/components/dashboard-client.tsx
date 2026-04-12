@@ -17,19 +17,30 @@ import { HistoricoDias } from './historico-dias';
 import { LojaConfigModal } from './loja-config-modal';
 import { hoje } from '../lib/date-utils';
 
+const AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutos
+
 interface LojaOption {
   nome_exibicao: string;
 }
 
 export function DashboardClient() {
   const { filter, setFilter, dateRange, loja, setLoja, setCustomRange } = usePeriodFilter();
-  const data = useVendasData(dateRange, loja);
 
   const [customStart, setCustomStart] = useState(hoje());
   const [customEnd, setCustomEnd] = useState(hoje());
   const [configOpen, setConfigOpen] = useState(false);
   const [lojas, setLojas] = useState<LojaOption[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const data = useVendasData(dateRange, loja, refreshKey);
+
+  // Auto-refresh a cada 5 minutos
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRefreshKey(k => k + 1);
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, []);
 
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
@@ -93,6 +104,8 @@ export function DashboardClient() {
           onCustomEndChange={handleCustomEndChange}
           lojas={lojas}
           onOpenConfig={() => setConfigOpen(true)}
+          refreshing={data.refreshing}
+          lastUpdated={data.lastUpdated}
         />
 
         <KpisHero data={data.resumoHero} loading={data.loading} />

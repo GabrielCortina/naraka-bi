@@ -19,12 +19,13 @@ interface VendasData {
   heatmap: HeatmapCell[];
   comparativo: ComparativoPeriodo[];
   historico: HistoricoDia[];
-  loading: boolean;
+  loading: boolean;      // true apenas no primeiro carregamento
+  refreshing: boolean;   // true durante auto-refresh em background
+  lastUpdated: Date | null;
 }
 
 const TIMEOUT_MS = 10000;
 
-// Timeout wrapper — retorna fallback se a query não responder em N ms
 function withTimeout<T>(fn: () => Promise<T>, fallback: T, ms: number): Promise<T> {
   return Promise.race([
     fn(),
@@ -32,7 +33,7 @@ function withTimeout<T>(fn: () => Promise<T>, fallback: T, ms: number): Promise<
   ]);
 }
 
-export function useVendasData(dateRange: DateRange, loja: string) {
+export function useVendasData(dateRange: DateRange, loja: string, refreshKey: number = 0) {
   const [data, setData] = useState<VendasData>({
     resumoHero: null,
     kpisSecundarios: null,
@@ -45,29 +46,35 @@ export function useVendasData(dateRange: DateRange, loja: string) {
     comparativo: [],
     historico: [],
     loading: true,
+    refreshing: false,
+    lastUpdated: null,
   });
 
-  // Usar strings como deps para evitar loop infinito com objetos
   const startStr = dateRange.start;
   const endStr = dateRange.end;
   const fetchIdRef = useRef(0);
+  const hasDataRef = useRef(false);
 
   useEffect(() => {
     const currentFetchId = ++fetchIdRef.current;
+    const isBackgroundRefresh = hasDataRef.current;
 
     async function fetchAll() {
-      setData(prev => ({ ...prev, loading: true }));
+      // Primeiro load: loading=true. Auto-refresh: refreshing=true sem skeleton
+      if (isBackgroundRefresh) {
+        setData(prev => ({ ...prev, refreshing: true }));
+      } else {
+        setData(prev => ({ ...prev, loading: true }));
+      }
 
       const lojaParam = loja || undefined;
 
-      // Período anterior para gráfico comparativo
       const anteriorEnd = new Date(new Date(startStr).getTime() - 86400000);
       const dias = Math.round((new Date(endStr).getTime() - new Date(startStr).getTime()) / 86400000) + 1;
       const anteriorStart = new Date(anteriorEnd.getTime() - (dias - 1) * 86400000);
       const antStart = anteriorStart.toISOString().split('T')[0];
       const antEnd = anteriorEnd.toISOString().split('T')[0];
 
-      // Cada query independente com timeout de 10s
       async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promise<T> {
         try {
           return await withTimeout(fn, fallback, TIMEOUT_MS);
@@ -102,18 +109,20 @@ export function useVendasData(dateRange: DateRange, loja: string) {
         safe(() => queries.getHistoricoDias(startStr, endStr, lojaParam), [], 'historico'),
       ]);
 
-      // Só atualiza se este fetch ainda for o mais recente
       if (currentFetchId !== fetchIdRef.current) return;
 
+      hasDataRef.current = true;
       setData({
         resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
         topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
         loading: false,
+        refreshing: false,
+        lastUpdated: new Date(),
       });
     }
 
     fetchAll();
-  }, [startStr, endStr, loja]);
+  }, [startStr, endStr, loja, refreshKey]);
 
   return data;
 }

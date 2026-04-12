@@ -17,6 +17,8 @@ interface Props {
   onCustomEndChange: (v: string) => void;
   lojas: LojaOption[];
   onOpenConfig: () => void;
+  refreshing: boolean;
+  lastUpdated: Date | null;
 }
 
 const FILTERS: { value: PeriodFilter; label: string }[] = [
@@ -33,8 +35,12 @@ export function DashboardHeader({
   filter, onFilterChange, loja, onLojaChange,
   customStart, customEnd,
   onCustomStartChange, onCustomEndChange,
-  lojas, onOpenConfig,
+  lojas, onOpenConfig, refreshing, lastUpdated,
 }: Props) {
+  const timeStr = lastUpdated
+    ? lastUpdated.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    : new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
   return (
     <div className="mb-6">
       <div className="flex items-center justify-between mb-4">
@@ -43,7 +49,11 @@ export function DashboardHeader({
             NARAKA | <span className="text-[#378ADD]">Dashboard</span>
           </h1>
           <p className="text-xs mt-0.5 opacity-50">
-            Atualizado às {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · Tiny ERP sync
+            {refreshing ? (
+              <span className="text-[#378ADD]">Atualizando...</span>
+            ) : (
+              <>Atualizado às {timeStr} · Tiny ERP sync</>
+            )}
           </p>
         </div>
         <button
