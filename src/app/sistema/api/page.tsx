@@ -53,6 +53,7 @@ const STATUS_CONFIG = {
 const INTERVALO_ESPERADO: Record<string, number> = {
   rapido: 10,
   status: 20,
+  retry: 10,
   webhook: 60,
   reconciliacao: 1500,
 };
@@ -60,6 +61,7 @@ const INTERVALO_ESPERADO: Record<string, number> = {
 const CAMADA_LABELS: Record<string, string> = {
   rapido: 'Rápido',
   status: 'Status',
+  retry: 'Retry Queue',
   reconciliacao: 'Reconciliação',
   webhook: 'Webhook',
 };
@@ -133,7 +135,7 @@ export default function SistemaApiPage() {
       db.from('reconciliacao_relatorio').select('*')
         .order('iniciada_em', { ascending: false }).limit(1).maybeSingle(),
       // Último log de cada camada
-      ...['rapido', 'status', 'reconciliacao', 'webhook'].map(camada =>
+      ...['rapido', 'status', 'retry', 'reconciliacao', 'webhook'].map(camada =>
         db.from('polling_logs').select('*').eq('camada', camada)
           .order('iniciado_em', { ascending: false }).limit(1).single()
       ),
@@ -150,7 +152,7 @@ export default function SistemaApiPage() {
     }
 
     // Monta status de cada camada a partir do último log individual
-    const camadaNames = ['rapido', 'status', 'reconciliacao', 'webhook'];
+    const camadaNames = ['rapido', 'status', 'retry', 'reconciliacao', 'webhook'];
     const camadaStatuses: CamadaStatus[] = camadaNames.map((camada, i) => {
       const ultimoLog = ultimosRes[i]?.data as PollingLog | null;
       const label = CAMADA_LABELS[camada] || camada;
@@ -193,7 +195,7 @@ export default function SistemaApiPage() {
   const taxaSucesso = execucoesHoje > 0 ? ((sucessoHoje / execucoesHoje) * 100).toFixed(1) : '—';
 
   // Breakdown por camada
-  const porCamada = ['rapido', 'status', 'webhook', 'reconciliacao'].map(c => ({
+  const porCamada = ['rapido', 'status', 'retry', 'webhook', 'reconciliacao'].map(c => ({
     camada: c,
     label: CAMADA_LABELS[c] || c,
     count: statsHoje.filter(l => l.camada === c).length,

@@ -9,6 +9,10 @@
       "schedule": "*/10 * * * *"
     },
     {
+      "path": "/api/polling/retry",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/polling/reconciliacao",
       "schedule": "*/15 * * * *"
     }
