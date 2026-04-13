@@ -206,6 +206,8 @@ export async function processarFilaRetry(): Promise<PollingResult> {
 export async function pollingRapido(): Promise<PollingResult> {
   let pedidosProcessados = 0;
   const MAX_POR_EXECUCAO = 200;
+  const startTime = Date.now();
+  const TIMEOUT_MS = 240_000; // 240s safety (margem de 60s antes do timeout Vercel)
 
   try {
     await updatePollingState({ status: 'running' });
@@ -228,6 +230,12 @@ export async function pollingRapido(): Promise<PollingResult> {
     let maiorIdProcessado = cursorId;
 
     while (pedidosProcessados < MAX_POR_EXECUCAO) {
+      // Timeout safety
+      if (Date.now() - startTime > TIMEOUT_MS) {
+        console.log(`[rapido] Timeout safety atingido (${Math.round((Date.now() - startTime) / 1000)}s). Parando.`);
+        break;
+      }
+
       if (lastRateLimit) await waitForRateLimit(lastRateLimit);
 
       const { data: listagem, rateLimit } = await listarPedidos({
@@ -434,8 +442,8 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
   }
 
   // --- VERIFICACAO DE INICIO ---
-  // Deve iniciar às 3h00-3h01 UTC (00h Brasil) OU continuar checkpoint ativo
-  const deveIniciar = horaUTC === 3 && minutoUTC <= 1;
+  // Deve iniciar às 3h00-3h14 UTC (00h Brasil) OU continuar checkpoint ativo
+  const deveIniciar = horaUTC === 3 && minutoUTC <= 14;
   const concluidaEm = state?.reconciliacao_concluida_em;
   const jaConcluidaRecentemente = concluidaEm &&
     (agora.getTime() - new Date(concluidaEm).getTime()) < RECONCILIACAO_COOLDOWN_HORAS * 60 * 60 * 1000;
@@ -454,6 +462,7 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
   let dataAtual: string;
   let offsetAtual: number;
   let relatorioId: number | null = null;
+  let contadoresAcumulados: { varridos: number; divergentes: number; corrigidos: number; diasProcessados: number } | null = null;
 
   if (checkpointAtivo) {
     dataAtual = state.reconciliacao_data;
@@ -463,16 +472,23 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
       dataAtual = datasParaProcessar[0];
       offsetAtual = 0;
     }
-    // Busca relatorio em andamento
+    // Busca relatorio em andamento e carrega contadores acumulados
     const { data: rel } = await supabase
       .from('reconciliacao_relatorio')
-      .select('id')
+      .select('id, pedidos_varridos, pedidos_divergentes, pedidos_corrigidos, dias_processados')
       .eq('status', 'em_andamento')
       .order('iniciada_em', { ascending: false })
       .limit(1)
       .maybeSingle();
     relatorioId = rel?.id || null;
-    console.log(`[reconciliacao] Continuando checkpoint: data=${dataAtual} offset=${offsetAtual}`);
+    // Restaura contadores acumulados de execucoes anteriores
+    contadoresAcumulados = {
+      varridos: rel?.pedidos_varridos || 0,
+      divergentes: rel?.pedidos_divergentes || 0,
+      corrigidos: rel?.pedidos_corrigidos || 0,
+      diasProcessados: rel?.dias_processados || 0,
+    };
+    console.log(`[reconciliacao] Continuando checkpoint: data=${dataAtual} offset=${offsetAtual}, acumulados: ${contadoresAcumulados.varridos} varridos, ${contadoresAcumulados.divergentes} divergentes`);
   } else {
     dataAtual = datasParaProcessar[0];
     offsetAtual = 0;
@@ -500,8 +516,9 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
   const pedidosParaAprofundar: number[] = [];
   let lastRateLimit: RateLimitInfo | null = null;
   const indexDataAtual = datasParaProcessar.indexOf(dataAtual);
-  let pedidosVarridos = 0;
-  let diasProcessados = 0;
+  // Contadores iniciam com valores acumulados de execucoes anteriores (checkpoint)
+  let pedidosVarridos = checkpointAtivo ? (contadoresAcumulados?.varridos ?? 0) : 0;
+  let diasProcessados = checkpointAtivo ? (contadoresAcumulados?.diasProcessados ?? 0) : 0;
   const startTime = Date.now();
 
   try {

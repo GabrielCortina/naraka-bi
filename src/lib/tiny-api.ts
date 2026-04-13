@@ -24,10 +24,17 @@ function extractRateLimit(headers: Headers): RateLimitInfo {
 }
 
 // Aguarda se necessário para respeitar o rate limit
+// Cap máximo de 30s para evitar que a função serverless fique bloqueada
+const RATE_LIMIT_MAX_WAIT_MS = 30_000;
+
 async function waitForRateLimit(rateLimit: RateLimitInfo): Promise<void> {
   if (rateLimit.remaining <= 2) {
-    const waitMs = (rateLimit.resetSeconds + 1) * 1000;
-    console.log(`[tiny-api] Rate limit quase esgotado (${rateLimit.remaining}). Aguardando ${rateLimit.resetSeconds + 1}s...`);
+    const waitCalculado = (rateLimit.resetSeconds + 1) * 1000;
+    const waitMs = Math.min(waitCalculado, RATE_LIMIT_MAX_WAIT_MS);
+    if (waitCalculado > RATE_LIMIT_MAX_WAIT_MS) {
+      console.warn(`[rate-limit] Cap de 30s atingido (calculado: ${rateLimit.resetSeconds + 1}s)`);
+    }
+    console.log(`[tiny-api] Rate limit quase esgotado (${rateLimit.remaining}). Aguardando ${Math.round(waitMs / 1000)}s...`);
     await new Promise(resolve => setTimeout(resolve, waitMs));
   }
 }
