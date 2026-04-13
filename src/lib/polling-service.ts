@@ -207,21 +207,31 @@ export async function processarFilaRetry(): Promise<PollingResult> {
 // ============================================================
 export async function pollingRapido(): Promise<PollingResult> {
   let pedidosProcessados = 0;
-  const MAX_POR_EXECUCAO = 200;
   const startTime = Date.now();
   const TIMEOUT_MS = 240_000; // 240s safety (margem de 60s antes do timeout Vercel)
+  const supabaseLocal = createServiceClient();
+  const lockOwnerId = `rapido_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // Lock distribuído com UUID: impede execuções simultâneas (TTL 5 min)
+  const { data: lockAcquired } = await supabaseLocal.rpc('try_acquire_lock', {
+    p_key: 'polling_rapido',
+    p_owner_id: lockOwnerId,
+    p_ttl_seconds: 300,
+  });
+
+  if (!lockAcquired) {
+    console.log('[rapido] Outra instância em execução (lock ativo). Pulando.');
+    return { success: true, pedidosProcessados: 0, camada: 'rapido' };
+  }
 
   try {
     const state = await getPollingState();
 
-    // Verifica lock stale: se status='running' há mais de 10 min, considera crash anterior
-    if (state?.status === 'running' && state?.updated_at) {
-      const minDesdeUpdate = (Date.now() - new Date(state.updated_at).getTime()) / 60_000;
-      if (minDesdeUpdate < 10) {
-        console.log(`[rapido] Outra instância rodando (updated_at ${Math.round(minDesdeUpdate)}min atrás). Pulando.`);
-        return { success: true, pedidosProcessados: 0, camada: 'rapido' };
-      }
-      console.warn(`[rapido] Lock stale detectado (${Math.round(minDesdeUpdate)}min). Assumindo crash anterior.`);
+    // Modo conservador durante reconciliação (reduz de 200 para 30)
+    const reconciliacaoAtiva = state?.reconciliacao_data != null;
+    const MAX_POR_EXECUCAO = reconciliacaoAtiva ? 30 : 200;
+    if (reconciliacaoAtiva) {
+      console.log('[rapido] Reconciliação ativa — modo conservador (max 30)');
     }
 
     await updatePollingState({ status: 'running' });
@@ -325,6 +335,8 @@ export async function pollingRapido(): Promise<PollingResult> {
     console.error('[rapido] Erro fatal:', mensagem);
     await updatePollingState({ status: 'error', pedidos_processados: pedidosProcessados, erro_mensagem: mensagem });
     return { success: false, pedidosProcessados, camada: 'rapido', erro: mensagem };
+  } finally {
+    try { await supabaseLocal.rpc('release_lock', { p_key: 'polling_rapido', p_owner_id: lockOwnerId }); } catch { /* ignore */ }
   }
 }
 
@@ -336,17 +348,36 @@ export async function pollingRapido(): Promise<PollingResult> {
 // ============================================================
 export async function pollingStatus(): Promise<PollingResult> {
   let pedidosProcessados = 0;
-  const MAX_POR_EXECUCAO = 100;
   // Situações monitoradas pelo polling (pré-envio)
   const SITUACOES_MONITORADAS = [0, 1, 3, 4, 8]; // Aberto, Aprovado, Preparando, Faturado, Dados Incompletos
+  const supabaseLocal = createServiceClient();
+  const lockOwnerId = `status_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // Lock distribuído com UUID (TTL 5 min)
+  const { data: lockAcquired } = await supabaseLocal.rpc('try_acquire_lock', {
+    p_key: 'polling_status',
+    p_owner_id: lockOwnerId,
+    p_ttl_seconds: 300,
+  });
+
+  if (!lockAcquired) {
+    console.log('[status] Outra instância em execução (lock ativo). Pulando.');
+    return { success: true, pedidosProcessados: 0, camada: 'status' };
+  }
 
   try {
-    const supabase = createServiceClient();
+    const state = await getPollingState();
+
+    // Modo conservador durante reconciliação (reduz de 100 para 20)
+    const reconciliacaoAtiva = state?.reconciliacao_data != null;
+    const MAX_POR_EXECUCAO = reconciliacaoAtiva ? 20 : 100;
+    if (reconciliacaoAtiva) {
+      console.log('[status] Reconciliação ativa — modo conservador (max 20)');
+    }
 
     // Busca pedidos não-finais em situações monitoradas
     // Ordenados por last_sync_at ASC (mais antigos primeiro, NULLs primeiro)
-    // O filtro de 10 min é aplicado no JS para evitar problemas com .or() no PostgREST
-    const { data: candidatos, error } = await supabase
+    const { data: candidatos, error } = await supabaseLocal
       .from('pedidos')
       .select('id, numero_pedido, last_sync_at')
       .eq('situacao_final', false)
@@ -394,6 +425,8 @@ export async function pollingStatus(): Promise<PollingResult> {
     const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
     console.error('[status] Erro fatal:', mensagem);
     return { success: false, pedidosProcessados, camada: 'status', erro: mensagem };
+  } finally {
+    try { await supabaseLocal.rpc('release_lock', { p_key: 'polling_status', p_owner_id: lockOwnerId }); } catch { /* ignore */ }
   }
 }
 

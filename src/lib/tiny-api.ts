@@ -39,11 +39,55 @@ async function waitForRateLimit(rateLimit: RateLimitInfo): Promise<void> {
   }
 }
 
-// Faz requisição autenticada à API Tiny com controle de rate limit
+// Rate limiter centralizado via Supabase (compartilhado entre instâncias)
+const RATE_LIMIT_CENTRAL = 25; // margem abaixo dos 30/min da Tiny
+const RATE_LIMIT_JANELA_MS = 60_000; // 1 minuto
+
+async function checkRateLimit(): Promise<void> {
+  try {
+    const { createServiceClient } = await import('./supabase-server');
+    const supabase = createServiceClient();
+
+    // Incremento atômico via RPC (evita race condition)
+    const { data: count } = await supabase.rpc('increment_rate_limit', {
+      p_id: 'tiny_api',
+      p_limite: RATE_LIMIT_CENTRAL,
+      p_janela_ms: RATE_LIMIT_JANELA_MS,
+    });
+
+    if (count && count > RATE_LIMIT_CENTRAL) {
+      // Budget esgotado — busca tempo restante da janela
+      const { data: limiter } = await supabase
+        .from('rate_limiter')
+        .select('janela_inicio')
+        .eq('id', 'tiny_api')
+        .single();
+
+      if (limiter?.janela_inicio) {
+        const espera = RATE_LIMIT_JANELA_MS - (Date.now() - new Date(limiter.janela_inicio).getTime());
+        if (espera > 0) {
+          const esperaReal = Math.min(espera + 100, RATE_LIMIT_MAX_WAIT_MS);
+          console.warn(`[rate-limit-central] Budget esgotado (${count}/${RATE_LIMIT_CENTRAL}). Aguardando ${Math.ceil(esperaReal / 1000)}s`);
+          await new Promise(resolve => setTimeout(resolve, esperaReal));
+        }
+      }
+    }
+  } catch (err) {
+    // Se falhar o rate limiter centralizado, continua sem bloquear
+    console.warn('[rate-limit-central] Erro ao verificar rate limit:', err instanceof Error ? err.message : err);
+  }
+}
+
+// Faz requisição autenticada à API Tiny com controle de rate limit duplo
+// 1. checkRateLimit() — limiter centralizado via Supabase (entre instâncias)
+// 2. waitForRateLimit() — limiter local via headers (dentro da instância)
 async function tinyFetch<T>(
   path: string,
   params?: Record<string, string>
 ): Promise<{ data: T; rateLimit: RateLimitInfo }> {
+  // Rate limit centralizado (antes de cada chamada)
+  await checkRateLimit();
+
   const token = await getValidAccessToken();
 
   const url = new URL(`${BASE_URL}${path}`);
@@ -63,8 +107,12 @@ async function tinyFetch<T>(
   const rateLimit = extractRateLimit(response.headers);
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Tiny API erro ${response.status}: ${error}`);
+    const errorBody = await response.text();
+    // Detecção de 429 com informação extra
+    if (response.status === 429) {
+      throw new Error(`Tiny API 429 Too Many Requests: ${errorBody}`);
+    }
+    throw new Error(`Tiny API erro ${response.status}: ${errorBody}`);
   }
 
   const data = await response.json() as T;

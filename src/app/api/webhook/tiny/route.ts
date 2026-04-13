@@ -33,7 +33,9 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ status: 'ok' });
 }
 
-// Retry com backoff exponencial: 2s, 4s, 8s
+// Retry com backoff exponencial
+// Para 429 (rate limit): backoff mais longo (5s, 15s, 30s)
+// Para outros erros: backoff normal (2s, 4s, 8s)
 async function obterPedidoComRetry(idPedido: number, maxTentativas = 3): Promise<TinyPedidoFull> {
   let ultimoErro: Error | null = null;
 
@@ -43,9 +45,12 @@ async function obterPedidoComRetry(idPedido: number, maxTentativas = 3): Promise
       return pedidoCompleto;
     } catch (err) {
       ultimoErro = err instanceof Error ? err : new Error(String(err));
-      console.warn(`[webhook] Tentativa ${tentativa}/${maxTentativas} falhou para pedido ${idPedido}: ${ultimoErro.message}`);
+      const is429 = ultimoErro.message.includes('429') || ultimoErro.message.includes('Too Many');
+      console.warn(`[webhook] Tentativa ${tentativa}/${maxTentativas} falhou para pedido ${idPedido}${is429 ? ' (429 rate limit)' : ''}: ${ultimoErro.message}`);
       if (tentativa < maxTentativas) {
-        const delay = Math.pow(2, tentativa) * 1000;
+        const delay = is429
+          ? [5000, 15000, 30000][tentativa - 1]
+          : Math.pow(2, tentativa) * 1000;
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
