@@ -117,13 +117,14 @@ export default function SistemaApiPage() {
   const [tinyConnected, setTinyConnected] = useState(false);
   const [tinyExpiry, setTinyExpiry] = useState<string | null>(null);
   const [ultimoRelatorio, setUltimoRelatorio] = useState<ReconciliacaoRelatorio | null>(null);
+  const [deadLettersHoje, setDeadLettersHoje] = useState(0);
 
   const fetchData = useCallback(async () => {
     const db = createBrowserClient();
     const inicioDia = inicioDiaLocal();
 
     // Busca em paralelo: últimas execuções, erros 24h, stats do dia, último de cada camada, status Tiny
-    const [logsRes, errosRes, statsRes, statusRes, relatorioRes, ...ultimosRes] = await Promise.all([
+    const [logsRes, errosRes, statsRes, statusRes, relatorioRes, deadLetterRes, ...ultimosRes] = await Promise.all([
       db.from('polling_logs').select('*').order('iniciado_em', { ascending: false }).limit(50),
       db.from('polling_logs').select('*')
         .in('status', ['error', 'timeout'])
@@ -134,6 +135,8 @@ export default function SistemaApiPage() {
       fetch('/api/status').then(r => r.json()).catch(() => null),
       db.from('reconciliacao_relatorio').select('*')
         .order('iniciada_em', { ascending: false }).limit(1).maybeSingle(),
+      db.from('webhook_retry_queue').select('*', { count: 'exact', head: true })
+        .eq('dead_letter', true),
       // Último log de cada camada
       ...['rapido', 'status', 'retry', 'reconciliacao', 'webhook'].map(camada =>
         db.from('polling_logs').select('*').eq('camada', camada)
@@ -145,6 +148,7 @@ export default function SistemaApiPage() {
     setErros(errosRes.data || []);
     setStatsHoje(statsRes.data || []);
     setUltimoRelatorio(relatorioRes.data || null);
+    setDeadLettersHoje(deadLetterRes.count || 0);
 
     if (statusRes?.tiny) {
       setTinyConnected(statusRes.tiny.connected);
@@ -387,6 +391,15 @@ export default function SistemaApiPage() {
             <p className="text-sm font-medium">{taxaSucesso}%</p>
           </div>
         </div>
+
+        {/* Dead letters */}
+        {deadLettersHoje > 0 && (
+          <div className="p-2 rounded mb-3" style={{ background: '#FCEBEB' }}>
+            <p className="text-xs" style={{ color: '#E24B4A' }}>
+              Dead letters: <span className="font-medium">{deadLettersHoje}</span> pedidos abandonados apos 5 tentativas
+            </p>
+          </div>
+        )}
 
         {/* Breakdown por camada */}
         {porCamada.length > 0 && (

@@ -4,7 +4,8 @@ import type { TinyPedidoFull } from '@/types/tiny';
 import type { RateLimitInfo } from './tiny-api';
 
 // Situações realmente finais — pedido não muda mais
-const SITUACOES_FINAIS = [2, 6, 9]; // Cancelado, Devolvido, Entregue
+// 2=Cancelada, 6=Entregue, 9=Nao Entregue
+const SITUACOES_FINAIS = [2, 6, 9];
 
 export interface PollingResult {
   success: boolean;
@@ -169,11 +170,12 @@ export async function processarFilaRetry(): Promise<PollingResult> {
           await supabase.from('webhook_retry_queue')
             .update({
               processado: true,
+              dead_letter: true,
               tentativas: novasTentativas,
               ultimo_erro: `Desistido após ${MAX_TENTATIVAS_TOTAL} tentativas: ${msg}`,
             })
             .eq('id', item.id);
-          console.error(`[retry] Desistido após ${MAX_TENTATIVAS_TOTAL} tentativas: pedido ${item.id_pedido}`);
+          console.error(`[retry] DEAD LETTER: pedido ${item.id_pedido} desistido após ${MAX_TENTATIVAS_TOTAL} tentativas`);
         } else {
           const proximaTentativa = new Date(Date.now() + novasTentativas * 5 * 60 * 1000).toISOString();
           await supabase.from('webhook_retry_queue')
@@ -210,78 +212,99 @@ export async function pollingRapido(): Promise<PollingResult> {
   const TIMEOUT_MS = 240_000; // 240s safety (margem de 60s antes do timeout Vercel)
 
   try {
+    const state = await getPollingState();
+
+    // Verifica lock stale: se status='running' há mais de 10 min, considera crash anterior
+    if (state?.status === 'running' && state?.updated_at) {
+      const minDesdeUpdate = (Date.now() - new Date(state.updated_at).getTime()) / 60_000;
+      if (minDesdeUpdate < 10) {
+        console.log(`[rapido] Outra instância rodando (updated_at ${Math.round(minDesdeUpdate)}min atrás). Pulando.`);
+        return { success: true, pedidosProcessados: 0, camada: 'rapido' };
+      }
+      console.warn(`[rapido] Lock stale detectado (${Math.round(minDesdeUpdate)}min). Assumindo crash anterior.`);
+    }
+
     await updatePollingState({ status: 'running' });
 
-    const state = await getPollingState();
     const hoje = dataDiasAtras(0);
+    const ontem = dataDiasAtras(1);
 
     // Reseta cursor se mudou de dia
     let cursorId: number = state?.cursor_id ?? 0;
     const cursorData = state?.cursor_data;
-    if (!cursorData || cursorData !== hoje) {
+    const mudouDeDia = !cursorData || cursorData !== hoje;
+    if (mudouDeDia) {
       console.log(`[rapido] Novo dia detectado (${cursorData} -> ${hoje}), resetando cursor`);
       cursorId = 0;
     }
 
-    console.log(`[rapido] Buscando pedidos de ${hoje} com id > ${cursorId} (max ${MAX_POR_EXECUCAO})`);
+    // Gap meia-noite: nas primeiras execuções após mudança de dia, buscar ontem também
+    const datasParaBuscar = mudouDeDia && cursorData === ontem ? [ontem, hoje] : [hoje];
+    console.log(`[rapido] Buscando pedidos de ${datasParaBuscar.join(', ')} com id > ${cursorId} (max ${MAX_POR_EXECUCAO})`);
 
-    let offset = 0;
     let lastRateLimit: RateLimitInfo | null = null;
     let maiorIdProcessado = cursorId;
 
-    while (pedidosProcessados < MAX_POR_EXECUCAO) {
-      // Timeout safety
-      if (Date.now() - startTime > TIMEOUT_MS) {
-        console.log(`[rapido] Timeout safety atingido (${Math.round((Date.now() - startTime) / 1000)}s). Parando.`);
-        break;
-      }
+    for (const dataBusca of datasParaBuscar) {
+      let offset = 0;
 
-      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
-
-      const { data: listagem, rateLimit } = await listarPedidos({
-        dataAtualizacao: hoje,
-        orderBy: 'asc',
-        limit: 100,
-        offset,
-      });
-
-      lastRateLimit = rateLimit;
-
-      if (listagem.itens.length === 0) break;
-
-      // Filtra apenas pedidos com id > cursor
-      const novos = listagem.itens.filter(p => p.id > cursorId);
-
-      if (novos.length === 0) {
-        // Todos os pedidos desta página já foram processados, avança
-        if (offset + 100 < listagem.paginacao.total) {
-          offset += 100;
-          continue;
+      while (pedidosProcessados < MAX_POR_EXECUCAO) {
+        // Timeout safety
+        if (Date.now() - startTime > TIMEOUT_MS) {
+          console.log(`[rapido] Timeout safety atingido (${Math.round((Date.now() - startTime) / 1000)}s). Parando.`);
+          break;
         }
-        break;
-      }
 
-      for (const pedidoResumido of novos) {
-        if (pedidosProcessados >= MAX_POR_EXECUCAO) break;
         if (lastRateLimit) await waitForRateLimit(lastRateLimit);
 
-        try {
-          const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
-          lastRateLimit = rl;
-          await upsertPedido(pedidoCompleto);
-          pedidosProcessados++;
+        const { data: listagem, rateLimit } = await listarPedidos({
+          dataAtualizacao: dataBusca,
+          orderBy: 'asc',
+          limit: 100,
+          offset,
+        });
 
-          if (pedidoResumido.id > maiorIdProcessado) {
-            maiorIdProcessado = pedidoResumido.id;
+        lastRateLimit = rateLimit;
+
+        if (listagem.itens.length === 0) break;
+
+        // Filtra apenas pedidos com id > cursor (para data de hoje; para ontem processa todos)
+        const novos = dataBusca === hoje
+          ? listagem.itens.filter(p => p.id > cursorId)
+          : listagem.itens;
+
+        if (novos.length === 0) {
+          if (offset + 100 < listagem.paginacao.total) {
+            offset += 100;
+            continue;
           }
-        } catch (err) {
-          console.error(`[rapido] Erro pedido ${pedidoResumido.id}:`, err);
+          break;
         }
+
+        for (const pedidoResumido of novos) {
+          if (pedidosProcessados >= MAX_POR_EXECUCAO) break;
+          if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+          try {
+            const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
+            lastRateLimit = rl;
+            await upsertPedido(pedidoCompleto);
+            pedidosProcessados++;
+
+            if (dataBusca === hoje && pedidoResumido.id > maiorIdProcessado) {
+              maiorIdProcessado = pedidoResumido.id;
+            }
+          } catch (err) {
+            console.error(`[rapido] Erro pedido ${pedidoResumido.id}:`, err);
+          }
+        }
+
+        if (offset + 100 >= listagem.paginacao.total) break;
+        offset += 100;
       }
 
-      // Se já processou todos ou atingiu o limite, para
-      if (offset + 100 >= listagem.paginacao.total) break;
-      offset += 100;
+      if (pedidosProcessados >= MAX_POR_EXECUCAO) break;
+      if (Date.now() - startTime > TIMEOUT_MS) break;
     }
 
     // Salva o cursor atualizado
@@ -509,11 +532,14 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
       reconciliacao_iniciada_em: agora.toISOString(),
       reconciliacao_concluida_em: null,
     });
+    // Limpa divergentes anteriores ao iniciar nova reconciliacao
+    await supabase.from('reconciliacao_divergentes').delete().eq('processado', false);
+    await supabase.from('reconciliacao_divergentes').delete().eq('processado', true);
     console.log(`[reconciliacao] Iniciando nova reconciliacao. Relatorio ID: ${relatorioId}`);
   }
 
   // --- FASE 1: Varredura rapida ---
-  const pedidosParaAprofundar: number[] = [];
+  let divergentesNestaExecucao = 0;
   let lastRateLimit: RateLimitInfo | null = null;
   const indexDataAtual = datasParaProcessar.indexOf(dataAtual);
   // Contadores iniciam com valores acumulados de execucoes anteriores (checkpoint)
@@ -530,9 +556,11 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
       if (new Date().getUTCHours() >= 11) {
         console.log('[reconciliacao] Chegou as 8h Brasil durante fase 1. Salvando checkpoint.');
         await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
+        const { count: totalDivergentes } = await supabase
+          .from('reconciliacao_divergentes').select('*', { count: 'exact', head: true }).eq('processado', false);
         await atualizarRelatorio(supabase, relatorioId, {
           pedidos_varridos: pedidosVarridos,
-          pedidos_divergentes: pedidosParaAprofundar.length,
+          pedidos_divergentes: (totalDivergentes || 0) + divergentesNestaExecucao,
           ultimo_checkpoint_data: data,
           ultimo_checkpoint_offset: offset,
           dias_processados: diasProcessados,
@@ -545,9 +573,11 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
         if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
           console.log(`[reconciliacao] Timeout safety fase 1. Checkpoint: data=${data} offset=${offset}`);
           await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
+          const { count: totalDivergentes } = await supabase
+            .from('reconciliacao_divergentes').select('*', { count: 'exact', head: true }).eq('processado', false);
           await atualizarRelatorio(supabase, relatorioId, {
             pedidos_varridos: pedidosVarridos,
-            pedidos_divergentes: pedidosParaAprofundar.length,
+            pedidos_divergentes: (totalDivergentes || 0),
             ultimo_checkpoint_data: data,
             ultimo_checkpoint_offset: offset,
             dias_processados: diasProcessados,
@@ -576,12 +606,19 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
 
         const mapaBanco = new Map((noBanco || []).map(p => [p.id, p.situacao as number]));
 
+        // Insere divergentes diretamente no banco (persistidos entre checkpoints)
+        const divergentesLote: { id_pedido: number; processado: boolean }[] = [];
         for (const pedidoTiny of listagem.itens) {
           const situacaoBanco = mapaBanco.get(pedidoTiny.id);
           if (situacaoBanco === undefined || situacaoBanco !== pedidoTiny.situacao) {
-            pedidosParaAprofundar.push(pedidoTiny.id);
+            divergentesLote.push({ id_pedido: pedidoTiny.id, processado: false });
           }
           pedidosVarridos++;
+        }
+        if (divergentesLote.length > 0) {
+          await supabase.from('reconciliacao_divergentes')
+            .upsert(divergentesLote, { onConflict: 'id_pedido' });
+          divergentesNestaExecucao += divergentesLote.length;
         }
 
         offset += 100;
@@ -591,65 +628,89 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
       }
 
       diasProcessados++;
-      console.log(`[reconciliacao] Data ${data} varrida. Divergentes ate agora: ${pedidosParaAprofundar.length}`);
+      console.log(`[reconciliacao] Data ${data} varrida. Divergentes nesta execucao: ${divergentesNestaExecucao}`);
     }
 
-    // --- FASE 2: Aprofundamento ---
-    let pedidosCorrigidos = 0;
-    console.log(`[reconciliacao] Fase 2: ${pedidosParaAprofundar.length} pedidos para aprofundar`);
+    // --- FASE 2: Aprofundamento (busca divergentes do banco, nao da memoria) ---
+    let pedidosCorrigidos = checkpointAtivo ? (contadoresAcumulados?.corrigidos ?? 0) : 0;
+    const { count: totalDivergentes } = await supabase
+      .from('reconciliacao_divergentes').select('*', { count: 'exact', head: true }).eq('processado', false);
+    const numDivergentes = totalDivergentes || 0;
+    console.log(`[reconciliacao] Fase 2: ${numDivergentes} pedidos divergentes para aprofundar`);
 
-    for (const idPedido of pedidosParaAprofundar) {
-      // Verifica limite de 8h
-      if (new Date().getUTCHours() >= 11) {
-        const faltaram = pedidosParaAprofundar.length - pedidosCorrigidos;
-        console.log(`[reconciliacao] Chegou as 8h Brasil durante fase 2. Faltaram ${faltaram} pedidos.`);
-        await salvarRelatorioFinal(supabase, relatorioId, {
-          status: 'interrompida',
-          pedidos_varridos: pedidosVarridos,
-          pedidos_divergentes: pedidosParaAprofundar.length,
-          pedidos_corrigidos: pedidosCorrigidos,
-          pedidos_faltaram: faltaram,
-          dias_processados: diasProcessados,
-          observacao: `Interrompida as 8h Brasil. ${faltaram} pedidos divergentes nao processados.`,
-        });
-        await updatePollingState({ reconciliacao_data: null, reconciliacao_offset: 0 });
-        return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
-      }
+    while (true) {
+      // Busca lote de divergentes nao processados
+      const { data: divergentes } = await supabase
+        .from('reconciliacao_divergentes')
+        .select('id_pedido')
+        .eq('processado', false)
+        .order('id_pedido', { ascending: true })
+        .limit(50);
 
-      // Timeout safety
-      if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
-        const faltaram = pedidosParaAprofundar.length - pedidosCorrigidos;
-        await atualizarRelatorio(supabase, relatorioId, {
-          pedidos_varridos: pedidosVarridos,
-          pedidos_divergentes: pedidosParaAprofundar.length,
-          pedidos_corrigidos: pedidosCorrigidos,
-          pedidos_faltaram: faltaram,
-          dias_processados: diasProcessados,
-        });
-        return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
-      }
+      if (!divergentes || divergentes.length === 0) break;
 
-      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+      for (const item of divergentes) {
+        // Verifica limite de 8h
+        if (new Date().getUTCHours() >= 11) {
+          const { count: faltaramCount } = await supabase
+            .from('reconciliacao_divergentes').select('*', { count: 'exact', head: true }).eq('processado', false);
+          const faltaram = faltaramCount || 0;
+          console.log(`[reconciliacao] Chegou as 8h Brasil durante fase 2. Faltaram ${faltaram} pedidos.`);
+          await salvarRelatorioFinal(supabase, relatorioId, {
+            status: 'interrompida',
+            pedidos_varridos: pedidosVarridos,
+            pedidos_divergentes: numDivergentes + divergentesNestaExecucao,
+            pedidos_corrigidos: pedidosCorrigidos,
+            pedidos_faltaram: faltaram,
+            dias_processados: diasProcessados,
+            observacao: `Interrompida as 8h Brasil. ${faltaram} pedidos divergentes nao processados.`,
+          });
+          await updatePollingState({ reconciliacao_data: null, reconciliacao_offset: 0 });
+          return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
+        }
 
-      try {
-        const { data: pedidoCompleto, rateLimit } = await obterPedido(idPedido);
-        lastRateLimit = rateLimit;
-        await upsertPedido(pedidoCompleto);
-        pedidosCorrigidos++;
-      } catch (err) {
-        console.error(`[reconciliacao] Erro ao aprofundar pedido ${idPedido}:`, err);
+        // Timeout safety
+        if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
+          const { count: faltaramCount } = await supabase
+            .from('reconciliacao_divergentes').select('*', { count: 'exact', head: true }).eq('processado', false);
+          await atualizarRelatorio(supabase, relatorioId, {
+            pedidos_varridos: pedidosVarridos,
+            pedidos_divergentes: numDivergentes + divergentesNestaExecucao,
+            pedidos_corrigidos: pedidosCorrigidos,
+            pedidos_faltaram: faltaramCount || 0,
+            dias_processados: diasProcessados,
+          });
+          return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
+        }
+
+        if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+        try {
+          const { data: pedidoCompleto, rateLimit } = await obterPedido(item.id_pedido);
+          lastRateLimit = rateLimit;
+          await upsertPedido(pedidoCompleto);
+          pedidosCorrigidos++;
+        } catch (err) {
+          console.error(`[reconciliacao] Erro ao aprofundar pedido ${item.id_pedido}:`, err);
+        }
+
+        // Marca divergente como processado no banco
+        await supabase.from('reconciliacao_divergentes')
+          .update({ processado: true })
+          .eq('id_pedido', item.id_pedido);
       }
     }
 
-    // --- CONCLUSAO ---
+    // --- CONCLUSAO: limpa divergentes e finaliza ---
+    await supabase.from('reconciliacao_divergentes').delete().eq('processado', true);
     await salvarRelatorioFinal(supabase, relatorioId, {
       status: 'concluida',
       pedidos_varridos: pedidosVarridos,
-      pedidos_divergentes: pedidosParaAprofundar.length,
+      pedidos_divergentes: numDivergentes + divergentesNestaExecucao,
       pedidos_corrigidos: pedidosCorrigidos,
       pedidos_faltaram: 0,
       dias_processados: 3,
-      observacao: `Concluida com sucesso. ${pedidosCorrigidos} pedidos corrigidos de ${pedidosParaAprofundar.length} divergentes.`,
+      observacao: `Concluida com sucesso. ${pedidosCorrigidos} pedidos corrigidos.`,
     });
     await updatePollingState({
       reconciliacao_data: null,
@@ -657,7 +718,7 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
       reconciliacao_concluida_em: new Date().toISOString(),
     });
 
-    console.log(`[reconciliacao] Concluida. ${pedidosCorrigidos}/${pedidosParaAprofundar.length} corrigidos de ${pedidosVarridos} varridos.`);
+    console.log(`[reconciliacao] Concluida. ${pedidosCorrigidos} corrigidos de ${pedidosVarridos} varridos.`);
     return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
 
   } catch (err) {
