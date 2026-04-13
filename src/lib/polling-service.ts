@@ -294,13 +294,14 @@ export async function pollingStatus(): Promise<PollingResult> {
 }
 
 // ============================================================
-// CAMADA 3: Reconciliação com checkpoint paginado
-// Roda a cada 15 min via cron, mas só inicia se última conclusão > 20h atrás
-// Processa max 500 pedidos por execução para evitar timeout de 300s
+// CAMADA 3: Reconciliação em 2 fases com checkpoint
+// Fase 1: Varredura rápida — compara listagem da Tiny com banco em lote
+// Fase 2: Aprofundamento — GET individual só nos divergentes
+// Checkpoint permite retomar entre execuções (timeout 240s safety)
 // ============================================================
-const RECONCILIACAO_MAX_PEDIDOS = 500;
-const RECONCILIACAO_TIMEOUT_MS = 240_000; // 240s safety (Vercel limit 300s)
+const RECONCILIACAO_TIMEOUT_MS = 240_000; // 240s (margem de 60s antes do timeout Vercel)
 const RECONCILIACAO_COOLDOWN_HORAS = 20;
+const LOTE_LISTAGEM = 100;
 
 export async function pollingReconciliacao(): Promise<PollingResult> {
   let pedidosProcessados = 0;
@@ -309,103 +310,140 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
   try {
     const supabase = createServiceClient();
     const state = await getPollingState();
+    const agora = new Date();
 
-    // Verifica cooldown: não rodar se última conclusão foi há menos de 20h
-    if (state?.reconciliacao_concluida_em) {
-      const horasDesdeUltima = (Date.now() - new Date(state.reconciliacao_concluida_em).getTime()) / (1000 * 60 * 60);
-      if (horasDesdeUltima < RECONCILIACAO_COOLDOWN_HORAS && !state.reconciliacao_data) {
-        console.log(`[reconciliacao] Cooldown ativo (${horasDesdeUltima.toFixed(1)}h < ${RECONCILIACAO_COOLDOWN_HORAS}h). Pulando.`);
-        return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+    // --- Controle de quando iniciar ---
+    const horaUTC = agora.getUTCHours();
+    const minutoUTC = agora.getUTCMinutes();
+    const dentroJanelaInicio = horaUTC === 4 && minutoUTC < 15;
+
+    const concluidaEm = state?.reconciliacao_concluida_em;
+    const jaConcluidaRecentemente = concluidaEm &&
+      (agora.getTime() - new Date(concluidaEm).getTime()) < RECONCILIACAO_COOLDOWN_HORAS * 60 * 60 * 1000;
+
+    const checkpointAtivo = state?.reconciliacao_data != null;
+
+    // Decisão: continuar checkpoint OU iniciar na janela OU pular
+    if (!checkpointAtivo && (!dentroJanelaInicio || jaConcluidaRecentemente)) {
+      return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+    }
+
+    // --- Inicialização do checkpoint ---
+    const datasParaProcessar = [dataDiasAtras(2), dataDiasAtras(1), dataDiasAtras(0)];
+    let dataAtual: string;
+    let offsetAtual: number;
+
+    if (checkpointAtivo) {
+      dataAtual = state.reconciliacao_data;
+      offsetAtual = state.reconciliacao_offset || 0;
+      // Se a data do checkpoint não está nos últimos 3 dias, reseta
+      if (!datasParaProcessar.includes(dataAtual)) {
+        dataAtual = datasParaProcessar[0];
+        offsetAtual = 0;
       }
+      console.log(`[reconciliacao] Continuando checkpoint: data=${dataAtual} offset=${offsetAtual}`);
+    } else {
+      dataAtual = datasParaProcessar[0];
+      offsetAtual = 0;
+      await updatePollingState({
+        reconciliacao_data: dataAtual,
+        reconciliacao_offset: 0,
+        reconciliacao_iniciada_em: agora.toISOString(),
+      });
+      console.log(`[reconciliacao] Iniciando nova reconciliação a partir de ${dataAtual}`);
     }
 
-    // Datas dos últimos 3 dias
-    const datas = [dataDiasAtras(2), dataDiasAtras(1), dataDiasAtras(0)];
-
-    // Recupera checkpoint ou inicia do zero
-    let dataAtual = state?.reconciliacao_data || datas[0];
-    let offset = state?.reconciliacao_offset || 0;
-
-    // Se a data do checkpoint não está nos últimos 3 dias, reseta
-    if (!datas.includes(dataAtual)) {
-      dataAtual = datas[0];
-      offset = 0;
-    }
-
-    console.log(`[reconciliacao] Checkpoint: data=${dataAtual} offset=${offset}`);
-
+    // --- Fase 1: Varredura rápida ---
+    const pedidosParaAprofundar: number[] = [];
     let lastRateLimit: RateLimitInfo | null = null;
-    let concluiu = false;
+    const indexDataAtual = datasParaProcessar.indexOf(dataAtual);
 
-    while (pedidosProcessados < RECONCILIACAO_MAX_PEDIDOS) {
-      // Timeout safety
+    for (let di = indexDataAtual; di < datasParaProcessar.length; di++) {
+      const data = datasParaProcessar[di];
+      let offset = di === indexDataAtual ? offsetAtual : 0;
+
+      while (true) {
+        // Timeout safety
+        if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
+          console.log(`[reconciliacao] Timeout safety fase 1. Checkpoint: data=${data} offset=${offset}`);
+          await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
+          return { success: true, pedidosProcessados, camada: 'reconciliacao' };
+        }
+
+        if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+        const { data: listagem, rateLimit } = await listarPedidos({
+          dataAtualizacao: data,
+          orderBy: 'asc',
+          limit: LOTE_LISTAGEM,
+          offset,
+        });
+        lastRateLimit = rateLimit;
+
+        if (listagem.itens.length === 0) break;
+
+        // Compara com banco em lote (1 query para N pedidos)
+        const idsLote = listagem.itens.map(p => p.id);
+        const { data: noBanco } = await supabase
+          .from('pedidos')
+          .select('id, situacao')
+          .in('id', idsLote);
+
+        const mapaBanco = new Map((noBanco || []).map(p => [p.id, p.situacao as number]));
+
+        for (const pedidoTiny of listagem.itens) {
+          const situacaoBanco = mapaBanco.get(pedidoTiny.id);
+
+          if (situacaoBanco === undefined) {
+            // Pedido não existe no banco
+            pedidosParaAprofundar.push(pedidoTiny.id);
+          } else if (situacaoBanco !== pedidoTiny.situacao) {
+            // Status diferente
+            pedidosParaAprofundar.push(pedidoTiny.id);
+          }
+        }
+
+        offset += LOTE_LISTAGEM;
+
+        // Salva checkpoint após cada página
+        await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
+
+        if (listagem.itens.length < LOTE_LISTAGEM) break;
+      }
+
+      console.log(`[reconciliacao] Data ${data} varrida.`);
+    }
+
+    console.log(`[reconciliacao] Fase 1 concluída. ${pedidosParaAprofundar.length} pedidos para aprofundar.`);
+
+    // --- Fase 2: Aprofundamento só nos divergentes ---
+    for (const idPedido of pedidosParaAprofundar) {
       if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
-        console.log(`[reconciliacao] Timeout safety (${Math.round((Date.now() - startTime) / 1000)}s). Salvando checkpoint.`);
-        break;
+        console.log(`[reconciliacao] Timeout safety fase 2. ${pedidosProcessados} aprofundados.`);
+        // Checkpoint já salvo na fase 1, próxima execução reprocessa
+        return { success: true, pedidosProcessados, camada: 'reconciliacao' };
       }
 
       if (lastRateLimit) await waitForRateLimit(lastRateLimit);
 
-      const { data: listagem, rateLimit } = await listarPedidos({
-        dataAtualizacao: dataAtual,
-        orderBy: 'asc',
-        limit: 100,
-        offset,
-      });
-
-      lastRateLimit = rateLimit;
-
-      if (listagem.itens.length === 0) {
-        // Terminou esta data — avança para próxima
-        const idxAtual = datas.indexOf(dataAtual);
-        if (idxAtual < datas.length - 1) {
-          dataAtual = datas[idxAtual + 1];
-          offset = 0;
-          console.log(`[reconciliacao] Data concluída, avançando para ${dataAtual}`);
-          continue;
-        } else {
-          // Terminou todos os 3 dias
-          concluiu = true;
-          break;
-        }
+      try {
+        const { data: pedidoCompleto, rateLimit } = await obterPedido(idPedido);
+        lastRateLimit = rateLimit;
+        await upsertPedido(pedidoCompleto);
+        pedidosProcessados++;
+      } catch (err) {
+        console.error(`[reconciliacao] Erro ao aprofundar pedido ${idPedido}:`, err);
       }
-
-      for (const pedidoResumido of listagem.itens) {
-        if (pedidosProcessados >= RECONCILIACAO_MAX_PEDIDOS) break;
-        if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) break;
-        if (lastRateLimit) await waitForRateLimit(lastRateLimit);
-
-        try {
-          const { data: pedidoCompleto, rateLimit: rl } = await obterPedido(pedidoResumido.id);
-          lastRateLimit = rl;
-          await upsertPedido(pedidoCompleto);
-          pedidosProcessados++;
-        } catch (err) {
-          console.error(`[reconciliacao] Erro pedido ${pedidoResumido.id}:`, err);
-        }
-      }
-
-      offset += 100;
     }
 
-    // Salva checkpoint ou limpa se concluiu
-    if (concluiu) {
-      await supabase.from('polling_state').update({
-        reconciliacao_data: null,
-        reconciliacao_offset: 0,
-        reconciliacao_concluida_em: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }).eq('id', 1);
-      console.log(`[reconciliacao] Concluída: ${pedidosProcessados} pedidos nos 3 dias`);
-    } else {
-      await supabase.from('polling_state').update({
-        reconciliacao_data: dataAtual,
-        reconciliacao_offset: offset,
-        updated_at: new Date().toISOString(),
-      }).eq('id', 1);
-      console.log(`[reconciliacao] Checkpoint salvo: data=${dataAtual} offset=${offset} (${pedidosProcessados} pedidos nesta execução)`);
-    }
+    // --- Conclusão: limpa checkpoint ---
+    await updatePollingState({
+      reconciliacao_data: null,
+      reconciliacao_offset: 0,
+      reconciliacao_concluida_em: new Date().toISOString(),
+    });
 
+    console.log(`[reconciliacao] Concluída. ${pedidosProcessados} pedidos aprofundados de ${pedidosParaAprofundar.length} divergentes.`);
     return { success: true, pedidosProcessados, camada: 'reconciliacao' };
 
   } catch (err) {
