@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { createServiceClient } from '@/lib/supabase-server';
 import { obterPedido } from '@/lib/tiny-api';
 import { upsertPedido } from '@/lib/polling-service';
@@ -7,7 +8,12 @@ import type { TinyPedidoFull } from '@/types/tiny';
 // POST /api/webhook/tiny
 // Recebe notificações da Tiny (inclusao_pedido, atualizacao_pedido).
 // Processa DIRETO com retry. Se falhar, insere na fila de retry.
+// waitUntil() garante que o Vercel não mata a função antes de completar.
 // SEMPRE retorna 200.
+//
+// IMPORTANTE: após deploy, fazer Purge Build Cache no Vercel
+// (Settings > General > Purge Build Cache) para garantir que
+// instâncias serverless antigas não continuem rodando código antigo.
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
   let body: Record<string, unknown> | null = null;
@@ -19,9 +25,9 @@ export async function POST(request: NextRequest) {
   }
 
   if (body) {
-    processarWebhook(body, startTime).catch(err =>
-      console.error('[webhook] Erro no processamento:', err)
-    );
+    // waitUntil garante que o Vercel mantem a função viva ate completar
+    // mesmo apos retornar 200 (obterPedidoComRetry pode levar ate 14s)
+    waitUntil(processarWebhook(body, startTime));
   }
 
   return NextResponse.json({ status: 'ok' });
