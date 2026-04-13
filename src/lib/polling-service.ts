@@ -365,107 +365,174 @@ export async function pollingStatus(): Promise<PollingResult> {
 
 // ============================================================
 // CAMADA 3: Reconciliação em 2 fases com checkpoint
+// Início: 00h Brasil (3h UTC) — parada obrigatória: 8h Brasil (11h UTC)
 // Fase 1: Varredura rápida — compara listagem da Tiny com banco em lote
 // Fase 2: Aprofundamento — GET individual só nos divergentes
 // Checkpoint permite retomar entre execuções (timeout 240s safety)
+// Relatório salvo em reconciliacao_relatorio
 // ============================================================
 const RECONCILIACAO_TIMEOUT_MS = 240_000; // 240s (margem de 60s antes do timeout Vercel)
 const RECONCILIACAO_COOLDOWN_HORAS = 20;
-const LOTE_LISTAGEM = 100;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function atualizarRelatorio(supabase: any, relatorioId: number | null, dados: Record<string, unknown>) {
+  if (!relatorioId) return;
+  await supabase.from('reconciliacao_relatorio').update(dados).eq('id', relatorioId);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function salvarRelatorioFinal(supabase: any, relatorioId: number | null, dados: Record<string, unknown>) {
+  if (!relatorioId) return;
+  await supabase.from('reconciliacao_relatorio').update({
+    ...dados,
+    finalizada_em: new Date().toISOString(),
+  }).eq('id', relatorioId);
+}
+
+async function salvarRelatorioInterrompido() {
+  const supabase = createServiceClient();
+  await supabase.from('reconciliacao_relatorio')
+    .update({
+      status: 'interrompida',
+      finalizada_em: new Date().toISOString(),
+      observacao: 'Interrompida por limite de horario (8h Brasil / 11h UTC)',
+    })
+    .eq('status', 'em_andamento');
+}
 
 export async function pollingReconciliacao(): Promise<PollingResult> {
-  let pedidosProcessados = 0;
+  const supabase = createServiceClient();
+  const agora = new Date();
+  const horaUTC = agora.getUTCHours();
+  const minutoUTC = agora.getUTCMinutes();
+  const state = await getPollingState();
+
+  // --- LIMITE DE 8H BRASIL (11h UTC) ---
+  const passouLimite8h = horaUTC >= 11;
+  const checkpointAtivo = state?.reconciliacao_data != null;
+
+  // Log diagnostico sempre
+  console.log(`[reconciliacao] UTC=${horaUTC}:${String(minutoUTC).padStart(2, '0')}, checkpoint=${checkpointAtivo}, passouLimite8h=${passouLimite8h}`);
+
+  // Se passou das 8h Brasil E tem checkpoint ativo: interromper e salvar relatorio
+  if (passouLimite8h && checkpointAtivo) {
+    console.log('[reconciliacao] Passou das 8h Brasil. Interrompendo e salvando relatorio.');
+    await salvarRelatorioInterrompido();
+    await updatePollingState({
+      reconciliacao_data: null,
+      reconciliacao_offset: 0,
+    });
+    return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+  }
+
+  // Se passou das 8h Brasil E não tem checkpoint: não faz nada
+  if (passouLimite8h && !checkpointAtivo) {
+    return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+  }
+
+  // --- VERIFICACAO DE INICIO ---
+  // Deve iniciar às 3h00-3h01 UTC (00h Brasil) OU continuar checkpoint ativo
+  const deveIniciar = horaUTC === 3 && minutoUTC <= 1;
+  const concluidaEm = state?.reconciliacao_concluida_em;
+  const jaConcluidaRecentemente = concluidaEm &&
+    (agora.getTime() - new Date(concluidaEm).getTime()) < RECONCILIACAO_COOLDOWN_HORAS * 60 * 60 * 1000;
+
+  if (!checkpointAtivo && !deveIniciar) {
+    return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+  }
+
+  if (!checkpointAtivo && jaConcluidaRecentemente) {
+    console.log('[reconciliacao] Ja concluida recentemente. Pulando.');
+    return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+  }
+
+  // --- INICIALIZACAO ---
+  const datasParaProcessar = [dataDiasAtras(2), dataDiasAtras(1), dataDiasAtras(0)];
+  let dataAtual: string;
+  let offsetAtual: number;
+  let relatorioId: number | null = null;
+
+  if (checkpointAtivo) {
+    dataAtual = state.reconciliacao_data;
+    offsetAtual = state.reconciliacao_offset || 0;
+    // Se a data do checkpoint nao esta nos ultimos 3 dias, reseta
+    if (!datasParaProcessar.includes(dataAtual)) {
+      dataAtual = datasParaProcessar[0];
+      offsetAtual = 0;
+    }
+    // Busca relatorio em andamento
+    const { data: rel } = await supabase
+      .from('reconciliacao_relatorio')
+      .select('id')
+      .eq('status', 'em_andamento')
+      .order('iniciada_em', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    relatorioId = rel?.id || null;
+    console.log(`[reconciliacao] Continuando checkpoint: data=${dataAtual} offset=${offsetAtual}`);
+  } else {
+    dataAtual = datasParaProcessar[0];
+    offsetAtual = 0;
+    // Cria novo relatorio
+    const { data: novoRel } = await supabase
+      .from('reconciliacao_relatorio')
+      .insert({
+        iniciada_em: agora.toISOString(),
+        status: 'em_andamento',
+        dias_total: 3,
+      })
+      .select('id')
+      .single();
+    relatorioId = novoRel?.id || null;
+    await updatePollingState({
+      reconciliacao_data: dataAtual,
+      reconciliacao_offset: 0,
+      reconciliacao_iniciada_em: agora.toISOString(),
+      reconciliacao_concluida_em: null,
+    });
+    console.log(`[reconciliacao] Iniciando nova reconciliacao. Relatorio ID: ${relatorioId}`);
+  }
+
+  // --- FASE 1: Varredura rapida ---
+  const pedidosParaAprofundar: number[] = [];
+  let lastRateLimit: RateLimitInfo | null = null;
+  const indexDataAtual = datasParaProcessar.indexOf(dataAtual);
+  let pedidosVarridos = 0;
+  let diasProcessados = 0;
   const startTime = Date.now();
 
   try {
-    const supabase = createServiceClient();
-    const state = await getPollingState();
-    const agora = new Date();
-
-    // --- Controle de quando iniciar ---
-    const horaUTC = agora.getUTCHours();
-    const minutoUTC = agora.getUTCMinutes();
-    const dentroJanelaInicio = horaUTC === 4 && minutoUTC < 15;
-
-    const concluidaEm = state?.reconciliacao_concluida_em;
-    const jaConcluidaRecentemente = concluidaEm &&
-      (agora.getTime() - new Date(concluidaEm).getTime()) < RECONCILIACAO_COOLDOWN_HORAS * 60 * 60 * 1000;
-
-    const checkpointAtivo = state?.reconciliacao_data != null;
-
-    // Safeguard: checkpoint ativo há mais de 6 horas é considerado stale (crash anterior)
-    const iniciadaEm = state?.reconciliacao_iniciada_em;
-    const checkpointStale = checkpointAtivo && iniciadaEm &&
-      (agora.getTime() - new Date(iniciadaEm).getTime()) > 6 * 60 * 60 * 1000;
-
-    // Log diagnóstico sempre
-    const horasDesdeConclucao = concluidaEm
-      ? ((agora.getTime() - new Date(concluidaEm).getTime()) / (60 * 60 * 1000)).toFixed(1)
-      : 'nunca';
-    console.log(`[reconciliacao] Diagnóstico: UTC=${horaUTC}:${String(minutoUTC).padStart(2, '0')}, janelaInicio=${dentroJanelaInicio}, checkpointAtivo=${checkpointAtivo}, checkpointStale=${!!checkpointStale}, concluidaRecentemente=${!!jaConcluidaRecentemente} (há ${horasDesdeConclucao}h)`);
-
-    // Se checkpoint está stale, limpar e tratar como sem checkpoint
-    if (checkpointStale) {
-      console.warn(`[reconciliacao] Checkpoint stale detectado (iniciado em ${iniciadaEm}). Limpando.`);
-      await updatePollingState({
-        reconciliacao_data: null,
-        reconciliacao_offset: 0,
-      });
-      // Após limpar, segue a lógica normal sem checkpoint
-      if (!dentroJanelaInicio || jaConcluidaRecentemente) {
-        console.log('[reconciliacao] Decisão: PULAR (checkpoint stale limpo, fora da janela ou concluída recentemente)');
-        return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
-      }
-    }
-
-    // Decisão: continuar checkpoint OU iniciar na janela OU pular
-    if (!checkpointAtivo && (!dentroJanelaInicio || jaConcluidaRecentemente)) {
-      console.log('[reconciliacao] Decisão: PULAR (sem checkpoint, fora da janela ou concluída recentemente)');
-      return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
-    }
-
-    console.log(`[reconciliacao] Decisão: RODAR (${checkpointAtivo && !checkpointStale ? 'checkpoint ativo' : 'dentro da janela'})`);
-
-    // --- Inicialização do checkpoint ---
-    const datasParaProcessar = [dataDiasAtras(2), dataDiasAtras(1), dataDiasAtras(0)];
-    let dataAtual: string;
-    let offsetAtual: number;
-
-    if (checkpointAtivo) {
-      dataAtual = state.reconciliacao_data;
-      offsetAtual = state.reconciliacao_offset || 0;
-      // Se a data do checkpoint não está nos últimos 3 dias, reseta
-      if (!datasParaProcessar.includes(dataAtual)) {
-        dataAtual = datasParaProcessar[0];
-        offsetAtual = 0;
-      }
-      console.log(`[reconciliacao] Continuando checkpoint: data=${dataAtual} offset=${offsetAtual}`);
-    } else {
-      dataAtual = datasParaProcessar[0];
-      offsetAtual = 0;
-      await updatePollingState({
-        reconciliacao_data: dataAtual,
-        reconciliacao_offset: 0,
-        reconciliacao_iniciada_em: agora.toISOString(),
-      });
-      console.log(`[reconciliacao] Iniciando nova reconciliação a partir de ${dataAtual}`);
-    }
-
-    // --- Fase 1: Varredura rápida ---
-    const pedidosParaAprofundar: number[] = [];
-    let lastRateLimit: RateLimitInfo | null = null;
-    const indexDataAtual = datasParaProcessar.indexOf(dataAtual);
-
     for (let di = indexDataAtual; di < datasParaProcessar.length; di++) {
       const data = datasParaProcessar[di];
       let offset = di === indexDataAtual ? offsetAtual : 0;
 
+      // Verifica limite de 8h antes de cada dia
+      if (new Date().getUTCHours() >= 11) {
+        console.log('[reconciliacao] Chegou as 8h Brasil durante fase 1. Salvando checkpoint.');
+        await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
+        await atualizarRelatorio(supabase, relatorioId, {
+          pedidos_varridos: pedidosVarridos,
+          pedidos_divergentes: pedidosParaAprofundar.length,
+          ultimo_checkpoint_data: data,
+          ultimo_checkpoint_offset: offset,
+          dias_processados: diasProcessados,
+        });
+        return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+      }
+
       while (true) {
-        // Timeout safety
+        // Timeout safety (240s Vercel)
         if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
           console.log(`[reconciliacao] Timeout safety fase 1. Checkpoint: data=${data} offset=${offset}`);
           await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
-          return { success: true, pedidosProcessados, camada: 'reconciliacao' };
+          await atualizarRelatorio(supabase, relatorioId, {
+            pedidos_varridos: pedidosVarridos,
+            pedidos_divergentes: pedidosParaAprofundar.length,
+            ultimo_checkpoint_data: data,
+            ultimo_checkpoint_offset: offset,
+            dias_processados: diasProcessados,
+          });
+          return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
         }
 
         if (lastRateLimit) await waitForRateLimit(lastRateLimit);
@@ -473,7 +540,7 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
         const { data: listagem, rateLimit } = await listarPedidos({
           dataAtualizacao: data,
           orderBy: 'asc',
-          limit: LOTE_LISTAGEM,
+          limit: 100,
           offset,
         });
         lastRateLimit = rateLimit;
@@ -491,35 +558,55 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
 
         for (const pedidoTiny of listagem.itens) {
           const situacaoBanco = mapaBanco.get(pedidoTiny.id);
-
-          if (situacaoBanco === undefined) {
-            // Pedido não existe no banco
-            pedidosParaAprofundar.push(pedidoTiny.id);
-          } else if (situacaoBanco !== pedidoTiny.situacao) {
-            // Status diferente
+          if (situacaoBanco === undefined || situacaoBanco !== pedidoTiny.situacao) {
             pedidosParaAprofundar.push(pedidoTiny.id);
           }
+          pedidosVarridos++;
         }
 
-        offset += LOTE_LISTAGEM;
-
-        // Salva checkpoint após cada página
+        offset += 100;
         await updatePollingState({ reconciliacao_data: data, reconciliacao_offset: offset });
 
-        if (listagem.itens.length < LOTE_LISTAGEM) break;
+        if (listagem.itens.length < 100) break;
       }
 
-      console.log(`[reconciliacao] Data ${data} varrida.`);
+      diasProcessados++;
+      console.log(`[reconciliacao] Data ${data} varrida. Divergentes ate agora: ${pedidosParaAprofundar.length}`);
     }
 
-    console.log(`[reconciliacao] Fase 1 concluída. ${pedidosParaAprofundar.length} pedidos para aprofundar.`);
+    // --- FASE 2: Aprofundamento ---
+    let pedidosCorrigidos = 0;
+    console.log(`[reconciliacao] Fase 2: ${pedidosParaAprofundar.length} pedidos para aprofundar`);
 
-    // --- Fase 2: Aprofundamento só nos divergentes ---
     for (const idPedido of pedidosParaAprofundar) {
+      // Verifica limite de 8h
+      if (new Date().getUTCHours() >= 11) {
+        const faltaram = pedidosParaAprofundar.length - pedidosCorrigidos;
+        console.log(`[reconciliacao] Chegou as 8h Brasil durante fase 2. Faltaram ${faltaram} pedidos.`);
+        await salvarRelatorioFinal(supabase, relatorioId, {
+          status: 'interrompida',
+          pedidos_varridos: pedidosVarridos,
+          pedidos_divergentes: pedidosParaAprofundar.length,
+          pedidos_corrigidos: pedidosCorrigidos,
+          pedidos_faltaram: faltaram,
+          dias_processados: diasProcessados,
+          observacao: `Interrompida as 8h Brasil. ${faltaram} pedidos divergentes nao processados.`,
+        });
+        await updatePollingState({ reconciliacao_data: null, reconciliacao_offset: 0 });
+        return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
+      }
+
+      // Timeout safety
       if (Date.now() - startTime > RECONCILIACAO_TIMEOUT_MS) {
-        console.log(`[reconciliacao] Timeout safety fase 2. ${pedidosProcessados} aprofundados.`);
-        // Checkpoint já salvo na fase 1, próxima execução reprocessa
-        return { success: true, pedidosProcessados, camada: 'reconciliacao' };
+        const faltaram = pedidosParaAprofundar.length - pedidosCorrigidos;
+        await atualizarRelatorio(supabase, relatorioId, {
+          pedidos_varridos: pedidosVarridos,
+          pedidos_divergentes: pedidosParaAprofundar.length,
+          pedidos_corrigidos: pedidosCorrigidos,
+          pedidos_faltaram: faltaram,
+          dias_processados: diasProcessados,
+        });
+        return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
       }
 
       if (lastRateLimit) await waitForRateLimit(lastRateLimit);
@@ -528,26 +615,35 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
         const { data: pedidoCompleto, rateLimit } = await obterPedido(idPedido);
         lastRateLimit = rateLimit;
         await upsertPedido(pedidoCompleto);
-        pedidosProcessados++;
+        pedidosCorrigidos++;
       } catch (err) {
         console.error(`[reconciliacao] Erro ao aprofundar pedido ${idPedido}:`, err);
       }
     }
 
-    // --- Conclusão: limpa checkpoint ---
+    // --- CONCLUSAO ---
+    await salvarRelatorioFinal(supabase, relatorioId, {
+      status: 'concluida',
+      pedidos_varridos: pedidosVarridos,
+      pedidos_divergentes: pedidosParaAprofundar.length,
+      pedidos_corrigidos: pedidosCorrigidos,
+      pedidos_faltaram: 0,
+      dias_processados: 3,
+      observacao: `Concluida com sucesso. ${pedidosCorrigidos} pedidos corrigidos de ${pedidosParaAprofundar.length} divergentes.`,
+    });
     await updatePollingState({
       reconciliacao_data: null,
       reconciliacao_offset: 0,
       reconciliacao_concluida_em: new Date().toISOString(),
     });
 
-    console.log(`[reconciliacao] Concluída. ${pedidosProcessados} pedidos aprofundados de ${pedidosParaAprofundar.length} divergentes.`);
-    return { success: true, pedidosProcessados, camada: 'reconciliacao' };
+    console.log(`[reconciliacao] Concluida. ${pedidosCorrigidos}/${pedidosParaAprofundar.length} corrigidos de ${pedidosVarridos} varridos.`);
+    return { success: true, pedidosProcessados: pedidosCorrigidos, camada: 'reconciliacao' };
 
   } catch (err) {
     const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
     console.error('[reconciliacao] Erro fatal:', mensagem);
-    return { success: false, pedidosProcessados, camada: 'reconciliacao', erro: mensagem };
+    return { success: false, pedidosProcessados: 0, camada: 'reconciliacao', erro: mensagem };
   }
 }
 

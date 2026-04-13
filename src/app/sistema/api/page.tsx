@@ -15,6 +15,20 @@ interface PollingLog {
   erro_mensagem: string | null;
 }
 
+interface ReconciliacaoRelatorio {
+  id: number;
+  iniciada_em: string;
+  finalizada_em: string | null;
+  status: 'em_andamento' | 'concluida' | 'interrompida';
+  pedidos_varridos: number;
+  pedidos_divergentes: number;
+  pedidos_corrigidos: number;
+  pedidos_faltaram: number;
+  dias_processados: number;
+  dias_total: number;
+  observacao: string | null;
+}
+
 interface StatEntry {
   status: string;
   pedidos_processados: number;
@@ -100,13 +114,14 @@ export default function SistemaApiPage() {
   const [lastCheck, setLastCheck] = useState<Date>(new Date());
   const [tinyConnected, setTinyConnected] = useState(false);
   const [tinyExpiry, setTinyExpiry] = useState<string | null>(null);
+  const [ultimoRelatorio, setUltimoRelatorio] = useState<ReconciliacaoRelatorio | null>(null);
 
   const fetchData = useCallback(async () => {
     const db = createBrowserClient();
     const inicioDia = inicioDiaLocal();
 
     // Busca em paralelo: últimas execuções, erros 24h, stats do dia, último de cada camada, status Tiny
-    const [logsRes, errosRes, statsRes, statusRes, ...ultimosRes] = await Promise.all([
+    const [logsRes, errosRes, statsRes, statusRes, relatorioRes, ...ultimosRes] = await Promise.all([
       db.from('polling_logs').select('*').order('iniciado_em', { ascending: false }).limit(50),
       db.from('polling_logs').select('*')
         .in('status', ['error', 'timeout'])
@@ -115,6 +130,8 @@ export default function SistemaApiPage() {
       db.from('polling_logs').select('status, pedidos_processados, duracao_ms, camada')
         .gte('iniciado_em', inicioDia),
       fetch('/api/status').then(r => r.json()).catch(() => null),
+      db.from('reconciliacao_relatorio').select('*')
+        .order('iniciada_em', { ascending: false }).limit(1).maybeSingle(),
       // Último log de cada camada
       ...['rapido', 'status', 'reconciliacao', 'webhook'].map(camada =>
         db.from('polling_logs').select('*').eq('camada', camada)
@@ -125,6 +142,7 @@ export default function SistemaApiPage() {
     setLogs(logsRes.data || []);
     setErros(errosRes.data || []);
     setStatsHoje(statsRes.data || []);
+    setUltimoRelatorio(relatorioRes.data || null);
 
     if (statusRes?.tiny) {
       setTinyConnected(statusRes.tiny.connected);
@@ -283,6 +301,65 @@ export default function SistemaApiPage() {
                 <p className="text-xs opacity-70">{e.erro_mensagem || 'Erro desconhecido'}</p>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Último Relatório de Reconciliação */}
+      <div className="card p-4 rounded-lg mb-4">
+        <h2 className="text-xs font-medium opacity-70 mb-3">ULTIMO RELATORIO DE RECONCILIACAO</h2>
+        {!ultimoRelatorio ? (
+          <p className="text-xs opacity-40">Nenhum relatorio encontrado</p>
+        ) : (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded" style={{
+                background: ultimoRelatorio.status === 'concluida' ? '#E1F5EE'
+                  : ultimoRelatorio.status === 'interrompida' ? '#FAEEDA'
+                  : '#E8F0FE',
+                color: ultimoRelatorio.status === 'concluida' ? '#1D9E75'
+                  : ultimoRelatorio.status === 'interrompida' ? '#EF9F27'
+                  : '#378ADD',
+              }}>
+                {ultimoRelatorio.status === 'concluida' ? 'CONCLUIDA'
+                  : ultimoRelatorio.status === 'interrompida' ? 'INTERROMPIDA'
+                  : 'EM ANDAMENTO'}
+              </span>
+              <span className="text-[10px] opacity-40">
+                {formatHoraComData(ultimoRelatorio.iniciada_em)}
+                {ultimoRelatorio.finalizada_em && ` — ${formatHoraComData(ultimoRelatorio.finalizada_em)}`}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
+              <div>
+                <p className="text-[10px] opacity-50 mb-1">Pedidos varridos</p>
+                <p className="text-sm font-medium">{ultimoRelatorio.pedidos_varridos.toLocaleString('pt-BR')}</p>
+              </div>
+              <div>
+                <p className="text-[10px] opacity-50 mb-1">Divergentes</p>
+                <p className="text-sm font-medium">{ultimoRelatorio.pedidos_divergentes.toLocaleString('pt-BR')}</p>
+              </div>
+              <div>
+                <p className="text-[10px] opacity-50 mb-1">Corrigidos</p>
+                <p className="text-sm font-medium" style={{ color: ultimoRelatorio.pedidos_corrigidos > 0 ? '#1D9E75' : undefined }}>
+                  {ultimoRelatorio.pedidos_corrigidos.toLocaleString('pt-BR')}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] opacity-50 mb-1">Faltaram</p>
+                <p className="text-sm font-medium" style={{ color: ultimoRelatorio.pedidos_faltaram > 0 ? '#E24B4A' : undefined }}>
+                  {ultimoRelatorio.pedidos_faltaram.toLocaleString('pt-BR')}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4 pt-2 border-t border-current/5">
+              <span className="text-[10px] opacity-50">
+                Dias processados: <span className="font-medium opacity-100">{ultimoRelatorio.dias_processados}/{ultimoRelatorio.dias_total}</span>
+              </span>
+              {ultimoRelatorio.observacao && (
+                <span className="text-[10px] opacity-40">{ultimoRelatorio.observacao}</span>
+              )}
+            </div>
           </div>
         )}
       </div>
