@@ -2,12 +2,17 @@ import type { PeriodFilter, DateRange } from '../types';
 
 const DIAS_SEMANA = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 
+// Formata data como yyyy-MM-dd no fuso local (evita problema UTC vs BRT)
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
 export function hoje(): string {
-  return new Date().toISOString().split('T')[0];
+  return formatYmd(new Date());
 }
 
 function formatYmd(d: Date): string {
-  return d.toISOString().split('T')[0];
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 // Retorna DateRange para o filtro selecionado

@@ -207,7 +207,7 @@ export default function SistemaApiPage() {
             <tbody>
               {logs.slice(0, 20).map(log => (
                 <tr key={log.id} className="border-t border-current/5">
-                  <td className="py-1.5 capitalize">{log.camada === 'reconciliacao' ? 'Reconcil.' : log.camada === 'rapido' ? 'Rápido' : 'Status'}</td>
+                  <td className="py-1.5">{({ rapido: 'Rápido', status: 'Status', reconciliacao: 'Reconciliação', webhook: 'Webhook' })[log.camada] || log.camada}</td>
                   <td className="py-1.5">{formatHora(log.iniciado_em)}</td>
                   <td className="py-1.5 text-right">{formatDuracao(log.duracao_ms)}</td>
                   <td className="py-1.5 text-right">{log.pedidos_processados.toLocaleString('pt-BR')}</td>
@@ -233,7 +233,7 @@ export default function SistemaApiPage() {
               <div key={e.id} className="card-secondary p-3 rounded-lg">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-[10px] font-medium px-1.5 py-0.5 rounded" style={{ background: '#FCEBEB', color: '#A32D2D' }}>ERRO</span>
-                  <span className="text-[10px] opacity-50">{formatHora(e.iniciado_em)} · {e.camada === 'rapido' ? 'Rápido' : e.camada === 'reconciliacao' ? 'Reconcil.' : 'Status'}</span>
+                  <span className="text-[10px] opacity-50">{formatHora(e.iniciado_em)} · {({ rapido: 'Rápido', status: 'Status', reconciliacao: 'Reconciliação', webhook: 'Webhook' })[e.camada] || e.camada}</span>
                 </div>
                 <p className="text-xs opacity-70">{e.erro_mensagem || 'Erro desconhecido'}</p>
               </div>
