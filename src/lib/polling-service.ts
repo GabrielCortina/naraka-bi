@@ -393,10 +393,38 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
 
     const checkpointAtivo = state?.reconciliacao_data != null;
 
+    // Safeguard: checkpoint ativo há mais de 6 horas é considerado stale (crash anterior)
+    const iniciadaEm = state?.reconciliacao_iniciada_em;
+    const checkpointStale = checkpointAtivo && iniciadaEm &&
+      (agora.getTime() - new Date(iniciadaEm).getTime()) > 6 * 60 * 60 * 1000;
+
+    // Log diagnóstico sempre
+    const horasDesdeConclucao = concluidaEm
+      ? ((agora.getTime() - new Date(concluidaEm).getTime()) / (60 * 60 * 1000)).toFixed(1)
+      : 'nunca';
+    console.log(`[reconciliacao] Diagnóstico: UTC=${horaUTC}:${String(minutoUTC).padStart(2, '0')}, janelaInicio=${dentroJanelaInicio}, checkpointAtivo=${checkpointAtivo}, checkpointStale=${!!checkpointStale}, concluidaRecentemente=${!!jaConcluidaRecentemente} (há ${horasDesdeConclucao}h)`);
+
+    // Se checkpoint está stale, limpar e tratar como sem checkpoint
+    if (checkpointStale) {
+      console.warn(`[reconciliacao] Checkpoint stale detectado (iniciado em ${iniciadaEm}). Limpando.`);
+      await updatePollingState({
+        reconciliacao_data: null,
+        reconciliacao_offset: 0,
+      });
+      // Após limpar, segue a lógica normal sem checkpoint
+      if (!dentroJanelaInicio || jaConcluidaRecentemente) {
+        console.log('[reconciliacao] Decisão: PULAR (checkpoint stale limpo, fora da janela ou concluída recentemente)');
+        return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
+      }
+    }
+
     // Decisão: continuar checkpoint OU iniciar na janela OU pular
     if (!checkpointAtivo && (!dentroJanelaInicio || jaConcluidaRecentemente)) {
+      console.log('[reconciliacao] Decisão: PULAR (sem checkpoint, fora da janela ou concluída recentemente)');
       return { success: true, pedidosProcessados: 0, camada: 'reconciliacao' };
     }
+
+    console.log(`[reconciliacao] Decisão: RODAR (${checkpointAtivo && !checkpointStale ? 'checkpoint ativo' : 'dentro da janela'})`);
 
     // --- Inicialização do checkpoint ---
     const datasParaProcessar = [dataDiasAtras(2), dataDiasAtras(1), dataDiasAtras(0)];
