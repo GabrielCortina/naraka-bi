@@ -126,8 +126,71 @@ export async function upsertPedido(pedido: TinyPedidoFull) {
 }
 
 // ============================================================
+// FILA DE RETRY: processa pedidos que falharam no webhook
+// ============================================================
+const MAX_TENTATIVAS_TOTAL = 5;
+
+async function processarFilaRetry(): Promise<number> {
+  const supabase = createServiceClient();
+  let processados = 0;
+
+  const { data: filaItems } = await supabase
+    .from('webhook_retry_queue')
+    .select('*')
+    .eq('processado', false)
+    .lte('proxima_tentativa', new Date().toISOString())
+    .order('proxima_tentativa', { ascending: true })
+    .limit(20);
+
+  if (!filaItems || filaItems.length === 0) return 0;
+
+  console.log(`[rapido] ${filaItems.length} itens na fila de retry`);
+
+  for (const item of filaItems) {
+    try {
+      const { data: pedidoCompleto } = await obterPedido(item.id_pedido);
+      await upsertPedido(pedidoCompleto);
+
+      await supabase.from('webhook_retry_queue')
+        .update({ processado: true, ultimo_erro: null })
+        .eq('id', item.id);
+
+      console.log(`[rapido] Retry sucesso: pedido ${item.id_pedido}`);
+      processados++;
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      const novasTentativas = (item.tentativas || 0) + 1;
+
+      if (novasTentativas >= MAX_TENTATIVAS_TOTAL) {
+        await supabase.from('webhook_retry_queue')
+          .update({
+            processado: true,
+            tentativas: novasTentativas,
+            ultimo_erro: `Desistido após ${MAX_TENTATIVAS_TOTAL} tentativas: ${msg}`,
+          })
+          .eq('id', item.id);
+        console.error(`[rapido] Retry desistido após ${MAX_TENTATIVAS_TOTAL} tentativas: pedido ${item.id_pedido}`);
+      } else {
+        const proximaTentativa = new Date(Date.now() + novasTentativas * 5 * 60 * 1000).toISOString();
+        await supabase.from('webhook_retry_queue')
+          .update({
+            tentativas: novasTentativas,
+            ultimo_erro: msg,
+            proxima_tentativa: proximaTentativa,
+          })
+          .eq('id', item.id);
+        console.warn(`[rapido] Retry falhou (${novasTentativas}/${MAX_TENTATIVAS_TOTAL}): pedido ${item.id_pedido}. Próxima: ${proximaTentativa}`);
+      }
+    }
+  }
+
+  return processados;
+}
+
+// ============================================================
 // CAMADA 1: Polling Rápido (a cada 5 min)
-// Cursor-based: busca só pedidos com id > cursor_id no dia de hoje
+// Primeiro processa fila de retry, depois pedidos novos via cursor
 // Máximo 200 pedidos por execução
 // ============================================================
 export async function pollingRapido(): Promise<PollingResult> {
@@ -136,6 +199,13 @@ export async function pollingRapido(): Promise<PollingResult> {
 
   try {
     await updatePollingState({ status: 'running' });
+
+    // Passo 1: processar fila de retry (prioridade máxima)
+    const retryProcessados = await processarFilaRetry();
+    pedidosProcessados += retryProcessados;
+    if (retryProcessados > 0) {
+      console.log(`[rapido] Fila de retry: ${retryProcessados} pedidos reprocessados`);
+    }
 
     const state = await getPollingState();
     const hoje = dataDiasAtras(0);
