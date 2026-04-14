@@ -70,16 +70,42 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
   const endStr = dateRange.end;
   const fetchIdRef = useRef(0);
   const hasDataRef = useRef(false);
+  // Rastreia a combinação de filtros aplicada no último fetch.
+  // Permite distinguir "troca de filtro" (usuário) de "refreshKey++" (auto-refresh):
+  //   - Troca de filtro → reseta dados + mostra skeleton (loading=true)
+  //   - Auto-refresh    → mantém dados + mostra refreshing=true
+  // Sem essa distinção, se o primeiro fetch voltava parcial/zero, trocas
+  // subsequentes ficavam renderizando os zeros antigos.
+  const lastFilterKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const currentFetchId = ++fetchIdRef.current;
-    const isBackgroundRefresh = hasDataRef.current;
+    const filterKey = `${startStr}|${endStr}|${loja}`;
+    const isFirstLoad = lastFilterKeyRef.current === null;
+    const isFilterChange = !isFirstLoad && lastFilterKeyRef.current !== filterKey;
+    const isBackgroundRefresh = !isFirstLoad && !isFilterChange && hasDataRef.current;
+    lastFilterKeyRef.current = filterKey;
 
     async function run() {
       if (isBackgroundRefresh) {
         setData(prev => ({ ...prev, refreshing: true }));
       } else {
-        setData(prev => ({ ...prev, loading: true }));
+        // Primeiro load OU troca de filtro: reseta dados e mostra skeleton.
+        setData({
+          resumoHero: null,
+          kpisSecundarios: null,
+          vendasPorDia: [],
+          vendasPorDiaAnterior: [],
+          topSkus: [],
+          rankingLojas: [],
+          marketplace: [],
+          heatmap: [],
+          comparativo: [],
+          historico: [],
+          loading: true,
+          refreshing: false,
+          lastUpdated: null,
+        });
       }
 
       // Resolve o filtro de loja em um array de ecommerce_nome_tiny
@@ -217,7 +243,11 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         }))
         .sort((a, b) => b.data.localeCompare(a.data));
 
-      hasDataRef.current = true;
+      // Só marca que "já temos dado" se o fetch trouxe algo útil.
+      // Evita que uma falha parcial prenda o hook em modo background-refresh
+      // e renderize zeros nas próximas trocas de filtro.
+      hasDataRef.current = heroAtual !== null || vendasPorDia.length > 0;
+
       setData({
         resumoHero,
         kpisSecundarios,

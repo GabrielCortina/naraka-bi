@@ -184,20 +184,12 @@ export interface DashboardVendasPorDia {
   ticket_medio: number;
 }
 
-export interface DashboardSkuFilho {
-  sku: string;
-  descricao: string;
-  quantidade: number;
-  faturamento: number;
-}
-
 export interface DashboardTopSku {
   sku_pai: string;
   faturamento: number;
   pecas: number;
   pedidos: number;
   variacoes: string[];
-  skus_filhos: DashboardSkuFilho[];
 }
 
 export interface DashboardRankingLoja {
