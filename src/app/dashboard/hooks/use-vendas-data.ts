@@ -69,43 +69,22 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
   const startStr = dateRange.start;
   const endStr = dateRange.end;
   const fetchIdRef = useRef(0);
+  // hasDataRef = true só depois de um fetch bem-sucedido.
+  // Controla se a próxima troca mostra "refreshing" sobre dados antigos
+  // (bom) ou skeleton (quando nunca tivemos dados reais).
   const hasDataRef = useRef(false);
-  // Rastreia a combinação de filtros aplicada no último fetch.
-  // Permite distinguir "troca de filtro" (usuário) de "refreshKey++" (auto-refresh):
-  //   - Troca de filtro → reseta dados + mostra skeleton (loading=true)
-  //   - Auto-refresh    → mantém dados + mostra refreshing=true
-  // Sem essa distinção, se o primeiro fetch voltava parcial/zero, trocas
-  // subsequentes ficavam renderizando os zeros antigos.
-  const lastFilterKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const currentFetchId = ++fetchIdRef.current;
-    const filterKey = `${startStr}|${endStr}|${loja}`;
-    const isFirstLoad = lastFilterKeyRef.current === null;
-    const isFilterChange = !isFirstLoad && lastFilterKeyRef.current !== filterKey;
-    const isBackgroundRefresh = !isFirstLoad && !isFilterChange && hasDataRef.current;
-    lastFilterKeyRef.current = filterKey;
 
     async function run() {
-      if (isBackgroundRefresh) {
+      // Se já tivemos dado bom antes, mantém visível e sinaliza refreshing.
+      // Caso contrário, o initial state (loading=true, tudo null/vazio) já
+      // provoca skeleton nos componentes. NÃO resetar aqui — isso causava
+      // o "dashboard zerado" quando uma RPC intermitente voltava nula e o
+      // mapeamento produzia {faturamento:0, ...} com loading=false no fim.
+      if (hasDataRef.current) {
         setData(prev => ({ ...prev, refreshing: true }));
-      } else {
-        // Primeiro load OU troca de filtro: reseta dados e mostra skeleton.
-        setData({
-          resumoHero: null,
-          kpisSecundarios: null,
-          vendasPorDia: [],
-          vendasPorDiaAnterior: [],
-          topSkus: [],
-          rankingLojas: [],
-          marketplace: [],
-          heatmap: [],
-          comparativo: [],
-          historico: [],
-          loading: true,
-          refreshing: false,
-          lastUpdated: null,
-        });
       }
 
       // Resolve o filtro de loja em um array de ecommerce_nome_tiny
@@ -135,6 +114,16 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
       ]);
 
       if (currentFetchId !== fetchIdRef.current) return;
+
+      // Se a RPC principal falhou (retornou null) E já tínhamos dados reais,
+      // preserva os dados anteriores em vez de sobrescrever com zeros.
+      // Isso elimina o "flash de zeros" em falhas transientes de rede/RPC.
+      const fetchFailed = heroAtual === null;
+      if (fetchFailed && hasDataRef.current) {
+        setData(prev => ({ ...prev, loading: false, refreshing: false }));
+        console.warn('[useVendasData] fetch falhou — dados anteriores mantidos');
+        return;
+      }
 
       // ============================================================
       // MAPEAMENTOS: RPC shapes → interfaces consumidas pelos componentes
@@ -243,10 +232,11 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         }))
         .sort((a, b) => b.data.localeCompare(a.data));
 
-      // Só marca que "já temos dado" se o fetch trouxe algo útil.
-      // Evita que uma falha parcial prenda o hook em modo background-refresh
-      // e renderize zeros nas próximas trocas de filtro.
-      hasDataRef.current = heroAtual !== null || vendasPorDia.length > 0;
+      // Marca que temos dados reais (RPC principal respondeu).
+      // Períodos legítimos sem vendas retornam heroAtual={faturamento:0,...},
+      // não-null — então hasDataRef vira true e a UI mostra zeros corretamente
+      // em vez de skeleton infinito.
+      hasDataRef.current = !fetchFailed;
 
       setData({
         resumoHero,
