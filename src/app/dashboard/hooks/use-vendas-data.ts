@@ -113,44 +113,28 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
       }
 
       const anterior = calcPeriodoAnterior(startStr, endStr);
+      const range: DateRange = { start: startStr, end: endStr };
 
-      const [
-        heroAtual,
-        heroAnterior,
-        vendasDia,
-        vendasDiaAnt,
-        topSkusData,
-        rankingData,
-        marketplaceData,
-        heatmapData,
-        comparativoData,
-      ] = await Promise.all([
-        rpc.fetchKpisHero(startStr, endStr, lojaParam).catch(() => null),
-        rpc.fetchKpisHeroAnterior(startStr, endStr, lojaParam).catch(() => null),
-        rpc.fetchVendasPorDia(startStr, endStr, lojaParam).catch(() => []),
-        rpc.fetchVendasPorDia(anterior.start, anterior.end, lojaParam).catch(() => []),
-        rpc.fetchTopSkus(startStr, endStr, lojaParam).catch(() => []),
-        rpc.fetchRankingLojas(startStr, endStr, lojaParam).catch(() => []),
-        rpc.fetchMarketplace(startStr, endStr, lojaParam).catch(() => []),
-        rpc.fetchHeatmap(startStr, endStr, lojaParam).catch(() => []),
-        rpc.fetchComparativoPeriodos(startStr, endStr, lojaParam).catch(() => []),
-      ]);
+      // ============================================================
+      // GROUP 1 — HERO (crítico, rápido)
+      // Aparece em <500ms. Hero v2 retorna atual + anterior em 1 chamada.
+      // ============================================================
+      const heroPair = await rpc
+        .fetchKpisHeroV2(startStr, endStr, lojaParam)
+        .catch(() => ({ atual: null, anterior: null }));
 
       if (currentFetchId !== fetchIdRef.current) return;
 
-      // Se a RPC principal falhou (retornou null) E já tínhamos dados reais,
-      // preserva os dados anteriores em vez de sobrescrever com zeros.
-      // Isso elimina o "flash de zeros" em falhas transientes de rede/RPC.
+      const heroAtual = heroPair.atual;
+      const heroAnterior = heroPair.anterior;
       const fetchFailed = heroAtual === null;
+
+      // Se Hero falhou e já tínhamos dados, preserva (evita flash de zeros).
       if (fetchFailed && hasDataRef.current) {
         setData(prev => ({ ...prev, loading: false, refreshing: false }));
-        console.warn('[useVendasData] fetch falhou — dados anteriores mantidos');
+        console.warn('[useVendasData] hero v2 falhou — dados anteriores mantidos');
         return;
       }
-
-      // ============================================================
-      // MAPEAMENTOS: RPC shapes → interfaces consumidas pelos componentes
-      // ============================================================
 
       const resumoHero: ResumoHero = {
         faturamento: Number(heroAtual?.faturamento ?? 0),
@@ -163,7 +147,6 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         pecasAnterior: Number(heroAnterior?.pecas ?? 0),
       };
 
-      const range: DateRange = { start: startStr, end: endStr };
       const dias = diasNoRange(range);
       const fatTotal = Number(heroAtual?.faturamento ?? 0);
       const pecasTotal = Number(heroAtual?.pecas ?? 0);
@@ -191,35 +174,62 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         valorCancelado: Number(heroAtual?.valor_cancelado ?? 0),
       };
 
-      const vendasPorDia: VendaDia[] = (vendasDia ?? []).map(v => ({
+      // Atualização parcial: Hero/secundários já visíveis, resto skeleton.
+      // loading=false → componentes do Hero saem do skeleton.
+      // refreshing=true → header mostra "Atualizando..." enquanto Group 2 carrega.
+      setData(prev => ({
+        ...prev,
+        resumoHero,
+        kpisSecundarios,
+        loading: false,
+        refreshing: true,
+      }));
+
+      // ============================================================
+      // GROUP 2 — SECUNDÁRIO (gráficos, tabelas, heatmap)
+      // 1 invocação Vercel via /api/dashboard/batch.
+      // ============================================================
+      const secundario = await rpc
+        .fetchDashboardSecundario(startStr, endStr, anterior.start, anterior.end, lojaParam)
+        .catch(() => null);
+
+      if (currentFetchId !== fetchIdRef.current) return;
+
+      if (!secundario) {
+        // Group 2 falhou — Hero permanece, restante fica vazio mas sem zeros.
+        setData(prev => ({ ...prev, refreshing: false }));
+        return;
+      }
+
+      const vendasPorDia: VendaDia[] = secundario.vendasPorDia.map(v => ({
         data: v.data_pedido,
         faturamento: Number(v.faturamento),
         pedidos: Number(v.pedidos),
         pecas: Number(v.pecas),
       }));
 
-      const vendasPorDiaAnterior: VendaDia[] = (vendasDiaAnt ?? []).map(v => ({
+      const vendasPorDiaAnterior: VendaDia[] = secundario.vendasPorDiaAnterior.map(v => ({
         data: v.data_pedido,
         faturamento: Number(v.faturamento),
         pedidos: Number(v.pedidos),
         pecas: Number(v.pecas),
       }));
 
-      const topSkus: SkuPaiAgrupado[] = (topSkusData ?? []).map(s => ({
+      const topSkus: SkuPaiAgrupado[] = secundario.topSkus.map(s => ({
         skuPai: s.sku_pai,
         variacoes: Array.isArray(s.variacoes) ? s.variacoes : [],
         faturamentoTotal: Number(s.faturamento),
         quantidadeTotal: Number(s.pecas),
       }));
 
-      const rankingLojas: LojaRanking[] = (rankingData ?? []).map(r => ({
+      const rankingLojas: LojaRanking[] = secundario.rankingLojas.map(r => ({
         loja: r.ecommerce_nome,
         faturamento: Number(r.faturamento),
         pecas: Number(r.pecas),
         pedidos: Number(r.pedidos),
       }));
 
-      const marketplace: MarketplaceData[] = (marketplaceData ?? []).map(m => {
+      const marketplace: MarketplaceData[] = secundario.marketplace.map(m => {
         const label = MARKETPLACE_LABEL_MAP[m.marketplace] ?? 'Outro';
         return {
           marketplace: label,
@@ -229,13 +239,13 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         };
       });
 
-      const heatmap: HeatmapCell[] = (heatmapData ?? []).map(h => ({
+      const heatmap: HeatmapCell[] = secundario.heatmap.map(h => ({
         diaSemana: Number(h.dia_semana),
         hora: Number(h.hora),
         totalPedidos: Number(h.contagem),
       }));
 
-      const comparativo: ComparativoPeriodo[] = (comparativoData ?? []).map(c => ({
+      const comparativo: ComparativoPeriodo[] = secundario.comparativo.map(c => ({
         nome: c.nome,
         dateRange: c.date_range,
         valor: Number(c.valor),
@@ -243,7 +253,7 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         variacao: Number(c.variacao),
       }));
 
-      const historico: HistoricoDia[] = (vendasDia ?? [])
+      const historico: HistoricoDia[] = secundario.vendasPorDia
         .map(v => ({
           data: v.data_pedido,
           faturamento: Number(v.faturamento),
@@ -255,11 +265,7 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         }))
         .sort((a, b) => b.data.localeCompare(a.data));
 
-      // Marca que temos dados reais (RPC principal respondeu).
-      // Períodos legítimos sem vendas retornam heroAtual={faturamento:0,...},
-      // não-null — então hasDataRef vira true e a UI mostra zeros corretamente
-      // em vez de skeleton infinito.
-      hasDataRef.current = !fetchFailed;
+      hasDataRef.current = true;
 
       const newData: VendasData = {
         resumoHero,
@@ -277,11 +283,7 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         lastUpdated: new Date(),
       };
 
-      // Salva no cache (somente se fetch trouxe algo útil).
-      if (!fetchFailed) {
-        cacheRef.current.set(filterKey, { data: newData, ts: Date.now() });
-      }
-
+      cacheRef.current.set(filterKey, { data: newData, ts: Date.now() });
       setData(newData);
     }
 
