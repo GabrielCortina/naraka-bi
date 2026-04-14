@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import type { ComparativoPeriodo } from '../types';
 import { formatBRL } from '../lib/date-utils';
 
@@ -56,7 +57,7 @@ function Linha({ item, isLast }: { item: ComparativoPeriodo; isLast: boolean }) 
   );
 }
 
-export function ComparativoPeriodos({ data, loading }: Props) {
+function ComparativoPeriodosBase({ data, loading }: Props) {
   if (loading) {
     return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[160px] bg-current/5 rounded" /></div>;
   }
@@ -72,3 +73,5 @@ export function ComparativoPeriodos({ data, loading }: Props) {
     </div>
   );
 }
+
+export const ComparativoPeriodos = memo(ComparativoPeriodosBase);

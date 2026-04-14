@@ -9,6 +9,9 @@ import { MarketplaceLogo } from './marketplace-logos';
 interface Props {
   data: LojaRanking[];
   loading: boolean;
+  // Incrementado quando loja_config é editada ou no auto-refresh.
+  // Sem esta dep, a config carregada no mount ficava stale.
+  refreshKey?: number;
 }
 
 interface LojaConfigEntry {
@@ -18,7 +21,7 @@ interface LojaConfigEntry {
   marketplace: string;
 }
 
-export function RankingLojas({ data, loading }: Props) {
+export function RankingLojas({ data, loading, refreshKey }: Props) {
   const [configs, setConfigs] = useState<LojaConfigEntry[]>([]);
 
   useEffect(() => {
@@ -29,7 +32,7 @@ export function RankingLojas({ data, loading }: Props) {
       if (result) setConfigs(result);
     }
     loadConfig();
-  }, []);
+  }, [refreshKey]);
 
   // Mapa: ecommerce_nome → { nome_loja, marketplace }
   const configMap = useMemo(() => {

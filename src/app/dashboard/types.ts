@@ -236,3 +236,10 @@ export interface DashboardComparativoPeriodo {
   valor_comparado: number;
   variacao: number;
 }
+
+export interface DashboardSkuDetalhe {
+  sku: string;
+  descricao: string;
+  quantidade: number;
+  faturamento: number;
+}

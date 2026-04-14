@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo } from 'react';
 import { Doughnut } from 'react-chartjs-2';
 import { Chart as ChartJS, ArcElement, Tooltip } from 'chart.js';
 import type { MarketplaceData } from '../types';
@@ -13,6 +14,30 @@ interface Props {
 }
 
 export function MarketplaceChart({ data, loading }: Props) {
+  // chartData/options memoizados — Chart.js re-pinta canvas a cada novo objeto.
+  const chartData = useMemo(() => ({
+    labels: data.map(d => d.marketplace),
+    datasets: [{
+      data: data.map(d => d.faturamento),
+      backgroundColor: data.map(d => d.cor),
+      borderWidth: 0,
+    }],
+  }), [data]);
+
+  const options = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    cutout: '65%',
+    plugins: {
+      tooltip: {
+        callbacks: {
+          label: (ctx: { label?: string; parsed: number }) =>
+            `${ctx.label}: ${formatBRL(ctx.parsed)}`,
+        },
+      },
+    },
+  }), []);
+
   if (loading) {
     return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[140px] bg-current/5 rounded" /></div>;
   }
@@ -25,29 +50,6 @@ export function MarketplaceChart({ data, loading }: Props) {
       </div>
     );
   }
-
-  const chartData = {
-    labels: data.map(d => d.marketplace),
-    datasets: [{
-      data: data.map(d => d.faturamento),
-      backgroundColor: data.map(d => d.cor),
-      borderWidth: 0,
-    }],
-  };
-
-  const options = {
-    responsive: true,
-    maintainAspectRatio: false,
-    cutout: '65%',
-    plugins: {
-      tooltip: {
-        callbacks: {
-          label: (ctx: { label?: string; parsed: number }) =>
-            `${ctx.label}: ${formatBRL(ctx.parsed)}`,
-        },
-      },
-    },
-  };
 
   return (
     <div className="card p-4 rounded-lg">

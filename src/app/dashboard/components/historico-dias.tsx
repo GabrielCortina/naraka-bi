@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import type { HistoricoDia } from '../types';
 import { formatBRL, formatNumero, formatDataCurta } from '../lib/date-utils';
 
@@ -8,7 +9,7 @@ interface Props {
   loading: boolean;
 }
 
-export function HistoricoDias({ data, loading }: Props) {
+function HistoricoDiasBase({ data, loading }: Props) {
   if (loading) {
     return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[120px] bg-current/5 rounded" /></div>;
   }
@@ -62,3 +63,5 @@ export function HistoricoDias({ data, loading }: Props) {
     </div>
   );
 }
+
+export const HistoricoDias = memo(HistoricoDiasBase);

@@ -70,25 +70,48 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
   const endStr = dateRange.end;
   const fetchIdRef = useRef(0);
   // hasDataRef = true só depois de um fetch bem-sucedido.
-  // Controla se a próxima troca mostra "refreshing" sobre dados antigos
-  // (bom) ou skeleton (quando nunca tivemos dados reais).
   const hasDataRef = useRef(false);
+
+  // Cache por filterKey. Troca de filtro com cache fresco (≤TTL) é
+  // instantânea. Auto-refresh (refreshKey++) limpa o cache e refaz fetch.
+  const cacheRef = useRef<Map<string, { data: VendasData; ts: number }>>(new Map());
+  const lastRefreshKeyRef = useRef(refreshKey);
+  const CACHE_TTL_MS = 60_000;
 
   useEffect(() => {
     const currentFetchId = ++fetchIdRef.current;
+    const filterKey = `${startStr}|${endStr}|${loja}`;
+    const lojaParam = loja || null;
+
+    // refreshKey++ (auto-refresh ou config saved) → invalida todo o cache.
+    const isRefreshKeyChange = lastRefreshKeyRef.current !== refreshKey;
+    lastRefreshKeyRef.current = refreshKey;
+    if (isRefreshKeyChange) {
+      cacheRef.current.clear();
+    }
+
+    // Cache hit em troca de filtro: render instantâneo, sem fetch.
+    if (!isRefreshKeyChange) {
+      const cached = cacheRef.current.get(filterKey);
+      if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+        hasDataRef.current = true;
+        setData({
+          ...cached.data,
+          loading: false,
+          refreshing: false,
+          lastUpdated: new Date(cached.ts),
+        });
+        return;
+      }
+    }
 
     async function run() {
       // Se já tivemos dado bom antes, mantém visível e sinaliza refreshing.
-      // Caso contrário, o initial state (loading=true, tudo null/vazio) já
-      // provoca skeleton nos componentes. NÃO resetar aqui — isso causava
-      // o "dashboard zerado" quando uma RPC intermitente voltava nula e o
-      // mapeamento produzia {faturamento:0, ...} com loading=false no fim.
+      // Caso contrário, o initial state (loading=true) provoca skeleton.
       if (hasDataRef.current) {
         setData(prev => ({ ...prev, refreshing: true }));
       }
 
-      // Resolve o filtro de loja em um array de ecommerce_nome_tiny
-      const lojas = await rpc.resolveLojaToEcommerceNomes(loja || null);
       const anterior = calcPeriodoAnterior(startStr, endStr);
 
       const [
@@ -102,15 +125,15 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         heatmapData,
         comparativoData,
       ] = await Promise.all([
-        rpc.fetchKpisHero(startStr, endStr, lojas).catch(() => null),
-        rpc.fetchKpisHeroAnterior(startStr, endStr, lojas).catch(() => null),
-        rpc.fetchVendasPorDia(startStr, endStr, lojas).catch(() => []),
-        rpc.fetchVendasPorDia(anterior.start, anterior.end, lojas).catch(() => []),
-        rpc.fetchTopSkus(startStr, endStr, lojas).catch(() => []),
-        rpc.fetchRankingLojas(startStr, endStr, lojas).catch(() => []),
-        rpc.fetchMarketplace(startStr, endStr, lojas).catch(() => []),
-        rpc.fetchHeatmap(startStr, endStr, lojas).catch(() => []),
-        rpc.fetchComparativoPeriodos(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchKpisHero(startStr, endStr, lojaParam).catch(() => null),
+        rpc.fetchKpisHeroAnterior(startStr, endStr, lojaParam).catch(() => null),
+        rpc.fetchVendasPorDia(startStr, endStr, lojaParam).catch(() => []),
+        rpc.fetchVendasPorDia(anterior.start, anterior.end, lojaParam).catch(() => []),
+        rpc.fetchTopSkus(startStr, endStr, lojaParam).catch(() => []),
+        rpc.fetchRankingLojas(startStr, endStr, lojaParam).catch(() => []),
+        rpc.fetchMarketplace(startStr, endStr, lojaParam).catch(() => []),
+        rpc.fetchHeatmap(startStr, endStr, lojaParam).catch(() => []),
+        rpc.fetchComparativoPeriodos(startStr, endStr, lojaParam).catch(() => []),
       ]);
 
       if (currentFetchId !== fetchIdRef.current) return;
@@ -238,7 +261,7 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
       // em vez de skeleton infinito.
       hasDataRef.current = !fetchFailed;
 
-      setData({
+      const newData: VendasData = {
         resumoHero,
         kpisSecundarios,
         vendasPorDia,
@@ -252,7 +275,14 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         loading: false,
         refreshing: false,
         lastUpdated: new Date(),
-      });
+      };
+
+      // Salva no cache (somente se fetch trouxe algo útil).
+      if (!fetchFailed) {
+        cacheRef.current.set(filterKey, { data: newData, ts: Date.now() });
+      }
+
+      setData(newData);
     }
 
     run();

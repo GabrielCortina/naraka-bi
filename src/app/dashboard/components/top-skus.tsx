@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import type { SkuPaiAgrupado, SkuDetalhe } from '../types';
 import { formatBRL, formatNumero } from '../lib/date-utils';
-import { getSkuDetalhes } from '../lib/vendas-queries';
+import { fetchSkuDetalhes } from '../lib/rpc-queries';
 
 interface Props {
   data: SkuPaiAgrupado[];
@@ -71,8 +71,13 @@ export function TopSkus({ data, loading, startDate, endDate, loja }: Props) {
   const [orderBy, setOrderBy] = useState<'faturamento' | 'quantidade'>('faturamento');
   const [tab, setTab] = useState<'variacao' | 'cor'>('variacao');
 
-  const sorted = [...data].sort((a, b) =>
-    orderBy === 'faturamento' ? b.faturamentoTotal - a.faturamentoTotal : b.quantidadeTotal - a.quantidadeTotal
+  const sorted = useMemo(
+    () => [...data].sort((a, b) =>
+      orderBy === 'faturamento'
+        ? b.faturamentoTotal - a.faturamentoTotal
+        : b.quantidadeTotal - a.quantidadeTotal,
+    ),
+    [data, orderBy],
   );
   const visivel = showAll ? sorted : sorted.slice(0, 10);
   const restantes = sorted.length - 10;
@@ -81,7 +86,7 @@ export function TopSkus({ data, loading, startDate, endDate, loja }: Props) {
     setModalSku(skuPai);
     setTab('variacao');
     setLoadingDetalhes(true);
-    const det = await getSkuDetalhes(skuPai, startDate, endDate, loja);
+    const det = await fetchSkuDetalhes(skuPai, startDate, endDate, loja || null);
     setDetalhes(det);
     setLoadingDetalhes(false);
   }

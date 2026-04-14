@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import type { HeatmapCell } from '../types';
 
 interface Props {
@@ -26,7 +27,7 @@ function corPorIntensidade(valor: number, max: number): string {
   return TONS[idx];
 }
 
-export function HeatmapHorarios({ data, loading }: Props) {
+function HeatmapHorariosBase({ data, loading }: Props) {
   if (loading) {
     return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[280px] bg-current/5 rounded" /></div>;
   }
@@ -166,3 +167,6 @@ export function HeatmapHorarios({ data, loading }: Props) {
     </div>
   );
 }
+
+// memo: skip re-render quando props não mudam (ex: configOpen no parent).
+export const HeatmapHorarios = memo(HeatmapHorariosBase);

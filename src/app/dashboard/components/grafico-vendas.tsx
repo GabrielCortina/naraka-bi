@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo } from 'react';
 import { Bar } from 'react-chartjs-2';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip,
@@ -16,38 +17,36 @@ interface Props {
 }
 
 export function GraficoVendas({ atual, anterior, loading }: Props) {
-  if (loading) {
-    return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[160px] bg-current/5 rounded" /></div>;
-  }
+  // chartData/options memoizados — Chart.js re-pinta o canvas a cada
+  // novo objeto. Sem useMemo, mudanças de prop não relacionadas (ex:
+  // configOpen no parent) provocavam re-pintura desnecessária.
+  const chartData = useMemo(() => {
+    const labels = atual.map(d => formatDataCurta(d.data));
+    const dataAtual = atual.map(d => d.faturamento);
+    const dataAnterior = anterior.map(d => d.faturamento);
+    while (dataAnterior.length < dataAtual.length) dataAnterior.push(0);
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'Período atual',
+          data: dataAtual,
+          backgroundColor: '#378ADD',
+          borderRadius: 3,
+          barPercentage: 0.6,
+        },
+        {
+          label: 'Período anterior',
+          data: dataAnterior,
+          backgroundColor: 'rgba(55,138,221,0.25)',
+          borderRadius: 3,
+          barPercentage: 0.6,
+        },
+      ],
+    };
+  }, [atual, anterior]);
 
-  const labels = atual.map(d => formatDataCurta(d.data));
-  const dataAtual = atual.map(d => d.faturamento);
-  const dataAnterior = anterior.map(d => d.faturamento);
-
-  // Preenche anterior se tiver menos pontos
-  while (dataAnterior.length < dataAtual.length) dataAnterior.push(0);
-
-  const chartData = {
-    labels,
-    datasets: [
-      {
-        label: 'Período atual',
-        data: dataAtual,
-        backgroundColor: '#378ADD',
-        borderRadius: 3,
-        barPercentage: 0.6,
-      },
-      {
-        label: 'Período anterior',
-        data: dataAnterior,
-        backgroundColor: 'rgba(55,138,221,0.25)',
-        borderRadius: 3,
-        barPercentage: 0.6,
-      },
-    ],
-  };
-
-  const options = {
+  const options = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
@@ -73,7 +72,11 @@ export function GraficoVendas({ atual, anterior, loading }: Props) {
         grid: { display: false },
       },
     },
-  };
+  }), []);
+
+  if (loading) {
+    return <div className="card p-4 rounded-lg animate-pulse"><div className="h-[160px] bg-current/5 rounded" /></div>;
+  }
 
   return (
     <div className="card p-4 rounded-lg">

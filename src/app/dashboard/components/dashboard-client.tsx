@@ -34,12 +34,37 @@ export function DashboardClient() {
 
   const data = useVendasData(dateRange, loja, refreshKey);
 
-  // Auto-refresh a cada 5 minutos
+  // Auto-refresh a cada 5 minutos.
+  // - Pula o refresh quando a aba está oculta (custo desnecessário).
+  // - Ao voltar a ficar visível depois de >AUTO_REFRESH_MS oculta,
+  //   dispara refresh imediato (dados podem estar bem desatualizados).
   useEffect(() => {
+    let hiddenAt: number | null = null;
+
     const interval = setInterval(() => {
-      setRefreshKey(k => k + 1);
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        setRefreshKey(k => k + 1);
+      }
     }, AUTO_REFRESH_MS);
-    return () => clearInterval(interval);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now();
+      } else if (hiddenAt !== null) {
+        const wasHiddenMs = Date.now() - hiddenAt;
+        hiddenAt = null;
+        if (wasHiddenMs > AUTO_REFRESH_MS) {
+          setRefreshKey(k => k + 1);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   // Escuta evento da sidebar para abrir config de lojas
@@ -132,7 +157,7 @@ export function DashboardClient() {
             loja={loja || undefined}
           />
           <div className="space-y-4">
-            <RankingLojas data={data.rankingLojas} loading={data.loading} />
+            <RankingLojas data={data.rankingLojas} loading={data.loading} refreshKey={refreshKey} />
             <MarketplaceChart data={data.marketplace} loading={data.loading} />
           </div>
           <HeatmapHorarios data={data.heatmap} loading={data.loading} />
