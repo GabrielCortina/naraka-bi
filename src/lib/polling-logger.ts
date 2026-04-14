@@ -1,7 +1,7 @@
 import { createServiceClient } from './supabase-server';
 import type { PollingResult } from './polling-service';
 
-type Camada = 'rapido' | 'status' | 'reconciliacao' | 'webhook' | 'retry';
+type Camada = 'rapido' | 'status' | 'reconciliacao' | 'webhook' | 'retry' | 'sweep';
 
 // Inicia um log de execução e retorna o id + startTime
 export async function iniciarLog(camada: Camada): Promise<{ logId: number; startTime: number }> {

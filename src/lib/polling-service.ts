@@ -14,9 +14,13 @@ export interface PollingResult {
   erro?: string;
 }
 
-// Converte strings vazias para null (a Tiny retorna "" em campos opcionais)
+// Converte strings vazias ou whitespace-only para null (a Tiny retorna "" em campos opcionais)
+// Preserva whitespace interno — apenas detecta strings que são só espaços
 function emptyToNull<T>(value: T): T | null {
-  if (value === '' || value === undefined || value === null) return null;
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    return (value.trim() === '' ? null : value) as T | null;
+  }
   return value;
 }
 
@@ -121,7 +125,15 @@ export async function upsertPedido(pedido: TinyPedidoFull) {
 
     const { error: itensError } = await supabase.from('pedido_itens').insert(itens);
     if (itensError) {
-      console.error(`[polling] Erro ao salvar itens do pedido ${pedido.id}:`, itensError);
+      console.error(`[polling] ATENÇÃO: Pedido ${pedido.id} salvo SEM ITENS. Erro:`, itensError);
+      await supabase.from('pedidos').update({
+        itens_sync_error: true,
+      }).eq('id', pedido.id);
+    } else {
+      // Limpa flag de erro se sync de itens teve sucesso
+      await supabase.from('pedidos').update({
+        itens_sync_error: false,
+      }).eq('id', pedido.id);
     }
   }
 }
@@ -758,6 +770,72 @@ export async function pollingReconciliacao(): Promise<PollingResult> {
     const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
     console.error('[reconciliacao] Erro fatal:', mensagem);
     return { success: false, pedidosProcessados: 0, camada: 'reconciliacao', erro: mensagem };
+  }
+}
+
+// ============================================================
+// CAMADA 5: Sweep semanal — atualiza pedidos antigos não-finais
+// Roda domingo 2h UTC (sábado 23h Brasil)
+// Busca pedidos com situacao_final=false e last_sync_at > 7 dias
+// ============================================================
+export async function pollingSweep(): Promise<PollingResult> {
+  let pedidosProcessados = 0;
+  const MAX_POR_EXECUCAO = 200;
+  const startTime = Date.now();
+  const TIMEOUT_MS = 240_000;
+
+  try {
+    const supabase = createServiceClient();
+    const seteDiasAtras = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Busca pedidos não-finais que não foram sincronizados há mais de 7 dias
+    const { data: pedidosAntigos, error } = await supabase
+      .from('pedidos')
+      .select('id, numero_pedido')
+      .eq('situacao_final', false)
+      .lt('last_sync_at', seteDiasAtras)
+      .order('last_sync_at', { ascending: true, nullsFirst: true })
+      .limit(MAX_POR_EXECUCAO);
+
+    if (error) {
+      console.error('[sweep] Erro na query:', error);
+      throw error;
+    }
+
+    if (!pedidosAntigos || pedidosAntigos.length === 0) {
+      console.log('[sweep] Nenhum pedido antigo pendente de atualização');
+      return { success: true, pedidosProcessados: 0, camada: 'sweep' };
+    }
+
+    console.log(`[sweep] ${pedidosAntigos.length} pedidos antigos para atualizar`);
+
+    let lastRateLimit: RateLimitInfo | null = null;
+
+    for (const pedido of pedidosAntigos) {
+      if (Date.now() - startTime > TIMEOUT_MS) {
+        console.log(`[sweep] Timeout safety atingido. ${pedidosProcessados} processados.`);
+        break;
+      }
+
+      if (lastRateLimit) await waitForRateLimit(lastRateLimit);
+
+      try {
+        const { data: pedidoCompleto, rateLimit } = await obterPedido(pedido.id);
+        lastRateLimit = rateLimit;
+        await upsertPedido(pedidoCompleto);
+        pedidosProcessados++;
+      } catch (err) {
+        console.error(`[sweep] Erro pedido ${pedido.id} (${pedido.numero_pedido}):`, err);
+      }
+    }
+
+    console.log(`[sweep] Concluído: ${pedidosProcessados}/${pedidosAntigos.length} atualizados`);
+    return { success: true, pedidosProcessados, camada: 'sweep' };
+
+  } catch (err) {
+    const mensagem = err instanceof Error ? err.message : 'Erro desconhecido';
+    console.error('[sweep] Erro fatal:', mensagem);
+    return { success: false, pedidosProcessados, camada: 'sweep', erro: mensagem };
   }
 }
 
