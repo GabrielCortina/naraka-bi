@@ -15,8 +15,11 @@ function supabase() {
   return createBrowserClient();
 }
 
-// Supabase .in() tem limite de URL — batcheia arrays grandes
-const BATCH_SIZE = 500;
+// Supabase .in() tem limite de URL (~8KB no nginx/PostgREST).
+// Com IDs BIGINT da Tiny (~12 dígitos), 500 IDs geram URL de ~7KB e
+// esbarram no limite quando combinados com headers/auth, causando 500.
+// 200 IDs mantém a URL em ~2.8KB, bem abaixo do limite.
+const BATCH_SIZE = 200;
 async function batchIn<T>(
   table: string,
   column: string,
