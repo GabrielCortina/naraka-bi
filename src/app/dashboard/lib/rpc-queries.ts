@@ -35,19 +35,31 @@ interface RpcParams {
   p_lojas: string[] | null;
 }
 
+// Chama a RPC via API route /api/dashboard/rpc (service_role no servidor).
+// Antes era db.rpc() direto do browser, mas o role anon tem
+// statement_timeout=3s no Supabase — RPCs de 2-4s estouravam com 500.
+// O service_role no servidor não tem esse limite.
 async function callRpc<T>(name: string, params: RpcParams): Promise<T[]> {
-  const db = supabase();
   try {
-    const { data, error } = await withTimeout(
-      db.rpc(name, params as unknown as Record<string, unknown>),
+    const res = await withTimeout(
+      fetch('/api/dashboard/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rpc: name, params }),
+      }),
       RPC_TIMEOUT_MS,
       name,
     );
-    if (error) {
-      console.error(`[rpc] ${name} falhou:`, error);
+    if (!res.ok) {
+      console.error(`[rpc] ${name} HTTP ${res.status}`);
       return [];
     }
-    return (data || []) as T[];
+    const json: { data?: unknown; error?: string } = await res.json();
+    if (json.error) {
+      console.error(`[rpc] ${name} server error:`, json.error);
+      return [];
+    }
+    return (Array.isArray(json.data) ? json.data : []) as T[];
   } catch (err) {
     console.error(`[rpc] ${name} exceção:`, err);
     return [];
