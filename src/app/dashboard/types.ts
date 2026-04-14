@@ -156,3 +156,91 @@ export const MARKETPLACE_CORES: Record<string, string> = {
   'TikTok Shop': '#1D9E75',
   'Shein': '#D4537E',
 };
+
+// ============================================================
+// RPC RETURN TYPES — espelham assinaturas da migration 020
+// ============================================================
+
+export interface DashboardKpisHero {
+  faturamento: number;
+  pedidos: number;
+  pecas: number;
+  ticket: number;
+  cancelamentos: number;
+  valor_cancelado: number;
+  melhor_dia: string | null;
+  melhor_dia_valor: number;
+  media_diaria: number;
+  dias_com_venda: number;
+}
+
+export interface DashboardVendasPorDia {
+  data_pedido: string;
+  faturamento: number;
+  pedidos: number;
+  cancelamentos: number;
+  fat_cancelado: number;
+  pecas: number;
+  ticket_medio: number;
+}
+
+export interface DashboardSkuFilho {
+  sku: string;
+  descricao: string;
+  quantidade: number;
+  faturamento: number;
+}
+
+export interface DashboardTopSku {
+  sku_pai: string;
+  faturamento: number;
+  pecas: number;
+  pedidos: number;
+  variacoes: string[];
+  skus_filhos: DashboardSkuFilho[];
+}
+
+export interface DashboardRankingLoja {
+  ecommerce_nome: string;
+  nome_loja: string;
+  marketplace: string;
+  faturamento: number;
+  pedidos: number;
+  pecas: number;
+  ticket: number;
+  cancelamentos: number;
+  taxa_cancelamento: number;
+}
+
+export interface DashboardMarketplace {
+  marketplace: string;
+  faturamento: number;
+  pedidos: number;
+  percentual: number;
+}
+
+export interface DashboardHeatmapHora {
+  dia_semana: number;
+  hora: number;
+  contagem: number;
+  faturamento: number;
+}
+
+export interface DashboardKpisSecundarios {
+  faturamento_bruto: number;
+  faturamento_liquido: number;
+  valor_desconto: number;
+  valor_frete: number;
+  percentual_desconto: number;
+  percentual_frete: number;
+  taxa_cancelamento: number;
+  faturamento_cancelado: number;
+}
+
+export interface DashboardComparativoPeriodo {
+  nome: string;
+  date_range: string;
+  valor: number;
+  valor_comparado: number;
+  variacao: number;
+}

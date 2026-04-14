@@ -6,7 +6,9 @@ import type {
   SkuPaiAgrupado, LojaRanking, MarketplaceData, HeatmapCell,
   ComparativoPeriodo, HistoricoDia,
 } from '../types';
-import * as queries from '../lib/vendas-queries';
+import { MARKETPLACE_CORES } from '../types';
+import * as rpc from '../lib/rpc-queries';
+import { diasNoRange, diasRestantesMes, periodoIncluiMesAtual } from '../lib/date-utils';
 
 interface VendasData {
   resumoHero: ResumoHero | null;
@@ -19,18 +21,32 @@ interface VendasData {
   heatmap: HeatmapCell[];
   comparativo: ComparativoPeriodo[];
   historico: HistoricoDia[];
-  loading: boolean;      // true apenas no primeiro carregamento
-  refreshing: boolean;   // true durante auto-refresh em background
+  loading: boolean;
+  refreshing: boolean;
   lastUpdated: Date | null;
 }
 
-const TIMEOUT_MS = 10000;
+const MARKETPLACE_LABEL_MAP: Record<string, string> = {
+  mercado_livre: 'Mercado Livre',
+  shopee: 'Shopee',
+  tiktok: 'TikTok Shop',
+  shein: 'Shein',
+};
 
-function withTimeout<T>(fn: () => Promise<T>, fallback: T, ms: number): Promise<T> {
-  return Promise.race([
-    fn(),
-    new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
-  ]);
+function formatYmdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function calcPeriodoAnterior(start: string, end: string): { start: string; end: string } {
+  const s = new Date(start + 'T12:00:00');
+  const e = new Date(end + 'T12:00:00');
+  const dias = Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
+  const antEnd = new Date(s.getTime() - 86400000);
+  const antStart = new Date(antEnd.getTime() - (dias - 1) * 86400000);
+  return { start: formatYmdLocal(antStart), end: formatYmdLocal(antEnd) };
 }
 
 export function useVendasData(dateRange: DateRange, loja: string, refreshKey: number = 0) {
@@ -59,69 +75,167 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
     const currentFetchId = ++fetchIdRef.current;
     const isBackgroundRefresh = hasDataRef.current;
 
-    async function fetchAll() {
-      // Primeiro load: loading=true. Auto-refresh: refreshing=true sem skeleton
+    async function run() {
       if (isBackgroundRefresh) {
         setData(prev => ({ ...prev, refreshing: true }));
       } else {
         setData(prev => ({ ...prev, loading: true }));
       }
 
-      const lojaParam = loja || undefined;
-
-      const anteriorEnd = new Date(new Date(startStr).getTime() - 86400000);
-      const dias = Math.round((new Date(endStr).getTime() - new Date(startStr).getTime()) / 86400000) + 1;
-      const anteriorStart = new Date(anteriorEnd.getTime() - (dias - 1) * 86400000);
-      const antStart = anteriorStart.toISOString().split('T')[0];
-      const antEnd = anteriorEnd.toISOString().split('T')[0];
-
-      async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promise<T> {
-        try {
-          return await withTimeout(fn, fallback, TIMEOUT_MS);
-        } catch (err) {
-          console.error(`[dashboard] Erro em ${label}:`, err);
-          return fallback;
-        }
-      }
-
-      const emptyHero: ResumoHero = {
-        faturamento: 0, pedidos: 0, ticketMedio: 0, pecasVendidas: 0,
-        faturamentoAnterior: 0, pedidosAnterior: 0, ticketMedioAnterior: 0, pecasAnterior: 0,
-      };
-      const emptyKpis: KpisSecundarios = {
-        mediaDiariaRs: 0, melhorDia: { data: '', valor: 0 }, projecaoMesRs: null,
-        mediaDiariaPecas: 0, projecaoMesPecas: null, cancelamentos: 0, valorCancelado: 0,
-      };
+      // Resolve o filtro de loja em um array de ecommerce_nome_tiny
+      const lojas = await rpc.resolveLojaToEcommerceNomes(loja || null);
+      const anterior = calcPeriodoAnterior(startStr, endStr);
 
       const [
-        resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
-        topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
+        heroAtual,
+        heroAnterior,
+        vendasDia,
+        vendasDiaAnt,
+        topSkusData,
+        rankingData,
+        marketplaceData,
+        heatmapData,
+        comparativoData,
       ] = await Promise.all([
-        safe(() => queries.getResumoHero(startStr, endStr, lojaParam), emptyHero, 'resumoHero'),
-        safe(() => queries.getKpisSecundarios(startStr, endStr, lojaParam), emptyKpis, 'kpisSecundarios'),
-        safe(() => queries.getVendasPorDia(startStr, endStr, lojaParam), [], 'vendasPorDia'),
-        safe(() => queries.getVendasPorDia(antStart, antEnd, lojaParam), [], 'vendasPorDiaAnterior'),
-        safe(() => queries.getTopSkus(startStr, endStr, lojaParam), [], 'topSkus'),
-        safe(() => queries.getRankingLojas(startStr, endStr, lojaParam), [], 'rankingLojas'),
-        safe(() => queries.getVendasPorMarketplace(startStr, endStr, lojaParam), [], 'marketplace'),
-        safe(() => queries.getHeatmapHorarios(startStr, endStr, lojaParam), [], 'heatmap'),
-        safe(() => queries.getComparativoPeriodos(), [], 'comparativo'),
-        safe(() => queries.getHistoricoDias(startStr, endStr, lojaParam), [], 'historico'),
+        rpc.fetchKpisHero(startStr, endStr, lojas).catch(() => null),
+        rpc.fetchKpisHeroAnterior(startStr, endStr, lojas).catch(() => null),
+        rpc.fetchVendasPorDia(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchVendasPorDia(anterior.start, anterior.end, lojas).catch(() => []),
+        rpc.fetchTopSkus(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchRankingLojas(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchMarketplace(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchHeatmap(startStr, endStr, lojas).catch(() => []),
+        rpc.fetchComparativoPeriodos(startStr, endStr, lojas).catch(() => []),
       ]);
 
       if (currentFetchId !== fetchIdRef.current) return;
 
+      // ============================================================
+      // MAPEAMENTOS: RPC shapes → interfaces consumidas pelos componentes
+      // ============================================================
+
+      const resumoHero: ResumoHero = {
+        faturamento: Number(heroAtual?.faturamento ?? 0),
+        pedidos: Number(heroAtual?.pedidos ?? 0),
+        ticketMedio: Number(heroAtual?.ticket ?? 0),
+        pecasVendidas: Number(heroAtual?.pecas ?? 0),
+        faturamentoAnterior: Number(heroAnterior?.faturamento ?? 0),
+        pedidosAnterior: Number(heroAnterior?.pedidos ?? 0),
+        ticketMedioAnterior: Number(heroAnterior?.ticket ?? 0),
+        pecasAnterior: Number(heroAnterior?.pecas ?? 0),
+      };
+
+      const range: DateRange = { start: startStr, end: endStr };
+      const dias = diasNoRange(range);
+      const fatTotal = Number(heroAtual?.faturamento ?? 0);
+      const pecasTotal = Number(heroAtual?.pecas ?? 0);
+      const mediaDiariaRs = dias > 0 ? fatTotal / dias : 0;
+      const mediaDiariaPecas = dias > 0 ? pecasTotal / dias : 0;
+
+      let projecaoMesRs: number | null = null;
+      let projecaoMesPecas: number | null = null;
+      if (periodoIncluiMesAtual(range)) {
+        const restantes = diasRestantesMes();
+        projecaoMesRs = fatTotal + mediaDiariaRs * restantes;
+        projecaoMesPecas = pecasTotal + mediaDiariaPecas * restantes;
+      }
+
+      const kpisSecundarios: KpisSecundarios = {
+        mediaDiariaRs,
+        melhorDia: {
+          data: heroAtual?.melhor_dia ?? '',
+          valor: Number(heroAtual?.melhor_dia_valor ?? 0),
+        },
+        projecaoMesRs,
+        mediaDiariaPecas,
+        projecaoMesPecas,
+        cancelamentos: Number(heroAtual?.cancelamentos ?? 0),
+        valorCancelado: Number(heroAtual?.valor_cancelado ?? 0),
+      };
+
+      const vendasPorDia: VendaDia[] = (vendasDia ?? []).map(v => ({
+        data: v.data_pedido,
+        faturamento: Number(v.faturamento),
+        pedidos: Number(v.pedidos),
+        pecas: Number(v.pecas),
+      }));
+
+      const vendasPorDiaAnterior: VendaDia[] = (vendasDiaAnt ?? []).map(v => ({
+        data: v.data_pedido,
+        faturamento: Number(v.faturamento),
+        pedidos: Number(v.pedidos),
+        pecas: Number(v.pecas),
+      }));
+
+      const topSkus: SkuPaiAgrupado[] = (topSkusData ?? []).map(s => ({
+        skuPai: s.sku_pai,
+        variacoes: Array.isArray(s.variacoes) ? s.variacoes : [],
+        faturamentoTotal: Number(s.faturamento),
+        quantidadeTotal: Number(s.pecas),
+      }));
+
+      const rankingLojas: LojaRanking[] = (rankingData ?? []).map(r => ({
+        loja: r.ecommerce_nome,
+        faturamento: Number(r.faturamento),
+        pecas: Number(r.pecas),
+        pedidos: Number(r.pedidos),
+      }));
+
+      const marketplace: MarketplaceData[] = (marketplaceData ?? []).map(m => {
+        const label = MARKETPLACE_LABEL_MAP[m.marketplace] ?? 'Outro';
+        return {
+          marketplace: label,
+          faturamento: Number(m.faturamento),
+          percentual: Number(m.percentual),
+          cor: MARKETPLACE_CORES[label] ?? '#888888',
+        };
+      });
+
+      const heatmap: HeatmapCell[] = (heatmapData ?? []).map(h => ({
+        diaSemana: Number(h.dia_semana),
+        hora: Number(h.hora),
+        totalPedidos: Number(h.contagem),
+      }));
+
+      const comparativo: ComparativoPeriodo[] = (comparativoData ?? []).map(c => ({
+        nome: c.nome,
+        dateRange: c.date_range,
+        valor: Number(c.valor),
+        valorComparado: Number(c.valor_comparado),
+        variacao: Number(c.variacao),
+      }));
+
+      const historico: HistoricoDia[] = (vendasDia ?? [])
+        .map(v => ({
+          data: v.data_pedido,
+          faturamento: Number(v.faturamento),
+          pedidos: Number(v.pedidos),
+          pecas: Number(v.pecas),
+          ticketMedio: Number(v.ticket_medio),
+          cancelamentos: Number(v.cancelamentos),
+          fatCancelado: Number(v.fat_cancelado),
+        }))
+        .sort((a, b) => b.data.localeCompare(a.data));
+
       hasDataRef.current = true;
       setData({
-        resumoHero, kpisSecundarios, vendasPorDia, vendasPorDiaAnterior,
-        topSkus, rankingLojas, marketplace, heatmap, comparativo, historico,
+        resumoHero,
+        kpisSecundarios,
+        vendasPorDia,
+        vendasPorDiaAnterior,
+        topSkus,
+        rankingLojas,
+        marketplace,
+        heatmap,
+        comparativo,
+        historico,
         loading: false,
         refreshing: false,
         lastUpdated: new Date(),
       });
     }
 
-    fetchAll();
+    run();
   }, [startStr, endStr, loja, refreshKey]);
 
   return data;
