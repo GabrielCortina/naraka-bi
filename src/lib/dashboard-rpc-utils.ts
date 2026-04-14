@@ -1,20 +1,26 @@
 import { createServiceClient } from '@/lib/supabase-server';
 
 // Allowlist compartilhada entre /api/dashboard/rpc e /api/dashboard/batch.
-// Inclui as RPCs originais (020/021/022) e as v2 (023).
+// Inclui as RPCs originais (020/021/022), v2 (023) e v3 (024).
 export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_kpis_hero',
   'rpc_kpis_hero_anterior',
   'rpc_kpis_hero_v2',
+  'rpc_kpis_hero_v3',
   'rpc_vendas_por_dia',
   'rpc_vendas_por_dia_v2',
+  'rpc_vendas_por_dia_v3',
   'rpc_top_skus',
   'rpc_ranking_lojas',
+  'rpc_ranking_lojas_v3',
   'rpc_marketplace',
+  'rpc_marketplace_v3',
   'rpc_heatmap',
   'rpc_kpis_secundarios',
+  'rpc_kpis_secundarios_v3',
   'rpc_comparativo_periodos',
   'rpc_comparativo_periodos_v2',
+  'rpc_comparativo_periodos_v3',
   'rpc_sku_detalhes',
 ]);
 

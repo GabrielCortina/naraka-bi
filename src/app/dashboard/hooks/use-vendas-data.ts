@@ -49,6 +49,14 @@ function calcPeriodoAnterior(start: string, end: string): { start: string; end: 
   return { start: formatYmdLocal(antStart), end: formatYmdLocal(antEnd) };
 }
 
+// TTL variável (S9): períodos históricos imutáveis ficam 30min em cache;
+// período atual (inclui hoje) só 60s — pode receber novos pedidos.
+function getCacheTTL(_startStr: string, endStr: string): number {
+  const todayStr = formatYmdLocal(new Date());
+  const isCurrentPeriod = endStr >= todayStr;
+  return isCurrentPeriod ? 60_000 : 30 * 60_000;
+}
+
 export function useVendasData(dateRange: DateRange, loja: string, refreshKey: number = 0) {
   const [data, setData] = useState<VendasData>({
     resumoHero: null,
@@ -76,7 +84,6 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
   // instantânea. Auto-refresh (refreshKey++) limpa o cache e refaz fetch.
   const cacheRef = useRef<Map<string, { data: VendasData; ts: number }>>(new Map());
   const lastRefreshKeyRef = useRef(refreshKey);
-  const CACHE_TTL_MS = 60_000;
 
   useEffect(() => {
     const currentFetchId = ++fetchIdRef.current;
@@ -91,9 +98,10 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
     }
 
     // Cache hit em troca de filtro: render instantâneo, sem fetch.
+    // TTL depende do período (60s atual / 30min histórico).
     if (!isRefreshKeyChange) {
       const cached = cacheRef.current.get(filterKey);
-      if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      if (cached && Date.now() - cached.ts < getCacheTTL(startStr, endStr)) {
         hasDataRef.current = true;
         setData({
           ...cached.data,

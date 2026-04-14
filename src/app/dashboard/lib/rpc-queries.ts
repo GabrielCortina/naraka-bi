@@ -180,19 +180,22 @@ interface DashboardKpisHeroV2Row extends DashboardKpisHero {
   periodo: 'atual' | 'anterior';
 }
 
-// Hero v2: retorna atual + anterior em 1 chamada (substitui fetchKpisHero
-// + fetchKpisHeroAnterior). Usado no Group 1 do progressive loading.
-export async function fetchKpisHeroV2(
+// Hero v3 (Fase 3): lê de dashboard_daily_stats. Sub-50ms para qualquer período.
+export async function fetchKpisHeroV3(
   start: string, end: string, loja: string | null,
 ): Promise<{ atual: DashboardKpisHero | null; anterior: DashboardKpisHero | null }> {
   const rows = await callRpc<DashboardKpisHeroV2Row>(
-    'rpc_kpis_hero_v2', { p_start: start, p_end: end }, loja,
+    'rpc_kpis_hero_v3', { p_start: start, p_end: end }, loja,
   );
   return {
     atual:    rows.find(r => r.periodo === 'atual')    ?? null,
     anterior: rows.find(r => r.periodo === 'anterior') ?? null,
   };
 }
+
+// Hero v2: alias para v3 (fetcher original mantido para não quebrar
+// chamadas externas; rotas internas para v3 que usa o summary).
+export const fetchKpisHeroV2 = fetchKpisHeroV3;
 
 interface DashboardVendasPorDiaV2Row extends DashboardVendasPorDia {
   periodo: 'atual' | 'anterior';
@@ -271,15 +274,19 @@ export async function fetchDashboardSecundario(
 ): Promise<DashboardSecundarioBundle> {
   const periodoParams = { p_start: start, p_end: end };
 
+  // Fase 3: ranking, marketplace, secundarios, comparativo e vendas-por-dia
+  // agora rodam contra dashboard_daily_stats (sub-50ms cada).
+  // top_skus e heatmap continuam em pedidos/pedido_itens (precisam de granularidade
+  // SKU/hora que o summary não tem).
   const calls: BatchCallSpec[] = [
     { name: 'rpc_top_skus',                 params: periodoParams, loja },
-    { name: 'rpc_ranking_lojas',            params: periodoParams, loja },
-    { name: 'rpc_marketplace',              params: periodoParams, loja },
+    { name: 'rpc_ranking_lojas_v3',         params: periodoParams, loja },
+    { name: 'rpc_marketplace_v3',           params: periodoParams, loja },
     { name: 'rpc_heatmap',                  params: periodoParams, loja },
-    { name: 'rpc_kpis_secundarios',         params: periodoParams, loja },
-    { name: 'rpc_comparativo_periodos_v2',  params: periodoParams, loja },
+    { name: 'rpc_kpis_secundarios_v3',      params: periodoParams, loja },
+    { name: 'rpc_comparativo_periodos_v3',  params: periodoParams, loja },
     {
-      name: 'rpc_vendas_por_dia_v2',
+      name: 'rpc_vendas_por_dia_v3',
       params: { p_start: start, p_end: end, p_start_ant: startAnt, p_end_ant: endAnt },
       loja,
     },
