@@ -1,3 +1,15 @@
+/**
+ * SITUAÇÕES TINY ERP — REFERÊNCIA COMPLETA
+ *
+ * IMPORTANTE: Não confundir com situacao_final do banco (usado pelo polling).
+ * situacao_final=true no banco significa apenas que o polling parou de monitorar.
+ * Aqui mapeamos o significado de negócio de cada situação.
+ *
+ * Entram no faturamento (pagamento confirmado): 1, 3, 4, 5, 6, 7, 9
+ * Cancelamentos: 2
+ * Aguardando pagamento (não contam): 0, 8
+ */
+
 // Tipos do Dashboard de Vendas
 
 export type PeriodFilter =
@@ -106,8 +118,37 @@ export const LOJAS = [
   'ELIS SHEIN',
 ] as const;
 
-export const SITUACOES_APROVADAS = [1, 3, 4, 5, 7, 9];
-export const SITUACOES_CANCELADAS = [2, 6];
+// Mapeamento completo de todas as situações da Tiny ERP
+// Mantido completo mesmo que algumas situações não existam no banco hoje
+// para garantir que pedidos futuros sejam tratados corretamente
+export const SITUACAO_LABELS: Record<number, string> = {
+  0: 'Aberto',
+  1: 'Aprovado',
+  2: 'Cancelado',
+  3: 'Preparando',
+  4: 'Faturado',
+  5: 'Pronto para envio',
+  6: 'Entregue',
+  7: 'Enviado',
+  8: 'Dados incompletos',
+  9: 'Não entregue',
+};
+
+// Situações que entram no faturamento (pedido foi pago)
+// 0 (Aberto) e 8 (Dados incompletos) NÃO entram — pagamento não confirmado
+export const SITUACOES_APROVADAS = [1, 3, 4, 5, 6, 7, 9];
+
+// Situações de cancelamento
+export const SITUACOES_CANCELADAS = [2];
+
+// Situações que ainda estão em andamento (não finalizaram)
+// Usado para análises de pipeline/funil
+export const SITUACOES_EM_ANDAMENTO = [0, 1, 3, 4, 5, 7, 8];
+
+// Situações finais (pedido encerrado — não muda mais)
+// IMPORTANTE: este array é para o DASHBOARD apenas
+// O polling usa situacao_final=true no banco (apenas 2 e 6)
+export const SITUACOES_FINAIS_DASH = [2, 6, 9];
 
 export const MARKETPLACE_CORES: Record<string, string> = {
   'Mercado Livre': '#378ADD',
