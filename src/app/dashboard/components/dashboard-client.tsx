@@ -14,7 +14,6 @@ import { RankingLojas } from './ranking-lojas';
 import { MarketplaceChart } from './marketplace-chart';
 import { HeatmapHorarios } from './heatmap-horarios';
 import { HistoricoDias } from './historico-dias';
-import { LojaConfigModal } from './loja-config-modal';
 import { hoje } from '../lib/date-utils';
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutos
@@ -28,7 +27,6 @@ export function DashboardClient() {
 
   const [customStart, setCustomStart] = useState(hoje());
   const [customEnd, setCustomEnd] = useState(hoje());
-  const [configOpen, setConfigOpen] = useState(false);
   const [lojas, setLojas] = useState<LojaOption[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -67,11 +65,13 @@ export function DashboardClient() {
     };
   }, []);
 
-  // Escuta evento da sidebar para abrir config de lojas
+  // O LojaConfigModal agora vive no AppShell (global). Quando ele salva,
+  // despacha 'naraka:loja-config-saved' — escutamos aqui para revalidar
+  // os dados do dashboard via refreshKey.
   useEffect(() => {
-    const handler = () => setConfigOpen(true);
-    window.addEventListener('naraka:open-loja-config', handler);
-    return () => window.removeEventListener('naraka:open-loja-config', handler);
+    const handler = () => setRefreshKey(k => k + 1);
+    window.addEventListener('naraka:loja-config-saved', handler);
+    return () => window.removeEventListener('naraka:loja-config-saved', handler);
   }, []);
 
   const loadLojas = useCallback(async () => {
@@ -117,11 +117,6 @@ export function DashboardClient() {
     setCustomRange({ start: customStart, end: v });
   }
 
-  function handleConfigSaved() {
-    setRefreshKey(k => k + 1);
-    setConfigOpen(false);
-  }
-
   return (
     <>
       <div className="max-w-[1400px] mx-auto p-4 md:p-6">
@@ -135,7 +130,7 @@ export function DashboardClient() {
           onCustomStartChange={handleCustomStartChange}
           onCustomEndChange={handleCustomEndChange}
           lojas={lojas}
-          onOpenConfig={() => setConfigOpen(true)}
+          onOpenConfig={() => window.dispatchEvent(new CustomEvent('naraka:open-loja-config'))}
           refreshing={data.refreshing}
           lastUpdated={data.lastUpdated}
         />
@@ -165,12 +160,6 @@ export function DashboardClient() {
 
         <HistoricoDias data={data.historico} loading={data.loading} />
       </div>
-
-      <LojaConfigModal
-        open={configOpen}
-        onClose={() => setConfigOpen(false)}
-        onSaved={handleConfigSaved}
-      />
     </>
   );
 }

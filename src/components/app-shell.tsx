@@ -1,12 +1,30 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Sidebar } from './sidebar';
+import { LojaConfigModal } from '@/app/dashboard/components/loja-config-modal';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  // Dispara evento customizado para abrir config de lojas (ouvido pelo dashboard-client)
+  const [configOpen, setConfigOpen] = useState(false);
+
+  // Sidebar (qualquer página) dispara este evento para abrir o modal.
+  // O dashboard-client também dispara — assim o botão "⚙ Lojas" no
+  // header e o item da sidebar usam o mesmo caminho.
   const handleOpenLojaConfig = useCallback(() => {
     window.dispatchEvent(new CustomEvent('naraka:open-loja-config'));
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setConfigOpen(true);
+    window.addEventListener('naraka:open-loja-config', handler);
+    return () => window.removeEventListener('naraka:open-loja-config', handler);
+  }, []);
+
+  // Quando o modal salva, despacha evento global. O dashboard-client
+  // (se montado) escuta e incrementa refreshKey para revalidar dados.
+  const handleSaved = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('naraka:loja-config-saved'));
+    setConfigOpen(false);
   }, []);
 
   return (
@@ -15,6 +33,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="md:ml-[60px]">
         {children}
       </main>
+
+      {/* Modal global — funciona em qualquer página. */}
+      <LojaConfigModal
+        open={configOpen}
+        onClose={() => setConfigOpen(false)}
+        onSaved={handleSaved}
+      />
     </div>
   );
 }
