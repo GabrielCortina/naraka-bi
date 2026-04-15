@@ -56,6 +56,9 @@ export function SkuAliasModal({ open, onClose, initialTab = 'alias' }: Props) {
   const [kQtd, setKQtd] = useState(1);
   const [kSaving, setKSaving] = useState(false);
 
+  // Reconciliação retroativa
+  const [reconciling, setReconciling] = useState(false);
+
   useEffect(() => {
     if (!open) return;
     setTab(initialTab);
@@ -165,6 +168,26 @@ export function SkuAliasModal({ open, onClose, initialTab = 'alias' }: Props) {
       setError(err instanceof Error ? err.message : 'erro');
     } finally {
       setKSaving(false);
+    }
+  }
+
+  async function handleReconcile() {
+    setReconciling(true);
+    setError('');
+    try {
+      const res = await fetch('/api/sku/reconcile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days_back: 30 }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'erro ao recalcular');
+      const processed = json.data?.processed ?? 0;
+      showToast(`Histórico recalculado: ${processed} pares (30 dias)`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'erro');
+    } finally {
+      setReconciling(false);
     }
   }
 
@@ -394,11 +417,19 @@ export function SkuAliasModal({ open, onClose, initialTab = 'alias' }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 pb-4 pt-3 shrink-0 border-t border-current/5 flex items-center justify-between">
-          <div className="flex-1">
+        <div className="px-6 pb-4 pt-3 shrink-0 border-t border-current/5 flex items-center justify-between gap-3">
+          <div className="flex-1 min-w-0">
             {error && <span className="text-xs text-red-500">{error}</span>}
             {toast && !error && <span className="text-xs text-[#1D9E75]">{toast}</span>}
           </div>
+          <button
+            onClick={handleReconcile}
+            disabled={reconciling}
+            title="Reaplica regras atuais de alias e kits aos últimos 30 dias de dados"
+            className="px-3 py-2 text-xs font-medium rounded-md border border-[#378ADD]/30 text-[#378ADD] hover:bg-[#378ADD]/10 disabled:opacity-50"
+          >
+            {reconciling ? 'Recalculando… (1–2 min)' : 'Recalcular histórico (30d)'}
+          </button>
           <button
             onClick={onClose}
             className="px-4 py-2 text-xs font-medium rounded-md border border-current/10 hover:bg-current/5"
