@@ -1,0 +1,114 @@
+-- ============================================================
+-- 028_backfill_sku_stats.sql
+--
+-- Popula dashboard_sku_daily_stats com o histórico completo.
+-- Rodar UMA VEZ após aplicar 028_dashboard_sku_daily_stats.sql.
+--
+-- Tempo estimado: 2–10 minutos para 65k pedidos / 72k itens.
+-- A partir do backfill, os triggers mantêm o summary atualizado.
+--
+-- Se for interrompido, é idempotente: basta rodar de novo.
+-- ============================================================
+
+-- Opção A — via reconciliação (mais segura, processa por par data/loja):
+-- 400 = ~13 meses de histórico. Ajuste p_days_back se tiver mais.
+SELECT COUNT(*) AS pares_processados
+FROM reconcile_sku_daily_stats(400);
+
+-- ============================================================
+-- Opção B — bulk INSERT direto (mais rápido, se a opção A for lenta)
+-- Comentada por padrão. Descomentar APENAS se a A demorar demais.
+-- ============================================================
+-- TRUNCATE dashboard_sku_daily_stats;
+--
+-- INSERT INTO dashboard_sku_daily_stats (
+--   data_pedido, ecommerce_nome, sku, sku_pai,
+--   faturamento, quantidade, pedidos_count, updated_at
+-- )
+-- WITH aprovados AS (
+--   SELECT p.id, p.data_pedido, p.ecommerce_nome
+--   FROM pedidos p
+--   WHERE p.situacao IN (1,3,4,5,6,7,9)
+--     AND p.ecommerce_nome IS NOT NULL
+-- ),
+-- itens_brutos AS (
+--   SELECT a.data_pedido, a.ecommerce_nome, pi.pedido_id, pi.sku,
+--          pi.quantidade::NUMERIC  AS quantidade,
+--          pi.valor_total::NUMERIC AS valor_total
+--   FROM pedido_itens pi
+--   JOIN aprovados a ON a.id = pi.pedido_id
+-- ),
+-- kit_componentes AS (
+--   SELECT sk.sku_kit, sk.sku_componente, sk.quantidade,
+--          COUNT(*) OVER (PARTITION BY sk.sku_kit) AS n_componentes
+--   FROM sku_kit sk WHERE sk.ativo
+-- ),
+-- kit_expandido AS (
+--   SELECT ib.data_pedido, ib.ecommerce_nome, ib.pedido_id,
+--          kc.sku_componente AS sku_step,
+--          (ib.quantidade * kc.quantidade)::NUMERIC AS quantidade,
+--          (ib.valor_total / kc.n_componentes)::NUMERIC AS valor_total
+--   FROM itens_brutos ib
+--   JOIN kit_componentes kc ON kc.sku_kit = ib.sku
+--   UNION ALL
+--   SELECT ib.data_pedido, ib.ecommerce_nome, ib.pedido_id,
+--          ib.sku, ib.quantidade, ib.valor_total
+--   FROM itens_brutos ib
+--   LEFT JOIN kit_componentes kc ON kc.sku_kit = ib.sku
+--   WHERE kc.sku_kit IS NULL
+-- ),
+-- normalizado AS (
+--   SELECT ke.data_pedido, ke.ecommerce_nome, ke.pedido_id,
+--          ke.sku_step AS sku, ke.quantidade, ke.valor_total,
+--          COALESCE(
+--            substring(sa.sku_canonico FROM '^[0-9]+'),
+--            sa.sku_canonico,
+--            substring(ke.sku_step FROM '^[0-9]+'),
+--            ke.sku_step
+--          ) AS sku_pai
+--   FROM kit_expandido ke
+--   LEFT JOIN LATERAL (
+--     SELECT a.sku_canonico FROM sku_alias a
+--     WHERE a.ativo
+--       AND a.sku_original = COALESCE(substring(ke.sku_step FROM '^[0-9]+'), ke.sku_step)
+--     ORDER BY a.canal NULLS LAST LIMIT 1
+--   ) sa ON true
+-- ),
+-- por_sku_pai AS (
+--   SELECT data_pedido, ecommerce_nome, sku_pai,
+--          COUNT(DISTINCT pedido_id)::BIGINT AS pedidos_count
+--   FROM normalizado
+--   GROUP BY data_pedido, ecommerce_nome, sku_pai
+-- ),
+-- por_sku AS (
+--   SELECT data_pedido, ecommerce_nome, sku_pai, sku,
+--          SUM(valor_total)::NUMERIC AS faturamento,
+--          SUM(quantidade)::NUMERIC  AS quantidade
+--   FROM normalizado
+--   GROUP BY data_pedido, ecommerce_nome, sku_pai, sku
+-- )
+-- SELECT ps.data_pedido, ps.ecommerce_nome, ps.sku, ps.sku_pai,
+--        ps.faturamento, ps.quantidade, pp.pedidos_count, now()
+-- FROM por_sku ps
+-- JOIN por_sku_pai pp
+--   ON pp.data_pedido    = ps.data_pedido
+--  AND pp.ecommerce_nome = ps.ecommerce_nome
+--  AND pp.sku_pai        = ps.sku_pai;
+
+-- ============================================================
+-- VALIDAÇÃO pós-backfill:
+-- ============================================================
+-- 1. Checar contagem de linhas e datas cobertas:
+-- SELECT COUNT(*) AS linhas,
+--        MIN(data_pedido) AS primeira_data,
+--        MAX(data_pedido) AS ultima_data,
+--        COUNT(DISTINCT sku_pai) AS sku_pais_distintos
+-- FROM dashboard_sku_daily_stats;
+
+-- 2. Rodar a RPC nova e comparar com expectativa:
+-- SELECT * FROM rpc_top_skus(CURRENT_DATE - 7, CURRENT_DATE, NULL) LIMIT 20;
+
+-- 3. Checksum estrutural (ajuste datas conforme seu janela conhecida):
+-- SELECT md5(string_agg(sku_pai || '|' || faturamento::text || '|' || pecas::text,
+--                       ',' ORDER BY sku_pai))
+-- FROM rpc_top_skus(CURRENT_DATE - 7, CURRENT_DATE, NULL);
