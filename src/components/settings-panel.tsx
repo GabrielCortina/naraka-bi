@@ -63,6 +63,22 @@ export function SettingsPanel({ open, onClose, sidebarWidth, onOpenLojaConfig }:
         <div className="p-2">
           <p className="text-[9px] uppercase tracking-wider opacity-40 px-3.5 py-2">Dados</p>
           <SettingsItem icon="🏪" label="Configurar lojas" onClick={() => { onOpenLojaConfig(); onClose(); }} />
+          <SettingsItem
+            icon="🏷️"
+            label="Mapeamento de SKU"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('naraka:open-sku-alias', { detail: { tab: 'alias' } }));
+              onClose();
+            }}
+          />
+          <SettingsItem
+            icon="📦"
+            label="Mapeamento de Kits"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('naraka:open-sku-alias', { detail: { tab: 'kits' } }));
+              onClose();
+            }}
+          />
         </div>
 
         {/* Footer */}

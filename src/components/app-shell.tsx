@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Sidebar } from './sidebar';
 import { LojaConfigModal } from '@/app/dashboard/components/loja-config-modal';
+import { SkuAliasModal } from '@/app/dashboard/components/sku-alias-modal';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [configOpen, setConfigOpen] = useState(false);
+  const [skuAliasOpen, setSkuAliasOpen] = useState(false);
+  const [skuAliasTab, setSkuAliasTab] = useState<'alias' | 'kits'>('alias');
 
   // Sidebar (qualquer página) dispara este evento para abrir o modal.
   // O dashboard-client também dispara — assim o botão "⚙ Lojas" no
@@ -18,6 +21,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const handler = () => setConfigOpen(true);
     window.addEventListener('naraka:open-loja-config', handler);
     return () => window.removeEventListener('naraka:open-loja-config', handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ tab?: 'alias' | 'kits' }>).detail;
+      setSkuAliasTab(detail?.tab === 'kits' ? 'kits' : 'alias');
+      setSkuAliasOpen(true);
+    };
+    window.addEventListener('naraka:open-sku-alias', handler);
+    return () => window.removeEventListener('naraka:open-sku-alias', handler);
   }, []);
 
   // Quando o modal salva, despacha evento global. O dashboard-client
@@ -39,6 +52,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         open={configOpen}
         onClose={() => setConfigOpen(false)}
         onSaved={handleSaved}
+      />
+
+      <SkuAliasModal
+        open={skuAliasOpen}
+        onClose={() => setSkuAliasOpen(false)}
+        initialTab={skuAliasTab}
       />
     </div>
   );

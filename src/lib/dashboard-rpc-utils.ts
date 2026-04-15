@@ -22,6 +22,8 @@ export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_comparativo_periodos_v2',
   'rpc_comparativo_periodos_v3',
   'rpc_sku_detalhes',
+  'rpc_sku_alias_list',
+  'rpc_sku_kit_list',
 ]);
 
 interface LojaConfigRow {
