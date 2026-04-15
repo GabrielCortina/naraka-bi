@@ -451,7 +451,7 @@ export async function pollingStatus(): Promise<PollingResult> {
 // Relatório salvo em reconciliacao_relatorio
 // ============================================================
 const RECONCILIACAO_TIMEOUT_MS = 240_000; // 240s (margem de 60s antes do timeout Vercel)
-const RECONCILIACAO_COOLDOWN_HORAS = 20;
+const RECONCILIACAO_COOLDOWN_HORAS = 12;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function atualizarRelatorio(supabase: any, relatorioId: number | null, dados: Record<string, unknown>) {
