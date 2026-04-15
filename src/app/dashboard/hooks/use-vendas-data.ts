@@ -302,7 +302,11 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
           historico:            pick(historico, prev.historico),
           loading: false,
           refreshing: false,
-          lastUpdated: batchFailed ? prev.lastUpdated : new Date(),
+          // Sempre bump — lastUpdated representa "último refresh tentado
+          // com ao menos Hero OK". Se o batch falhou parcialmente, os
+          // campos afetados já foram preservados acima; o header deve
+          // seguir mostrando que o refresh ocorreu.
+          lastUpdated: new Date(),
         };
 
         // Só cacheia quando o fetch foi completo.

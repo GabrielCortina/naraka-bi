@@ -289,15 +289,17 @@ export async function fetchDashboardSecundario(
 ): Promise<DashboardSecundarioBundle> {
   const periodoParams = { p_start: start, p_end: end };
 
-  // Fase 3: ranking, marketplace, secundarios, comparativo e vendas-por-dia
-  // agora rodam contra dashboard_daily_stats (sub-50ms cada).
-  // top_skus e heatmap continuam em pedidos/pedido_itens (precisam de granularidade
-  // SKU/hora que o summary não tem).
+  // Fase 3 + 028: top_skus, ranking, marketplace, secundarios, comparativo
+  // e vendas-por-dia agora rodam contra tabelas summary (sub-100ms cada).
+  // rpc_heatmap é a ÚNICA que ainda lê direto de pedidos (precisa
+  // last_sync_at para granularidade horária) — é a mais lenta e sozinha
+  // pode estourar o timeout do batch sob throttling do Supabase.
+  // Solução: separar heatmap em chamada própria, paralelamente ao batch.
+  // Se heatmap estoura 9s, só ele fica vazio; resto atualiza normalmente.
   const calls: BatchCallSpec[] = [
     { name: 'rpc_top_skus',                 params: periodoParams, loja },
     { name: 'rpc_ranking_lojas_v3',         params: periodoParams, loja },
     { name: 'rpc_marketplace_v3',           params: periodoParams, loja },
-    { name: 'rpc_heatmap',                  params: periodoParams, loja },
     { name: 'rpc_kpis_secundarios_v3',      params: periodoParams, loja },
     { name: 'rpc_comparativo_periodos_v3',  params: periodoParams, loja },
     {
@@ -307,21 +309,30 @@ export async function fetchDashboardSecundario(
     },
   ];
 
-  const { results: r, hadFailure } = await callBatch(calls);
+  const [batchOutcome, heatmapRows] = await Promise.all([
+    callBatch(calls),
+    fetchHeatmap(start, end, loja).catch(() => [] as DashboardHeatmapHora[]),
+  ]);
+
+  const { results: r, hadFailure: batchHadFailure } = batchOutcome;
 
   const topSkus          = r[0] as DashboardTopSku[];
   const rankingLojas     = r[1] as DashboardRankingLoja[];
   const marketplace      = r[2] as DashboardMarketplace[];
-  const heatmap          = r[3] as DashboardHeatmapHora[];
-  const secundariosArr   = r[4] as DashboardKpisSecundarios[];
-  const comparativo      = r[5] as DashboardComparativoPeriodo[];
-  const vendasV2         = r[6] as DashboardVendasPorDiaV2Row[];
+  const secundariosArr   = r[3] as DashboardKpisSecundarios[];
+  const comparativo      = r[4] as DashboardComparativoPeriodo[];
+  const vendasV2         = r[5] as DashboardVendasPorDiaV2Row[];
+
+  const heatmapFailed = heatmapRows.length === 0;
+  // hadFailure agregado — o consumer preserva por-campo, então se só o
+  // heatmap falhou, apenas ele é preservado; o resto atualiza.
+  const hadFailure = batchHadFailure || heatmapFailed;
 
   return {
     topSkus,
     rankingLojas,
     marketplace,
-    heatmap,
+    heatmap: heatmapRows,
     kpisSecundarios: secundariosArr.length > 0 ? secundariosArr[0] : null,
     comparativo,
     vendasPorDia:          vendasV2.filter(v => v.periodo === 'atual'),
