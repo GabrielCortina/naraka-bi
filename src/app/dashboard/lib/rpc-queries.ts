@@ -216,8 +216,15 @@ interface BatchResultEntry {
   error?: string;
 }
 
-async function callBatch(calls: BatchCallSpec[]): Promise<unknown[][]> {
-  if (calls.length === 0) return [];
+interface BatchOutcome {
+  results: unknown[][];
+  // true se HTTP falhou OU alguma RPC individual retornou erro.
+  // Consumers usam para decidir se preservam state anterior.
+  hadFailure: boolean;
+}
+
+async function callBatch(calls: BatchCallSpec[]): Promise<BatchOutcome> {
+  if (calls.length === 0) return { results: [], hadFailure: false };
   try {
     const res = await withTimeout(
       fetch('/api/dashboard/batch', {
@@ -232,23 +239,28 @@ async function callBatch(calls: BatchCallSpec[]): Promise<unknown[][]> {
     );
     if (!res.ok) {
       console.error(`[batch] HTTP ${res.status}`);
-      return calls.map(() => []);
+      return { results: calls.map(() => []), hadFailure: true };
     }
     const json: { results?: BatchResultEntry[]; error?: string } = await res.json();
     if (json.error) {
       console.error('[batch] server error:', json.error);
-      return calls.map(() => []);
+      return { results: calls.map(() => []), hadFailure: true };
     }
     const results = json.results ?? [];
-    return calls.map((_, i) => {
+    let hadFailure = false;
+    const mapped = calls.map((_, i) => {
       const r = results[i];
-      if (!r) return [];
-      if (r.error) console.error(`[batch] ${calls[i].name} server error:`, r.error);
+      if (!r) { hadFailure = true; return []; }
+      if (r.error) {
+        console.error(`[batch] ${calls[i].name} server error:`, r.error);
+        hadFailure = true;
+      }
       return Array.isArray(r.data) ? r.data : [];
     });
+    return { results: mapped, hadFailure };
   } catch (err) {
     console.error('[batch] exceção:', err);
-    return calls.map(() => []);
+    return { results: calls.map(() => []), hadFailure: true };
   }
 }
 
@@ -261,6 +273,9 @@ export interface DashboardSecundarioBundle {
   comparativo: DashboardComparativoPeriodo[];
   vendasPorDia: DashboardVendasPorDia[];
   vendasPorDiaAnterior: DashboardVendasPorDia[];
+  // true quando o batch HTTP falhou ou alguma RPC individual deu erro.
+  // Consumer deve preservar state anterior dos campos vazios nesse caso.
+  hadFailure: boolean;
 }
 
 // Group 2 do progressive loading: 7 RPCs em 1 invocação Vercel.
@@ -292,7 +307,7 @@ export async function fetchDashboardSecundario(
     },
   ];
 
-  const r = await callBatch(calls);
+  const { results: r, hadFailure } = await callBatch(calls);
 
   const topSkus          = r[0] as DashboardTopSku[];
   const rankingLojas     = r[1] as DashboardRankingLoja[];
@@ -311,5 +326,6 @@ export async function fetchDashboardSecundario(
     comparativo,
     vendasPorDia:          vendasV2.filter(v => v.periodo === 'atual'),
     vendasPorDiaAnterior:  vendasV2.filter(v => v.periodo === 'anterior'),
+    hadFailure,
   };
 }

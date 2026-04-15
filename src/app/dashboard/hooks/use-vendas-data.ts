@@ -209,6 +209,13 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
         return;
       }
 
+      // Quando o batch falhou total/parcialmente (HTTP ko, timeout, RPC com
+      // erro), campos vazios não significam "sem dados" e sim "fetch falhou".
+      // Se já temos dados anteriores, preservamos campo a campo para evitar
+      // o bug de "auto-refresh zera os componentes inferiores".
+      const batchFailed = secundario.hadFailure === true;
+      const hadData = hasDataRef.current;
+
       const vendasPorDia: VendaDia[] = secundario.vendasPorDia.map(v => ({
         data: v.data_pedido,
         faturamento: Number(v.faturamento),
@@ -275,24 +282,35 @@ export function useVendasData(dateRange: DateRange, loja: string, refreshKey: nu
 
       hasDataRef.current = true;
 
-      const newData: VendasData = {
-        resumoHero,
-        kpisSecundarios,
-        vendasPorDia,
-        vendasPorDiaAnterior,
-        topSkus,
-        rankingLojas,
-        marketplace,
-        heatmap,
-        comparativo,
-        historico,
-        loading: false,
-        refreshing: false,
-        lastUpdated: new Date(),
-      };
+      // Se o batch falhou parcialmente e já tínhamos dados, preserva por
+      // campo: só substitui o valor anterior quando o novo trouxe algo.
+      // Se o batch foi OK, sobrescreve tudo (inclusive legítimos vazios).
+      setData(prev => {
+        const pick = <T,>(nv: T[], pv: T[]): T[] =>
+          batchFailed && hadData && nv.length === 0 ? pv : nv;
 
-      cacheRef.current.set(filterKey, { data: newData, ts: Date.now() });
-      setData(newData);
+        const newData: VendasData = {
+          resumoHero,
+          kpisSecundarios,
+          vendasPorDia:         pick(vendasPorDia, prev.vendasPorDia),
+          vendasPorDiaAnterior: pick(vendasPorDiaAnterior, prev.vendasPorDiaAnterior),
+          topSkus:              pick(topSkus, prev.topSkus),
+          rankingLojas:         pick(rankingLojas, prev.rankingLojas),
+          marketplace:          pick(marketplace, prev.marketplace),
+          heatmap:              pick(heatmap, prev.heatmap),
+          comparativo:          pick(comparativo, prev.comparativo),
+          historico:            pick(historico, prev.historico),
+          loading: false,
+          refreshing: false,
+          lastUpdated: batchFailed ? prev.lastUpdated : new Date(),
+        };
+
+        // Só cacheia quando o fetch foi completo.
+        if (!batchFailed) {
+          cacheRef.current.set(filterKey, { data: newData, ts: Date.now() });
+        }
+        return newData;
+      });
     }
 
     run();
