@@ -38,27 +38,27 @@ export function AlertasPinados({ pinados, loading, onUnpin, onPin, isToggling }:
 
   return (
     <div className="card p-4 rounded-lg mb-4">
-      <h3 className="text-xs font-medium opacity-70 mb-3">
-        📌 MONITORADOS ({pinados.length})
-      </h3>
-
-      {/* Busca para pinar */}
-      <div className="flex items-center gap-2 mb-3">
-        <input
-          type="text"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleAddPin()}
-          placeholder="Buscar SKU para monitorar..."
-          className="px-2.5 py-1.5 text-xs rounded border border-current/10 bg-transparent w-48"
-        />
-        <button
-          onClick={handleAddPin}
-          className="px-2.5 py-1.5 text-xs font-medium rounded border border-current/10 hover:bg-current/5"
-        >
-          +
-        </button>
-        {feedback && <span className="text-[10px] text-yellow-500">{feedback}</span>}
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="text-xs font-medium opacity-70">
+          📌 MONITORADOS ({pinados.length})
+        </h3>
+        <div className="flex items-center gap-1">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddPin()}
+            placeholder="+ SKU..."
+            className="px-2 py-1 text-xs rounded border border-current/10 bg-transparent w-28 h-7"
+          />
+          <button
+            onClick={handleAddPin}
+            className="h-7 w-7 text-xs font-medium rounded border border-current/10 hover:bg-current/5 flex items-center justify-center"
+          >
+            +
+          </button>
+          {feedback && <span className="text-[10px] text-yellow-500 ml-1">{feedback}</span>}
+        </div>
       </div>
 
       {/* Cards */}
