@@ -95,7 +95,15 @@ export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'sco
     try {
       if (isHoje) {
         // Preset "Hoje": usa RPC dedicada com comparação por hora
-        const alertasRes = await callRpc('rpc_alertas_calcular_hoje', { p_ordenar_por: ordenarPor }, lojaParam);
+        const [alertasRes, pinadosRes] = await Promise.all([
+          callRpc('rpc_alertas_calcular_hoje', { p_ordenar_por: ordenarPor }, lojaParam),
+          callRpc('rpc_alertas_pinados_status', {
+            p_periodo_a_inicio: p.periodoA.inicio,
+            p_periodo_a_fim: p.periodoA.fim,
+            p_periodo_b_inicio: p.periodoB.inicio,
+            p_periodo_b_fim: p.periodoB.fim,
+          }, lojaParam),
+        ]);
 
         if (currentFetchId !== fetchIdRef.current) return;
 
@@ -118,17 +126,15 @@ export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'sco
         }
         setResumo(Array.from(resumoMap.values()));
 
-        // Pinados extraídos dos alertas (já comparados por hora)
-        setPinados(mapped
-          .filter(a => a.is_pinado)
-          .map(a => ({
-            sku_pai: a.sku_pai,
-            tipo: a.tipo,
-            severidade: a.severidade,
-            variacao_pct: a.variacao_pct,
-            delta_pecas: a.delta_pecas,
-            delta_faturamento: a.delta_faturamento,
-          })));
+        const pinadoRows = (pinadosRes.data ?? []) as RpcPinadoRow[];
+        setPinados(pinadoRows.map(r => ({
+          sku_pai: r.out_sku_pai,
+          tipo: r.out_tipo as PinadoStatus['tipo'],
+          severidade: r.out_severidade as PinadoStatus['severidade'],
+          variacao_pct: Number(r.out_variacao_pct),
+          delta_pecas: Number(r.out_delta_pecas),
+          delta_faturamento: Number(r.out_delta_faturamento),
+        })));
       } else {
         // Presets normais: usa RPCs existentes
         setHoraCorte(null);
