@@ -15,6 +15,7 @@ interface Props {
   ordenarPor: 'score' | 'pecas' | 'faturamento';
   onOrdenarPorChange: (o: 'score' | 'pecas' | 'faturamento') => void;
   periodos: PeriodosCalculados;
+  horaCorte: number | null;
   lastUpdated: Date | null;
 }
 
@@ -32,7 +33,7 @@ function formatHora(d: Date): string {
 
 export function AlertasHeader({
   preset, onPresetChange, loja, onLojaChange, lojas,
-  ordenarPor, onOrdenarPorChange, periodos, lastUpdated,
+  ordenarPor, onOrdenarPorChange, periodos, horaCorte, lastUpdated,
 }: Props) {
   return (
     <div className="mb-6">
@@ -104,7 +105,10 @@ export function AlertasHeader({
 
       {/* Label do período */}
       <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-        Comparando: {periodos.label}
+        Comparando: {preset === 'hoje' && horaCorte != null
+          ? `Hoje até ${horaCorte}h vs Ontem até ${horaCorte}h`
+          : periodos.label
+        }
       </p>
     </div>
   );

@@ -21,6 +21,7 @@ interface RpcAlertaRow {
   out_lojas_afetadas: string[] | null;
   out_breakdown_lojas: BreakdownLoja[] | null;
   out_is_pinado: boolean;
+  out_hora_corte?: number;
 }
 
 interface RpcResumoRow {
@@ -62,91 +63,116 @@ function mapAlerta(row: RpcAlertaRow): Alerta {
   };
 }
 
+function callRpc(rpc: string, params: Record<string, unknown>, loja: string | null) {
+  return fetch('/api/dashboard/rpc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      rpc,
+      params,
+      ...(loja ? { loja } : {}),
+    }),
+  }).then(r => r.json());
+}
+
 export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'score' | 'pecas' | 'faturamento') {
   const [alertas, setAlertas] = useState<Alerta[]>([]);
   const [resumo, setResumo] = useState<AlertaResumo[]>([]);
   const [pinados, setPinados] = useState<PinadoStatus[]>([]);
   const [periodos, setPeriodos] = useState<PeriodosCalculados>(calcularPeriodos('ontem'));
+  const [horaCorte, setHoraCorte] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const fetchIdRef = useRef(0);
 
   const fetchData = useCallback(async () => {
     const currentFetchId = ++fetchIdRef.current;
+    const isHoje = preset === 'hoje';
     const p = calcularPeriodos(preset);
     setPeriodos(p);
-
     const lojaParam = loja || null;
-    const lojaBody = lojaParam ? { loja: lojaParam } : {};
 
     try {
-      const [alertasRes, resumoRes, pinadosRes] = await Promise.all([
-        fetch('/api/dashboard/rpc', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            rpc: 'rpc_alertas_calcular',
-            params: {
-              p_periodo_a_inicio: p.periodoA.inicio,
-              p_periodo_a_fim: p.periodoA.fim,
-              p_periodo_b_inicio: p.periodoB.inicio,
-              p_periodo_b_fim: p.periodoB.fim,
-              p_ordenar_por: ordenarPor,
-            },
-            ...lojaBody,
-          }),
-        }).then(r => r.json()),
-        fetch('/api/dashboard/rpc', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            rpc: 'rpc_alertas_resumo',
-            params: {
-              p_periodo_a_inicio: p.periodoA.inicio,
-              p_periodo_a_fim: p.periodoA.fim,
-              p_periodo_b_inicio: p.periodoB.inicio,
-              p_periodo_b_fim: p.periodoB.fim,
-            },
-            ...lojaBody,
-          }),
-        }).then(r => r.json()),
-        fetch('/api/dashboard/rpc', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            rpc: 'rpc_alertas_pinados_status',
-            params: {
-              p_periodo_a_inicio: p.periodoA.inicio,
-              p_periodo_a_fim: p.periodoA.fim,
-              p_periodo_b_inicio: p.periodoB.inicio,
-              p_periodo_b_fim: p.periodoB.fim,
-            },
-            ...lojaBody,
-          }),
-        }).then(r => r.json()),
-      ]);
+      if (isHoje) {
+        // Preset "Hoje": usa RPC dedicada com comparação por hora
+        const [alertasRes, pinadosRes] = await Promise.all([
+          callRpc('rpc_alertas_calcular_hoje', { p_ordenar_por: ordenarPor }, lojaParam),
+          callRpc('rpc_alertas_pinados_status', {
+            p_periodo_a_inicio: p.periodoA.inicio,
+            p_periodo_a_fim: p.periodoA.fim,
+            p_periodo_b_inicio: p.periodoB.inicio,
+            p_periodo_b_fim: p.periodoB.fim,
+          }, lojaParam),
+        ]);
 
-      if (currentFetchId !== fetchIdRef.current) return;
+        if (currentFetchId !== fetchIdRef.current) return;
 
-      const alertaRows = (alertasRes.data ?? []) as RpcAlertaRow[];
-      setAlertas(alertaRows.map(mapAlerta));
+        const alertaRows = (alertasRes.data ?? []) as RpcAlertaRow[];
+        const mapped = alertaRows.map(mapAlerta);
+        setAlertas(mapped);
 
-      const resumoRows = (resumoRes.data ?? []) as RpcResumoRow[];
-      setResumo(resumoRows.map(r => ({
-        tipo: r.out_tipo,
-        severidade: r.out_severidade,
-        quantidade: Number(r.out_quantidade),
-      })));
+        const hora = alertaRows.length > 0 && alertaRows[0].out_hora_corte != null
+          ? Number(alertaRows[0].out_hora_corte)
+          : null;
+        setHoraCorte(hora);
 
-      const pinadoRows = (pinadosRes.data ?? []) as RpcPinadoRow[];
-      setPinados(pinadoRows.map(r => ({
-        sku_pai: r.out_sku_pai,
-        tipo: r.out_tipo as PinadoStatus['tipo'],
-        severidade: r.out_severidade as PinadoStatus['severidade'],
-        variacao_pct: Number(r.out_variacao_pct),
-        delta_pecas: Number(r.out_delta_pecas),
-        delta_faturamento: Number(r.out_delta_faturamento),
-      })));
+        // Resumo calculado local (evita RPC extra que não suporta "hoje")
+        const resumoMap = new Map<string, { tipo: string; severidade: string; quantidade: number }>();
+        for (const a of mapped) {
+          const key = `${a.tipo}|${a.severidade}`;
+          const existing = resumoMap.get(key);
+          if (existing) existing.quantidade++;
+          else resumoMap.set(key, { tipo: a.tipo, severidade: a.severidade, quantidade: 1 });
+        }
+        setResumo(Array.from(resumoMap.values()));
+
+        const pinadoRows = (pinadosRes.data ?? []) as RpcPinadoRow[];
+        setPinados(pinadoRows.map(r => ({
+          sku_pai: r.out_sku_pai,
+          tipo: r.out_tipo as PinadoStatus['tipo'],
+          severidade: r.out_severidade as PinadoStatus['severidade'],
+          variacao_pct: Number(r.out_variacao_pct),
+          delta_pecas: Number(r.out_delta_pecas),
+          delta_faturamento: Number(r.out_delta_faturamento),
+        })));
+      } else {
+        // Presets normais: usa RPCs existentes
+        setHoraCorte(null);
+        const periodoParams = {
+          p_periodo_a_inicio: p.periodoA.inicio,
+          p_periodo_a_fim: p.periodoA.fim,
+          p_periodo_b_inicio: p.periodoB.inicio,
+          p_periodo_b_fim: p.periodoB.fim,
+        };
+
+        const [alertasRes, resumoRes, pinadosRes] = await Promise.all([
+          callRpc('rpc_alertas_calcular', { ...periodoParams, p_ordenar_por: ordenarPor }, lojaParam),
+          callRpc('rpc_alertas_resumo', periodoParams, lojaParam),
+          callRpc('rpc_alertas_pinados_status', periodoParams, lojaParam),
+        ]);
+
+        if (currentFetchId !== fetchIdRef.current) return;
+
+        const alertaRows = (alertasRes.data ?? []) as RpcAlertaRow[];
+        setAlertas(alertaRows.map(mapAlerta));
+
+        const resumoRows = (resumoRes.data ?? []) as RpcResumoRow[];
+        setResumo(resumoRows.map(r => ({
+          tipo: r.out_tipo,
+          severidade: r.out_severidade,
+          quantidade: Number(r.out_quantidade),
+        })));
+
+        const pinadoRows = (pinadosRes.data ?? []) as RpcPinadoRow[];
+        setPinados(pinadoRows.map(r => ({
+          sku_pai: r.out_sku_pai,
+          tipo: r.out_tipo as PinadoStatus['tipo'],
+          severidade: r.out_severidade as PinadoStatus['severidade'],
+          variacao_pct: Number(r.out_variacao_pct),
+          delta_pecas: Number(r.out_delta_pecas),
+          delta_faturamento: Number(r.out_delta_faturamento),
+        })));
+      }
 
       setLastUpdated(new Date());
     } catch (err) {
@@ -175,5 +201,5 @@ export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'sco
   const quedas = alertas.filter(a => a.tipo === 'QUEDA');
   const picos = alertas.filter(a => a.tipo === 'PICO');
 
-  return { alertas, quedas, picos, resumo, pinados, periodos, loading, lastUpdated, refetch: fetchData };
+  return { alertas, quedas, picos, resumo, pinados, periodos, horaCorte, loading, lastUpdated, refetch: fetchData };
 }

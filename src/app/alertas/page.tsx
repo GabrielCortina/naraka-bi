@@ -21,7 +21,7 @@ export default function AlertasPage() {
   const [ordenarPor, setOrdenarPor] = useState<'score' | 'pecas' | 'faturamento'>('score');
   const [lojas, setLojas] = useState<LojaOption[]>([]);
 
-  const { quedas, picos, resumo, pinados, periodos, loading, lastUpdated, refetch, alertas } = useAlertas(preset, loja, ordenarPor);
+  const { quedas, picos, resumo, pinados, periodos, horaCorte, loading, lastUpdated, refetch, alertas } = useAlertas(preset, loja, ordenarPor);
   const { togglePin, isToggling } = usePinados(refetch);
   const ia = useAlertasIA();
 
@@ -61,6 +61,7 @@ export default function AlertasPage() {
         ordenarPor={ordenarPor}
         onOrdenarPorChange={setOrdenarPor}
         periodos={periodos}
+        horaCorte={horaCorte}
         lastUpdated={lastUpdated}
       />
 
