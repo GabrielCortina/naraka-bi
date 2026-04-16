@@ -1,0 +1,179 @@
+'use client';
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import type { PresetPeriodo, Alerta, AlertaResumo, PinadoStatus, PeriodosCalculados, BreakdownLoja } from '../lib/types';
+import { calcularPeriodos } from '../lib/periodos';
+
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
+interface RpcAlertaRow {
+  out_sku_pai: string;
+  out_tipo: string;
+  out_severidade: string;
+  out_periodo_a_pecas: number;
+  out_periodo_b_pecas: number;
+  out_delta_pecas: number;
+  out_periodo_a_faturamento: number;
+  out_periodo_b_faturamento: number;
+  out_delta_faturamento: number;
+  out_variacao_pct: number;
+  out_score: number;
+  out_lojas_afetadas: string[] | null;
+  out_breakdown_lojas: BreakdownLoja[] | null;
+  out_is_pinado: boolean;
+}
+
+interface RpcResumoRow {
+  out_tipo: string;
+  out_severidade: string;
+  out_quantidade: number;
+}
+
+interface RpcPinadoRow {
+  out_sku_pai: string;
+  out_tipo: string;
+  out_severidade: string;
+  out_variacao_pct: number;
+  out_delta_pecas: number;
+  out_delta_faturamento: number;
+}
+
+function mapAlerta(row: RpcAlertaRow): Alerta {
+  return {
+    sku_pai: row.out_sku_pai,
+    tipo: row.out_tipo as Alerta['tipo'],
+    severidade: row.out_severidade as Alerta['severidade'],
+    periodo_a_pecas: Number(row.out_periodo_a_pecas),
+    periodo_b_pecas: Number(row.out_periodo_b_pecas),
+    delta_pecas: Number(row.out_delta_pecas),
+    periodo_a_faturamento: Number(row.out_periodo_a_faturamento),
+    periodo_b_faturamento: Number(row.out_periodo_b_faturamento),
+    delta_faturamento: Number(row.out_delta_faturamento),
+    variacao_pct: Number(row.out_variacao_pct),
+    score: Number(row.out_score),
+    lojas_afetadas: row.out_lojas_afetadas ?? [],
+    breakdown_lojas: (row.out_breakdown_lojas ?? []).map(b => ({
+      loja: b.loja,
+      delta_pct: b.delta_pct != null ? Number(b.delta_pct) : null,
+      delta_pecas: Number(b.delta_pecas),
+      delta_faturamento: Number(b.delta_faturamento),
+    })),
+    is_pinado: row.out_is_pinado,
+  };
+}
+
+export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'score' | 'pecas' | 'faturamento') {
+  const [alertas, setAlertas] = useState<Alerta[]>([]);
+  const [resumo, setResumo] = useState<AlertaResumo[]>([]);
+  const [pinados, setPinados] = useState<PinadoStatus[]>([]);
+  const [periodos, setPeriodos] = useState<PeriodosCalculados>(calcularPeriodos('ontem'));
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const fetchIdRef = useRef(0);
+
+  const fetchData = useCallback(async () => {
+    const currentFetchId = ++fetchIdRef.current;
+    const p = calcularPeriodos(preset);
+    setPeriodos(p);
+
+    const lojaParam = loja || null;
+    const lojaBody = lojaParam ? { loja: lojaParam } : {};
+
+    try {
+      const [alertasRes, resumoRes, pinadosRes] = await Promise.all([
+        fetch('/api/dashboard/rpc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rpc: 'rpc_alertas_calcular',
+            params: {
+              p_periodo_a_inicio: p.periodoA.inicio,
+              p_periodo_a_fim: p.periodoA.fim,
+              p_periodo_b_inicio: p.periodoB.inicio,
+              p_periodo_b_fim: p.periodoB.fim,
+              p_ordenar_por: ordenarPor,
+            },
+            ...lojaBody,
+          }),
+        }).then(r => r.json()),
+        fetch('/api/dashboard/rpc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rpc: 'rpc_alertas_resumo',
+            params: {
+              p_periodo_a_inicio: p.periodoA.inicio,
+              p_periodo_a_fim: p.periodoA.fim,
+              p_periodo_b_inicio: p.periodoB.inicio,
+              p_periodo_b_fim: p.periodoB.fim,
+            },
+            ...lojaBody,
+          }),
+        }).then(r => r.json()),
+        fetch('/api/dashboard/rpc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rpc: 'rpc_alertas_pinados_status',
+            params: {
+              p_periodo_a_inicio: p.periodoA.inicio,
+              p_periodo_a_fim: p.periodoA.fim,
+              p_periodo_b_inicio: p.periodoB.inicio,
+              p_periodo_b_fim: p.periodoB.fim,
+            },
+            ...lojaBody,
+          }),
+        }).then(r => r.json()),
+      ]);
+
+      if (currentFetchId !== fetchIdRef.current) return;
+
+      const alertaRows = (alertasRes.data ?? []) as RpcAlertaRow[];
+      setAlertas(alertaRows.map(mapAlerta));
+
+      const resumoRows = (resumoRes.data ?? []) as RpcResumoRow[];
+      setResumo(resumoRows.map(r => ({
+        tipo: r.out_tipo,
+        severidade: r.out_severidade,
+        quantidade: Number(r.out_quantidade),
+      })));
+
+      const pinadoRows = (pinadosRes.data ?? []) as RpcPinadoRow[];
+      setPinados(pinadoRows.map(r => ({
+        sku_pai: r.out_sku_pai,
+        tipo: r.out_tipo as PinadoStatus['tipo'],
+        severidade: r.out_severidade as PinadoStatus['severidade'],
+        variacao_pct: Number(r.out_variacao_pct),
+        delta_pecas: Number(r.out_delta_pecas),
+        delta_faturamento: Number(r.out_delta_faturamento),
+      })));
+
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error('[useAlertas] exceção:', err);
+    } finally {
+      if (currentFetchId === fetchIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [preset, loja, ordenarPor]);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchData();
+  }, [fetchData]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchData();
+      }
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const quedas = alertas.filter(a => a.tipo === 'QUEDA');
+  const picos = alertas.filter(a => a.tipo === 'PICO');
+
+  return { alertas, quedas, picos, resumo, pinados, periodos, loading, lastUpdated, refetch: fetchData };
+}

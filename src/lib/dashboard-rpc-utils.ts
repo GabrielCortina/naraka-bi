@@ -24,6 +24,9 @@ export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_sku_detalhes',
   'rpc_sku_alias_list',
   'rpc_sku_kit_list',
+  'rpc_alertas_calcular',
+  'rpc_alertas_resumo',
+  'rpc_alertas_pinados_status',
 ]);
 
 interface LojaConfigRow {
