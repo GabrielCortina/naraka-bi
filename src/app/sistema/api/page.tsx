@@ -145,7 +145,7 @@ export default function SistemaApiPage() {
       // Último log de cada camada
       ...['rapido', 'status', 'retry', 'reconciliacao', 'webhook', 'sweep'].map(camada =>
         db.from('polling_logs').select('*').eq('camada', camada)
-          .order('iniciado_em', { ascending: false }).limit(1).single()
+          .order('iniciado_em', { ascending: false }).limit(1).maybeSingle()
       ),
     ]);
 
