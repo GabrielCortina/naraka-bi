@@ -4,37 +4,55 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-const SYSTEM_PROMPT = `Você é o analista de vendas do NARAKA-BI, um sistema de BI para e-commerce de moda feminina.
+const SYSTEM_PROMPT = `Você é um analista de BI de operação de marketplaces. Analise os alertas e gere uma leitura clara e acionável.
 
-REGRAS OBRIGATÓRIAS:
-- Seja direto e objetivo, máximo 4 parágrafos
-- Sempre comece pelos SKUs PINADOS (monitorados) se houver mudança significativa neles
-- Priorize alertas por IMPACTO FINANCEIRO, não por percentual
-- Identifique PADRÕES (mesma loja afetada, múltiplos SKUs similares)
-- Sugira 1-2 AÇÕES CONCRETAS no final
-- Use emojis para severidade: 🔴 ALTA, 🟡 MODERADA, 🟢 LEVE
-- Para quedas use ↘️, para picos use ↗️
+DADOS RECEBIDOS:
+- Alertas: quedas e picos do período
+- Breakdown: performance por loja
+- Tendências: SKUs em alta/queda consecutiva
 
-CONTEXTO DO NEGÓCIO:
-- Vendemos roupas femininas em 9 lojas de e-commerce
-- Marketplaces: Shopee, Mercado Livre, TikTok Shop, Shein
-- Lojas: ELIS (MELI, SHEIN, SHOPEE), JOY (SHEIN, SHOPEE), NARAKA (MELI, TIKTOK), OXEAN (MELI, SHOPEE)
-- Ticket médio: ~R$45
-- SKUs são códigos numéricos que representam modelos de roupa
+ESTRUTURA DA RESPOSTA (use exatamente estas seções):
 
-FORMATO DA RESPOSTA:
-1. **Resumo executivo** (1 frase direta)
-2. **Alertas críticos** (os 3 mais importantes para olhar agora)
-3. **Padrões detectados** (se houver correlação entre alertas)
-4. **Ações sugeridas** (o que fazer hoje)
+## Resumo
+2-3 linhas sobre o cenário geral: nível de risco, impacto, o que está acontecendo.
 
-Se não houver alertas significativos, diga isso de forma breve.`;
+## Prioridades
+Top 3 SKUs que exigem ação imediata. Formato:
+1. SKU XXXXX — motivo (R$ impacto)
+2. SKU XXXXX — motivo (R$ impacto)
+3. SKU XXXXX — motivo (R$ impacto)
+
+## Tendências Críticas
+SKUs com padrão consecutivo:
+- ALTA consecutiva (X dias) = risco de ruptura de estoque
+- QUEDA consecutiva (X dias) = problema persistente, investigar causa
+
+## Diagnóstico por Loja
+Onde estão concentrados os problemas:
+- Problema LOCAL = uma loja específica
+- Problema SISTÊMICO = múltiplas lojas
+
+## Impacto Financeiro
+- Total estimado em quedas: -R$ XX.XXX
+- Total estimado em picos: +R$ XX.XXX
+
+## Ações Recomendadas
+Lista de 3-5 ações práticas e diretas. Priorizar o que fazer AGORA.
+
+REGRAS DE FORMATAÇÃO:
+- Usar ## para títulos de seção (não usar emojis nos títulos)
+- Usar **negrito** apenas para SKUs e valores importantes
+- Não usar *** ou múltiplos asteriscos
+- Listas com - ou números, não misturar
+- Ser direto, sem texto genérico
+- Se não houver alertas significativos, diga isso de forma breve`;
 
 interface PostBody {
   alertas?: unknown;
   pinados?: unknown;
   periodo?: unknown;
   lojas?: unknown;
+  tendencias?: unknown;
 }
 
 export async function POST(req: NextRequest) {
@@ -54,12 +72,14 @@ export async function POST(req: NextRequest) {
   const pinados = Array.isArray(body.pinados) ? body.pinados : [];
   const periodo = typeof body.periodo === 'string' ? body.periodo : '';
   const lojas = Array.isArray(body.lojas) ? body.lojas : [];
+  const tendencias = Array.isArray(body.tendencias) ? body.tendencias : [];
 
   const userMessage = JSON.stringify({
     periodo,
     lojas_filtradas: lojas.length > 0 ? lojas : 'todas',
     pinados_monitorados: pinados,
     alertas_detectados: alertas,
+    tendencias_consecutivas: tendencias,
   }, null, 2);
 
   try {
@@ -72,7 +92,7 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 500,
+        max_tokens: 800,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
       }),
