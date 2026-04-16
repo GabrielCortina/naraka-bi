@@ -139,6 +139,12 @@ export function TopSkus({ data, loading, startDate, endDate, loja }: Props) {
         </button>
       )}
 
+      {showAll && restantes > 0 && (
+        <button onClick={() => setShowAll(false)} className="text-[10px] text-[#378ADD] mt-2 hover:underline">
+          ver menos · top 10
+        </button>
+      )}
+
       {/* Modal de detalhes */}
       {modalSku && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 overflow-hidden" onClick={() => setModalSku(null)}>
