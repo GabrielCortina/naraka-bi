@@ -64,7 +64,13 @@ export default function AlertasPage() {
         lastUpdated={lastUpdated}
       />
 
-      <AlertasPinados pinados={pinados} loading={loading} />
+      <AlertasPinados
+        pinados={pinados}
+        loading={loading}
+        onUnpin={togglePin}
+        onPin={togglePin}
+        isToggling={isToggling}
+      />
 
       <AlertasGrid
         quedas={quedas}
