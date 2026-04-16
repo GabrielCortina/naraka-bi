@@ -7,6 +7,7 @@ export const maxDuration = 60;
 
 const ZAPI_INSTANCE = '3F1C14EC428F41EDAB2E0E8BC9274D54';
 const ZAPI_TOKEN = '7461620E4B170468446B91B9';
+const ZAPI_CLIENT_TOKEN = 'Ffce1b2e7425c4f08be7b1dfe6403dcc0S';
 const ZAPI_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`;
 const DESTINATARIOS = ['5511972785209', '5511972787135'];
 
@@ -116,7 +117,7 @@ export async function GET() {
       DESTINATARIOS.map(async (phone) => {
         const zapRes = await fetch(ZAPI_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_TOKEN },
+          headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT_TOKEN },
           body: JSON.stringify({ phone, message: mensagem }),
         });
         if (!zapRes.ok) {
