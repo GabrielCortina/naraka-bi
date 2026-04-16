@@ -17,16 +17,17 @@ REGRAS DE FORMATAÇÃO (WhatsApp):
 - Texto puro, SEM markdown (sem ##, sem **, sem _)
 - Use MAIÚSCULAS para títulos de seção
 - Use → para bullet points
+- Use • para sub-itens
 - Use números para listas ordenadas
-- Máximo 1500 caracteres (WhatsApp tem limite)
+- Máximo 2000 caracteres
 - Seja extremamente direto
 
-ESTRUTURA:
+ESTRUTURA COMPLETA (usar todas as seções):
 
 NARAKA-BI | Relatório [data]
 
 RESUMO
-Cenário geral em 1-2 linhas.
+Cenário geral em 2-3 linhas.
 
 PRIORIDADES
 1. SKU XXXXX - motivo (R$ impacto)
@@ -34,7 +35,18 @@ PRIORIDADES
 3. SKU XXXXX - motivo (R$ impacto)
 
 TENDÊNCIAS
-→ SKUs em alta/queda consecutiva relevante
+→ SKU XXXXX - X dias em alta (+XX%) - risco de ruptura
+→ SKU XXXXX - X dias em queda (-XX%) - investigar
+
+DIAGNÓSTICO POR LOJA
+→ Loja X: descrição do problema/oportunidade
+→ Loja Y: descrição
+Indicar se é problema LOCAL (1 loja) ou SISTÊMICO (várias lojas)
+
+IMPACTO FINANCEIRO
+→ Quedas: -R$ XX.XXX
+→ Picos: +R$ XX.XXX
+→ Saldo: R$ XX.XXX
 
 AÇÕES PARA HOJE
 → Ação 1
@@ -97,7 +109,7 @@ export async function GET() {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 600,
+        max_tokens: 1000,
         system: WHATSAPP_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
       }),
