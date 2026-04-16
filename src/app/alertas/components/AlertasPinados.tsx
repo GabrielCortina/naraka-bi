@@ -39,8 +39,9 @@ export function AlertasPinados({ pinados, loading, onUnpin, onPin, isToggling }:
   return (
     <div className="card p-4 rounded-lg mb-4">
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-xs font-medium opacity-70">
-          📌 MONITORADOS ({pinados.length})
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 2 2 0 002-2 2 2 0 00-2-2H8a2 2 0 00-2 2 2 2 0 002 2 1 1 0 011 1z"/></svg>
+          MONITORADOS ({pinados.length})
         </h3>
         <div className="flex items-center gap-1">
           <input

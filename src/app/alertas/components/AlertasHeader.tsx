@@ -37,43 +37,45 @@ export function AlertasHeader({
   return (
     <div className="mb-6">
       {/* Título + status */}
-      <div className="flex items-center justify-between mb-3">
-        <h1 className="text-xl font-semibold">
-          NARAKA | <span className="text-[#378ADD]">Alertas</span>
-        </h1>
-        {lastUpdated && (
-          <span className="text-[10px] text-gray-400 dark:text-gray-500">
-            🟢 Atualizado às {formatHora(lastUpdated)}
-          </span>
-        )}
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-xl font-semibold">
+            NARAKA | <span className="text-[#378ADD]">Alertas</span>
+          </h1>
+          <p className="text-xs mt-0.5 text-gray-400 dark:text-gray-500">
+            {lastUpdated
+              ? <>Atualizado às {formatHora(lastUpdated)}</>
+              : 'Carregando...'
+            }
+          </p>
+        </div>
       </div>
 
-      {/* Filtros de período */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
+      {/* Filtros — mesmo layout do Dashboard */}
+      <div className="flex flex-wrap items-center gap-2">
         {PRESETS.map(p => (
           <button
             key={p.key}
             onClick={() => onPresetChange(p.key)}
-            className={`px-3 py-1.5 text-[10px] rounded-md transition-colors ${
+            className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
               preset === p.key
                 ? 'bg-[#378ADD] text-white'
-                : 'border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+                : 'border border-current/10 hover:border-current/30'
             }`}
           >
             {p.label}
             {p.parcial && preset === p.key && (
-              <span className="ml-1 text-[8px] opacity-70">(parcial)</span>
+              <span className="ml-1 text-[10px] opacity-70">(parcial)</span>
             )}
           </button>
         ))}
-      </div>
 
-      {/* Loja + ordenação */}
-      <div className="flex flex-wrap items-center gap-3">
+        <div className="w-px h-6 bg-current/10 mx-1" />
+
         <select
           value={loja}
           onChange={e => onLojaChange(e.target.value)}
-          className="px-2 py-1.5 text-xs rounded border border-current/10 bg-transparent"
+          className="px-3 py-1.5 text-xs rounded-md border border-current/10 bg-transparent"
         >
           <option value="">Todas as lojas</option>
           {lojas.map(l => (
@@ -81,15 +83,17 @@ export function AlertasHeader({
           ))}
         </select>
 
-        <div className="flex-1" />
+        <div className="w-px h-6 bg-current/10 mx-1" />
 
         <div className="flex gap-1">
-          {([['score', '🎯 Score'], ['pecas', '📦 Peças'], ['faturamento', '💰 Fat.']] as const).map(([key, label]) => (
+          {([['score', 'Score'], ['pecas', 'Peças'], ['faturamento', 'Fat.']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => onOrdenarPorChange(key)}
-              className={`px-2 py-1 text-[10px] rounded-md ${
-                ordenarPor === key ? 'bg-[#378ADD] text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+              className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
+                ordenarPor === key
+                  ? 'bg-[#378ADD] text-white'
+                  : 'border border-current/10 hover:border-current/30'
               }`}
             >
               {label}
@@ -99,8 +103,8 @@ export function AlertasHeader({
       </div>
 
       {/* Label do período */}
-      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-2">
-        📅 Comparando: {periodos.label}
+      <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
+        Comparando: {periodos.label}
       </p>
     </div>
   );

@@ -33,7 +33,10 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
 
   const renderQuedas = () => (
     <div>
-      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">🔴 QUEDAS ({quedas.length})</h3>
+      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></svg>
+        QUEDAS ({quedas.length})
+      </h3>
       <AlertasResumo resumo={resumo} tipo="QUEDA" />
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
@@ -58,7 +61,10 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
 
   const renderPicos = () => (
     <div>
-      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">🟢 PICOS ({picos.length})</h3>
+      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+        PICOS ({picos.length})
+      </h3>
       <AlertasResumo resumo={resumo} tipo="PICO" />
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
@@ -86,7 +92,7 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
       {/* Mobile: tabs */}
       <div className="lg:hidden mb-3">
         <div className="flex gap-1">
-          {([['quedas', `🔴 Quedas (${quedas.length})`], ['picos', `🟢 Picos (${picos.length})`], ['ia', '🤖 IA']] as const).map(([key, label]) => (
+          {([['quedas', `Quedas (${quedas.length})`], ['picos', `Picos (${picos.length})`], ['ia', 'IA']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => setMobileTab(key)}
