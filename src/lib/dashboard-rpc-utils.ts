@@ -28,6 +28,7 @@ export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_alertas_calcular_hoje',
   'rpc_alertas_resumo',
   'rpc_alertas_pinados_status',
+  'rpc_alertas_pinados_status_hoje',
 ]);
 
 interface LojaConfigRow {
