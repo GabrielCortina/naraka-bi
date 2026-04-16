@@ -42,7 +42,7 @@ export function AlertasHeader({
           NARAKA | <span className="text-[#378ADD]">Alertas</span>
         </h1>
         {lastUpdated && (
-          <span className="text-[10px] opacity-40">
+          <span className="text-[10px] text-gray-400 dark:text-gray-500">
             🟢 Atualizado às {formatHora(lastUpdated)}
           </span>
         )}
@@ -57,7 +57,7 @@ export function AlertasHeader({
             className={`px-3 py-1.5 text-[10px] rounded-md transition-colors ${
               preset === p.key
                 ? 'bg-[#378ADD] text-white'
-                : 'border border-current/10 opacity-50 hover:opacity-80'
+                : 'border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
             }`}
           >
             {p.label}
@@ -89,7 +89,7 @@ export function AlertasHeader({
               key={key}
               onClick={() => onOrdenarPorChange(key)}
               className={`px-2 py-1 text-[10px] rounded-md ${
-                ordenarPor === key ? 'bg-[#378ADD] text-white' : 'opacity-50'
+                ordenarPor === key ? 'bg-[#378ADD] text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
               }`}
             >
               {label}
@@ -99,7 +99,7 @@ export function AlertasHeader({
       </div>
 
       {/* Label do período */}
-      <p className="text-[10px] opacity-40 mt-2">
+      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-2">
         📅 Comparando: {periodos.label}
       </p>
     </div>

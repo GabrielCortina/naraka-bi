@@ -33,14 +33,14 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
 
   const renderQuedas = () => (
     <div>
-      <h3 className="text-xs font-medium opacity-70 mb-2">🔴 QUEDAS ({quedas.length})</h3>
+      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">🔴 QUEDAS ({quedas.length})</h3>
       <AlertasResumo resumo={resumo} tipo="QUEDA" />
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
           {quedasVisiveis.map(a => (
             <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} />
           ))}
-          {quedas.length === 0 && <p className="text-xs opacity-40 text-center py-4">Nenhuma queda detectada</p>}
+          {quedas.length === 0 && <p className="text-xs text-gray-400 dark:text-gray-500 text-center py-4">Nenhuma queda detectada</p>}
           {quedas.length > 8 && !showAllQuedas && (
             <button onClick={() => setShowAllQuedas(true)} className="text-[10px] text-[#378ADD] hover:underline">
               Ver todos ({quedas.length}) →
@@ -58,14 +58,14 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
 
   const renderPicos = () => (
     <div>
-      <h3 className="text-xs font-medium opacity-70 mb-2">🟢 PICOS ({picos.length})</h3>
+      <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">🟢 PICOS ({picos.length})</h3>
       <AlertasResumo resumo={resumo} tipo="PICO" />
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
           {picosVisiveis.map(a => (
             <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} />
           ))}
-          {picos.length === 0 && <p className="text-xs opacity-40 text-center py-4">Nenhum pico detectado</p>}
+          {picos.length === 0 && <p className="text-xs text-gray-400 dark:text-gray-500 text-center py-4">Nenhum pico detectado</p>}
           {picos.length > 8 && !showAllPicos && (
             <button onClick={() => setShowAllPicos(true)} className="text-[10px] text-[#378ADD] hover:underline">
               Ver todos ({picos.length}) →

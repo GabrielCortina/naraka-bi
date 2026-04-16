@@ -13,27 +13,27 @@ interface Props {
 
 const SEV_STYLES = {
   QUEDA: {
-    ALTA:     'bg-red-500/10 dark:bg-red-500/15 border-red-500/30',
-    MODERADA: 'bg-orange-500/10 dark:bg-orange-500/15 border-orange-500/30',
-    LEVE:     'bg-yellow-500/8 dark:bg-yellow-500/12 border-yellow-500/25',
+    ALTA:     'bg-red-50 border-red-300 dark:bg-red-500/15 dark:border-red-500/30',
+    MODERADA: 'bg-orange-50 border-orange-300 dark:bg-orange-500/15 dark:border-orange-500/30',
+    LEVE:     'bg-yellow-50 border-yellow-200 dark:bg-yellow-500/10 dark:border-yellow-500/25',
   },
   PICO: {
-    ALTA:     'bg-green-500/10 dark:bg-green-500/15 border-green-500/30',
-    MODERADA: 'bg-lime-500/10 dark:bg-lime-500/15 border-lime-500/30',
-    LEVE:     'bg-emerald-500/8 dark:bg-emerald-500/12 border-emerald-500/25',
+    ALTA:     'bg-green-50 border-green-300 dark:bg-green-500/15 dark:border-green-500/30',
+    MODERADA: 'bg-lime-50 border-lime-300 dark:bg-lime-500/15 dark:border-lime-500/30',
+    LEVE:     'bg-emerald-50 border-emerald-200 dark:bg-emerald-500/10 dark:border-emerald-500/25',
   },
 } as const;
 
 const BADGE_STYLES = {
   QUEDA: {
-    ALTA:     'bg-red-900/40 text-red-300 dark:bg-red-900/60 dark:text-red-200',
-    MODERADA: 'bg-orange-900/40 text-orange-300 dark:bg-orange-900/60 dark:text-orange-200',
-    LEVE:     'bg-yellow-900/40 text-yellow-300 dark:bg-yellow-900/60 dark:text-yellow-200',
+    ALTA:     'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300',
+    MODERADA: 'bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300',
+    LEVE:     'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-300',
   },
   PICO: {
-    ALTA:     'bg-green-900/40 text-green-300 dark:bg-green-900/60 dark:text-green-200',
-    MODERADA: 'bg-lime-900/40 text-lime-300 dark:bg-lime-900/60 dark:text-lime-200',
-    LEVE:     'bg-emerald-900/40 text-emerald-300 dark:bg-emerald-900/60 dark:text-emerald-200',
+    ALTA:     'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-300',
+    MODERADA: 'bg-lime-100 text-lime-700 dark:bg-lime-500/20 dark:text-lime-300',
+    LEVE:     'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300',
   },
 } as const;
 
@@ -44,16 +44,18 @@ export function AlertaCard({ alerta, onPin, isPinToggling, onClick }: Props) {
   const isQueda = a.tipo === 'QUEDA';
   const arrow = isQueda ? '↘' : '↗';
   const sign = isQueda ? '' : '+';
-  const varColor = isQueda ? 'text-red-400' : 'text-green-400';
+  const varColor = isQueda
+    ? 'text-red-600 dark:text-red-400'
+    : 'text-green-600 dark:text-green-400';
 
   return (
     <div
-      className={`rounded-lg border p-3 cursor-pointer transition-colors hover:brightness-110 ${cardStyle}`}
+      className={`rounded-lg border p-3 cursor-pointer transition-colors hover:brightness-[1.02] dark:hover:brightness-110 ${cardStyle}`}
       onClick={onClick}
     >
       {/* Header */}
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium font-mono">#{a.sku_pai}</span>
+        <span className="text-xs font-medium font-mono text-gray-800 dark:text-gray-200">#{a.sku_pai}</span>
         <button
           onClick={e => { e.stopPropagation(); onPin(a.sku_pai); }}
           disabled={isPinToggling}
@@ -79,7 +81,7 @@ export function AlertaCard({ alerta, onPin, isPinToggling, onClick }: Props) {
         <span className={`font-medium ${varColor}`}>
           {sign}{formatBRL(a.delta_faturamento)}
         </span>
-        <span className="opacity-60">
+        <span className="text-gray-500 dark:text-gray-400">
           {sign}{a.delta_pecas.toLocaleString('pt-BR')} pç
         </span>
       </div>
