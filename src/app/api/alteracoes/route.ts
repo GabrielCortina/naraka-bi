@@ -50,7 +50,7 @@ interface PostBody {
   data_alteracao?: unknown;
   sku?: unknown;
   tipo_alteracao?: unknown;
-  loja?: unknown;
+  lojas?: unknown;
   valor_antes?: unknown;
   valor_depois?: unknown;
   motivo?: unknown;
@@ -95,11 +95,16 @@ export async function POST(req: NextRequest) {
     ? body.tags.filter((t): t is string => typeof t === 'string' && t.trim().length > 0).map(t => t.trim())
     : null;
 
+  // lojas: array explícito; vazio => aplica-se a todas as lojas (salvo como NULL)
+  const lojasArr = Array.isArray(body.lojas)
+    ? body.lojas.filter((l): l is string => typeof l === 'string' && l.trim().length > 0).map(l => l.trim())
+    : [];
+
   const row = {
     data_alteracao,
     sku,
     tipo_alteracao,
-    loja: asTrimmedString(body.loja),
+    lojas: lojasArr.length > 0 ? lojasArr : null,
     valor_antes: asTrimmedString(body.valor_antes),
     valor_depois: asTrimmedString(body.valor_depois),
     motivo: asTrimmedString(body.motivo),

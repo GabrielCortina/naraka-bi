@@ -20,7 +20,8 @@ export interface Alteracao {
   data_alteracao: string;
   sku: string;
   tipo_alteracao: TipoAlteracao;
-  loja: string | null;
+  // Array de lojas selecionadas. Vazio = aplica-se a TODAS as lojas.
+  lojas: string[];
   valor_antes: string | null;
   valor_depois: string | null;
   motivo: string | null;
@@ -35,7 +36,7 @@ export interface AlteracaoFormData {
   data_alteracao: string;
   sku: string;
   tipo_alteracao: TipoAlteracao;
-  loja: string | null;
+  lojas: string[];
   valor_antes?: string;
   valor_depois?: string;
   motivo?: string;

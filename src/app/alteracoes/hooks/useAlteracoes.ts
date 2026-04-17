@@ -13,7 +13,7 @@ interface RpcRow {
   out_data_alteracao: string;
   out_sku: string;
   out_tipo_alteracao: string;
-  out_loja: string | null;
+  out_lojas: string[] | null;
   out_valor_antes: string | null;
   out_valor_depois: string | null;
   out_motivo: string | null;
@@ -30,7 +30,7 @@ function mapRow(r: RpcRow): Alteracao {
     data_alteracao: r.out_data_alteracao,
     sku: r.out_sku,
     tipo_alteracao: r.out_tipo_alteracao as TipoAlteracao,
-    loja: r.out_loja,
+    lojas: r.out_lojas ?? [],
     valor_antes: r.out_valor_antes,
     valor_depois: r.out_valor_depois,
     motivo: r.out_motivo,

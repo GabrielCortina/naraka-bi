@@ -36,6 +36,29 @@ const IMPACTO_LABEL: Record<string, string> = {
   neutro: 'Impacto: neutro',
 };
 
+function LojasBadge({ lojas }: { lojas: string[] }) {
+  if (lojas.length === 0) {
+    return (
+      <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/5 text-gray-500">
+        Todas as lojas
+      </span>
+    );
+  }
+  if (lojas.length <= 2) {
+    return (
+      <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/10" title={lojas.join(', ')}>
+        {lojas.join(', ')}
+      </span>
+    );
+  }
+  const extras = lojas.length - 1;
+  return (
+    <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/10" title={lojas.join(', ')}>
+      {lojas[0]} +{extras} {extras === 1 ? 'loja' : 'lojas'}
+    </span>
+  );
+}
+
 export function AlteracaoCard({ alteracao, onDelete }: Props) {
   const a = alteracao;
   const icone = iconTipo(a.tipo_alteracao);
@@ -63,21 +86,13 @@ export function AlteracaoCard({ alteracao, onDelete }: Props) {
         SKU {a.sku}
       </div>
 
-      {/* Tipo + Loja */}
+      {/* Tipo + Lojas */}
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         <span className="text-xs font-medium flex items-center gap-1">
           <span>{icone}</span>
           {tipoLabel}
         </span>
-        {a.loja ? (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/10">
-            {a.loja}
-          </span>
-        ) : (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/5 text-gray-500">
-            Todas as lojas
-          </span>
-        )}
+        <LojasBadge lojas={a.lojas} />
       </div>
 
       {/* Antes → Depois */}

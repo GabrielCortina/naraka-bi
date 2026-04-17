@@ -38,8 +38,7 @@ export function AlteracaoModal({ open, onClose, onSave, lojas }: Props) {
   const [dataAlteracao, setDataAlteracao] = useState(hoje());
   const [sku, setSku] = useState('');
   const [tipo, setTipo] = useState<TipoAlteracao>('preco');
-  const [loja, setLoja] = useState<string>('');
-  const [todasLojas, setTodasLojas] = useState(false);
+  const [lojasSelecionadas, setLojasSelecionadas] = useState<string[]>([]);
   const [valorAntes, setValorAntes] = useState('');
   const [valorDepois, setValorDepois] = useState('');
   const [motivo, setMotivo] = useState('');
@@ -56,13 +55,14 @@ export function AlteracaoModal({ open, onClose, onSave, lojas }: Props) {
     [tagsInput],
   );
 
+  const todasMarcadas = lojas.length > 0 && lojasSelecionadas.length === lojas.length;
+
   useEffect(() => {
     if (open) {
       setDataAlteracao(hoje());
       setSku('');
       setTipo('preco');
-      setLoja('');
-      setTodasLojas(false);
+      setLojasSelecionadas([]);
       setValorAntes('');
       setValorDepois('');
       setMotivo('');
@@ -77,20 +77,41 @@ export function AlteracaoModal({ open, onClose, onSave, lojas }: Props) {
 
   if (!open) return null;
 
+  const toggleTodas = () => {
+    if (todasMarcadas) {
+      setLojasSelecionadas([]);
+    } else {
+      setLojasSelecionadas(lojas.map(l => l.nome_exibicao));
+    }
+  };
+
+  const toggleLoja = (nome: string) => {
+    setLojasSelecionadas(prev =>
+      prev.includes(nome) ? prev.filter(l => l !== nome) : [...prev, nome],
+    );
+  };
+
   const handleSave = async () => {
     setError(null);
 
     if (!dataAlteracao) { setError('Data é obrigatória'); return; }
     if (!sku.trim())    { setError('SKU é obrigatório'); return; }
     if (!tipo)          { setError('Tipo é obrigatório'); return; }
+    if (lojasSelecionadas.length === 0) {
+      setError('Selecione pelo menos uma loja (ou "Todas as lojas")');
+      return;
+    }
 
     setSaving(true);
+
+    // Convenção: todas marcadas => salva como [] (aplica-se a todas as lojas)
+    const lojasPayload = todasMarcadas ? [] : lojasSelecionadas;
 
     const payload: AlteracaoFormData = {
       data_alteracao: dataAlteracao,
       sku: sku.trim(),
       tipo_alteracao: tipo,
-      loja: todasLojas ? null : (loja || null),
+      lojas: lojasPayload,
       valor_antes: valorAntes.trim() || undefined,
       valor_depois: valorDepois.trim() || undefined,
       motivo: motivo || undefined,
@@ -167,29 +188,39 @@ export function AlteracaoModal({ open, onClose, onSave, lojas }: Props) {
             </select>
           </div>
 
-          {/* Loja */}
+          {/* Lojas (múltiplas) */}
           <div>
-            <label className="block text-xs font-medium mb-1">Loja</label>
-            <div className="flex items-center gap-2">
-              <select
-                value={loja}
-                onChange={e => setLoja(e.target.value)}
-                disabled={todasLojas}
-                className="flex-1 px-3 py-2 text-sm rounded-md border border-current/10 bg-transparent disabled:opacity-50"
-              >
-                <option value="">Selecione...</option>
-                {lojas.map(l => (
-                  <option key={l.nome_exibicao} value={l.nome_exibicao}>{l.nome_exibicao}</option>
-                ))}
-              </select>
-              <label className="flex items-center gap-1.5 text-xs whitespace-nowrap">
+            <label className="block text-xs font-medium mb-1">
+              Lojas <span className="text-red-500">*</span>
+              <span className="ml-1 text-gray-500 font-normal">
+                ({lojasSelecionadas.length}/{lojas.length})
+              </span>
+            </label>
+            <div className="rounded-md border border-current/10 max-h-52 overflow-y-auto">
+              <label className="flex items-center gap-2 px-3 py-2 text-xs font-medium cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 border-b border-current/10">
                 <input
                   type="checkbox"
-                  checked={todasLojas}
-                  onChange={e => { setTodasLojas(e.target.checked); if (e.target.checked) setLoja(''); }}
+                  checked={todasMarcadas}
+                  onChange={toggleTodas}
                 />
                 Todas as lojas
               </label>
+              {lojas.map(l => (
+                <label
+                  key={l.nome_exibicao}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                  <input
+                    type="checkbox"
+                    checked={lojasSelecionadas.includes(l.nome_exibicao)}
+                    onChange={() => toggleLoja(l.nome_exibicao)}
+                  />
+                  {l.nome_exibicao}
+                </label>
+              ))}
+              {lojas.length === 0 && (
+                <div className="px-3 py-2 text-xs text-gray-500">Nenhuma loja cadastrada</div>
+              )}
             </div>
           </div>
 

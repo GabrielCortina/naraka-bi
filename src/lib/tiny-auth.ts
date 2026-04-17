@@ -102,7 +102,9 @@ export async function getValidAccessToken(): Promise<string> {
   return newTokens.access_token;
 }
 
-// Verifica se temos uma conexão ativa com a Tiny
+// Verifica se temos uma conexão ativa com a Tiny.
+// Testa de verdade: se getValidAccessToken() renovar ou já tiver um token
+// válido, está conectado. Se o refresh falhar, desconectado.
 export async function isTinyConnected(): Promise<{
   connected: boolean;
   expiresAt: string | null;
@@ -111,14 +113,10 @@ export async function isTinyConnected(): Promise<{
     const stored = await getStoredToken();
     if (!stored) return { connected: false, expiresAt: null };
 
-    const refreshExpiry = new Date(stored.updated_at).getTime() + 24 * 60 * 60 * 1000;
+    await getValidAccessToken();
 
-    // Se o refresh token já expirou (mais de 1 dia), não está conectado
-    if (Date.now() > refreshExpiry) {
-      return { connected: false, expiresAt: null };
-    }
-
-    return { connected: true, expiresAt: stored.expires_at };
+    const fresh = await getStoredToken();
+    return { connected: true, expiresAt: fresh?.expires_at ?? stored.expires_at };
   } catch {
     return { connected: false, expiresAt: null };
   }
