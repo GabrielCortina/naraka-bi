@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { Alerta } from '../lib/types';
 
-export type PeriodoPreset = '30d' | '7d' | 'mes' | 'custom';
+export type PeriodoPreset = 'hoje' | 'ontem' | '7d' | '15d' | '30d' | 'mes' | 'custom';
 export type Marketplace = 'Mercado Livre' | 'Shopee' | 'TikTok' | 'Shein';
 
 export interface LojaConfigEntry {
@@ -82,7 +82,16 @@ function calcularDatas(
   const d = now.getDate();
 
   switch (periodo) {
+    case 'hoje': {
+      const hoje = fmtDate(now);
+      return { inicio: hoje, fim: hoje };
+    }
+    case 'ontem': {
+      const ontem = fmtDate(new Date(y, m, d - 1));
+      return { inicio: ontem, fim: ontem };
+    }
     case '7d':  return { inicio: fmtDate(new Date(y, m, d - 6)),  fim: fmtDate(now) };
+    case '15d': return { inicio: fmtDate(new Date(y, m, d - 14)), fim: fmtDate(now) };
     case 'mes': return { inicio: fmtDate(new Date(y, m, 1)),      fim: fmtDate(now) };
     case 'custom':
       return {
