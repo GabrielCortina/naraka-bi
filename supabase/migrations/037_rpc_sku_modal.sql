@@ -34,7 +34,7 @@ BEGIN
     s.data_pedido                       AS out_data,
     COALESCE(SUM(s.quantidade), 0)      AS out_quantidade,
     COALESCE(SUM(s.faturamento), 0)     AS out_faturamento,
-    COALESCE(SUM(s.pedidos_count), 0)   AS out_pedidos
+    COALESCE(SUM(s.pedidos_count), 0)::BIGINT AS out_pedidos
   FROM dashboard_sku_daily_stats s
   WHERE s.sku_pai = p_sku_pai
     AND s.data_pedido BETWEEN p_data_inicio AND p_data_fim

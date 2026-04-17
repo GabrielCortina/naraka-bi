@@ -19,11 +19,11 @@ interface Props {
   lojaToMarketplace: Record<string, Marketplace | 'Outro'>;
 }
 
-const PRESETS: { key: PeriodoPreset; lineA: string; lineB: string }[] = [
-  { key: '30d',    lineA: '30',     lineB: 'dias' },
-  { key: '7d',     lineA: '7',      lineB: 'dias' },
-  { key: 'mes',    lineA: 'Mês',    lineB: 'atual' },
-  { key: 'custom', lineA: 'Custom', lineB: 'período' },
+const PRESETS: { key: PeriodoPreset; label: string }[] = [
+  { key: '30d',    label: '30 dias' },
+  { key: '7d',     label: '7 dias' },
+  { key: 'mes',    label: 'Mês atual' },
+  { key: 'custom', label: 'Custom' },
 ];
 
 const MKP_OPTIONS: Marketplace[] = ['Mercado Livre', 'Shopee', 'TikTok', 'Shein'];
@@ -178,14 +178,13 @@ export function SkuModalFilters({
             <button
               key={p.key}
               onClick={() => onPeriodoChange(p.key)}
-              className={`flex flex-col items-center justify-center px-2.5 py-1 text-[11px] leading-tight rounded-md min-w-[46px] transition-colors ${
+              className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
                 active
                   ? 'bg-[#378ADD] text-white'
                   : 'border border-current/10 hover:border-current/30'
               }`}
             >
-              <span className="font-medium">{p.lineA}</span>
-              <span className="text-[9px] opacity-80">{p.lineB}</span>
+              {p.label}
             </button>
           );
         })}
