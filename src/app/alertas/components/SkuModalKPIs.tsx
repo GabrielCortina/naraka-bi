@@ -45,8 +45,8 @@ function Skeleton() {
 export function SkuModalKPIs({ kpis, tendencia, loading }: Props) {
   if (loading || !kpis) return <Skeleton />;
 
-  const vVendas = variacao(kpis.vendasMes, kpis.vendasMesAnterior);
-  const vFat    = variacao(kpis.faturamentoMes, kpis.faturamentoMesAnterior);
+  const vVendas = variacao(kpis.vendas, kpis.vendasAnterior);
+  const vFat    = variacao(kpis.faturamento, kpis.faturamentoAnterior);
 
   const tendLabel = (() => {
     if (!tendencia || tendencia.direcao === null || tendencia.dias === 0) {
@@ -66,21 +66,21 @@ export function SkuModalKPIs({ kpis, tendencia, loading }: Props) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
       <KpiCard
-        label="Vendas no mês"
-        value={kpis.vendasMes.toLocaleString('pt-BR')}
+        label="Vendas"
+        value={kpis.vendas.toLocaleString('pt-BR')}
         hint={vVendas.label}
         hintColor={vVendas.color}
       />
       <KpiCard
         label="Faturamento"
-        value={formatBRL(kpis.faturamentoMes)}
+        value={formatBRL(kpis.faturamento)}
         hint={vFat.label}
         hintColor={vFat.color}
       />
       <KpiCard
         label="Ticket médio"
         value={formatBRL(kpis.ticketMedio)}
-        hint="no mês"
+        hint="no período"
       />
       <KpiCard
         label="Tendência"

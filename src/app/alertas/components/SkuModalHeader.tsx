@@ -1,10 +1,12 @@
 'use client';
 
 import type { Alerta } from '../lib/types';
+import type { HeaderDeltas } from '../hooks/useSkuModal';
 import { formatBRL } from '@/app/dashboard/lib/date-utils';
 
 interface Props {
   alerta: Alerta;
+  deltas: HeaderDeltas | null;  // do filtro interno do modal; null enquanto carrega
   onClose: () => void;
 }
 
@@ -28,11 +30,20 @@ function CloseIcon() {
   );
 }
 
-export function SkuModalHeader({ alerta, onClose }: Props) {
-  const isQueda = alerta.tipo === 'QUEDA';
-  const varColor = isQueda ? 'text-red-500 dark:text-red-400' : 'text-green-600 dark:text-green-400';
-  const arrow = isQueda ? '↘' : '↗';
-  const sign = isQueda ? '' : '+';
+export function SkuModalHeader({ alerta, deltas, onClose }: Props) {
+  // Enquanto KPIs não chegam, mostra placeholder "—" em vez de mentir com valores do filtro da página
+  const variacaoPct = deltas?.variacaoPct ?? null;
+  const deltaFat = deltas?.deltaFaturamento ?? 0;
+  const deltaPecas = deltas?.deltaPecas ?? 0;
+
+  const isNegativo = (variacaoPct ?? 0) < 0;
+  const varColor = variacaoPct === null
+    ? 'text-gray-400'
+    : isNegativo
+      ? 'text-red-500 dark:text-red-400'
+      : 'text-green-600 dark:text-green-400';
+  const arrow = variacaoPct === null ? '' : isNegativo ? '↘ ' : '↗ ';
+  const sign = (n: number) => n > 0 ? '+' : '';
 
   return (
     <div className="flex items-start justify-between p-5 border-b border-current/10">
@@ -48,13 +59,13 @@ export function SkuModalHeader({ alerta, onClose }: Props) {
         </div>
         <div className="flex items-end gap-4 flex-wrap">
           <span className={`text-3xl font-medium ${varColor}`}>
-            {arrow} {sign}{alerta.variacao_pct}%
+            {arrow}{variacaoPct === null ? '—' : `${sign(variacaoPct)}${variacaoPct.toFixed(1)}%`}
           </span>
           <span className={`text-sm ${varColor}`}>
-            {sign}{formatBRL(alerta.delta_faturamento)}
+            {sign(deltaFat)}{formatBRL(deltaFat)}
           </span>
           <span className="text-xs text-gray-500 dark:text-gray-400">
-            {sign}{alerta.delta_pecas.toLocaleString('pt-BR')} peças
+            {sign(deltaPecas)}{deltaPecas.toLocaleString('pt-BR')} peças
           </span>
         </div>
       </div>

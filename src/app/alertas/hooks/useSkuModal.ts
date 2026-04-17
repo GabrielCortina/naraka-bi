@@ -35,11 +35,17 @@ export interface MarketplaceSlice {
 }
 
 export interface Kpis {
-  vendasMes: number;
-  vendasMesAnterior: number;
-  faturamentoMes: number;
-  faturamentoMesAnterior: number;
+  vendas: number;
+  vendasAnterior: number;
+  faturamento: number;
+  faturamentoAnterior: number;
   ticketMedio: number;
+}
+
+export interface HeaderDeltas {
+  deltaPecas: number;
+  deltaFaturamento: number;
+  variacaoPct: number | null;
 }
 
 export interface Tendencia {
@@ -114,10 +120,10 @@ interface RpcLoja {
   out_variacao_percent: number | string | null;
 }
 interface RpcKpis {
-  out_vendas_mes: number | string;
-  out_vendas_mes_anterior: number | string;
-  out_faturamento_mes: number | string;
-  out_faturamento_mes_anterior: number | string;
+  out_vendas: number | string;
+  out_vendas_anterior: number | string;
+  out_faturamento: number | string;
+  out_faturamento_anterior: number | string;
   out_ticket_medio: number | string;
 }
 interface RpcTendencia {
@@ -347,9 +353,11 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
       setLoadingLoja(false);
     });
 
-    // KPIs
+    // KPIs — usa o período do filtro (não mais hardcode de mês)
     callRpc('rpc_sku_modal_kpis', {
       p_sku_pai: skuPai,
+      p_data_inicio: datas.inicio,
+      p_data_fim: datas.fim,
       p_lojas: lojasEfetivasEcomm,
     }).then(res => {
       if (currentId !== fetchIdRef.current) return;
@@ -357,17 +365,18 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
       const rows = (res.data ?? []) as RpcKpis[];
       const r = rows[0];
       setKpis(r ? {
-        vendasMes: Number(r.out_vendas_mes) || 0,
-        vendasMesAnterior: Number(r.out_vendas_mes_anterior) || 0,
-        faturamentoMes: Number(r.out_faturamento_mes) || 0,
-        faturamentoMesAnterior: Number(r.out_faturamento_mes_anterior) || 0,
+        vendas: Number(r.out_vendas) || 0,
+        vendasAnterior: Number(r.out_vendas_anterior) || 0,
+        faturamento: Number(r.out_faturamento) || 0,
+        faturamentoAnterior: Number(r.out_faturamento_anterior) || 0,
         ticketMedio: Number(r.out_ticket_medio) || 0,
-      } : { vendasMes: 0, vendasMesAnterior: 0, faturamentoMes: 0, faturamentoMesAnterior: 0, ticketMedio: 0 });
+      } : { vendas: 0, vendasAnterior: 0, faturamento: 0, faturamentoAnterior: 0, ticketMedio: 0 });
       setLoadingKpis(false);
     });
 
-    // Tendência (filtra client-side pelo sku)
-    callRpc('rpc_alertas_tendencia', { p_lojas: lojasEfetivasEcomm }).then(res => {
+    // Tendência é SKU-level (detectada pela IA de manhã), não deve depender
+    // do filtro de lojas — sempre chama com p_lojas NULL para pegar o streak global.
+    callRpc('rpc_alertas_tendencia', { p_lojas: null }).then(res => {
       if (currentId !== fetchIdRef.current) return;
       const rows = (res.data ?? []) as RpcTendencia[];
       const hit = rows.find(r => r.out_sku_pai === skuPai);
@@ -487,6 +496,17 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
 
   const loading = loadingSerie || loadingLoja || loadingKpis || loadingAlteracoes;
 
+  // Deltas do header derivados dos KPIs — reagem ao filtro do modal
+  const headerDeltas = useMemo<HeaderDeltas | null>(() => {
+    if (!kpis) return null;
+    const deltaPecas = kpis.vendas - kpis.vendasAnterior;
+    const deltaFaturamento = kpis.faturamento - kpis.faturamentoAnterior;
+    const variacaoPct = kpis.faturamentoAnterior > 0
+      ? Math.round(((kpis.faturamento - kpis.faturamentoAnterior) / kpis.faturamentoAnterior) * 1000) / 10
+      : null;
+    return { deltaPecas, deltaFaturamento, variacaoPct };
+  }, [kpis]);
+
   return {
     alerta, isOpen,
     periodo, setPeriodo,
@@ -501,6 +521,7 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
     porLoja,
     porMarketplace,
     kpis,
+    headerDeltas,
     tendencia,
     alteracoes,
     errors,

@@ -45,7 +45,7 @@ export function SkuModal({ state, lojaConfig }: Props) {
     metricaChart, setMetricaChart,
     datas,
     lojasDisponiveis,
-    serie, porLoja, porMarketplace, kpis, tendencia, alteracoes,
+    serie, porLoja, porMarketplace, kpis, headerDeltas, tendencia, alteracoes,
     errors,
     loadingSerie, loadingLoja, loadingKpis, loadingAlteracoes,
     closeModal,
@@ -98,7 +98,7 @@ export function SkuModal({ state, lojaConfig }: Props) {
         <div id="sku-modal-title" className="sr-only">Detalhes do SKU {alerta.sku_pai}</div>
 
         <div className="shrink-0">
-          <SkuModalHeader alerta={alerta} onClose={closeModal} />
+          <SkuModalHeader alerta={alerta} deltas={headerDeltas} onClose={closeModal} />
         </div>
 
         <div className="p-5 overflow-y-auto flex-1">

@@ -109,33 +109,32 @@ $$;
 
 GRANT EXECUTE ON FUNCTION rpc_sku_modal_por_loja(TEXT, DATE, DATE, TEXT[]) TO anon, authenticated;
 
--- 3. KPIs: mês atual (até hoje) vs mês anterior (mesma janela)
+-- 3. KPIs: período selecionado vs período anterior de mesmo tamanho.
+-- Substitui a versão antiga que era hardcoded "mês atual vs mês anterior".
 DROP FUNCTION IF EXISTS rpc_sku_modal_kpis(TEXT, TEXT[]);
+DROP FUNCTION IF EXISTS rpc_sku_modal_kpis(TEXT, DATE, DATE, TEXT[]);
 
 CREATE OR REPLACE FUNCTION rpc_sku_modal_kpis(
-  p_sku_pai TEXT,
-  p_lojas   TEXT[] DEFAULT NULL
+  p_sku_pai     TEXT,
+  p_data_inicio DATE,
+  p_data_fim    DATE,
+  p_lojas       TEXT[] DEFAULT NULL
 )
 RETURNS TABLE (
-  out_vendas_mes              NUMERIC,
-  out_vendas_mes_anterior     NUMERIC,
-  out_faturamento_mes         NUMERIC,
-  out_faturamento_mes_anterior NUMERIC,
-  out_ticket_medio            NUMERIC
+  out_vendas              NUMERIC,
+  out_vendas_anterior     NUMERIC,
+  out_faturamento         NUMERIC,
+  out_faturamento_anterior NUMERIC,
+  out_ticket_medio        NUMERIC
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
 STABLE
 AS $$
 DECLARE
-  v_ini_mes      DATE;
-  v_ini_mes_ant  DATE;
-  v_fim_mes_ant  DATE;
+  v_dias INT;
 BEGIN
-  v_ini_mes     := DATE_TRUNC('month', CURRENT_DATE)::DATE;
-  v_ini_mes_ant := (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::DATE;
-  -- Compara mesma janela (dia 1 até o mesmo dia do mês passado)
-  v_fim_mes_ant := v_ini_mes_ant + (CURRENT_DATE - v_ini_mes);
+  v_dias := (p_data_fim - p_data_inicio) + 1;
 
   RETURN QUERY
   WITH atual AS (
@@ -144,7 +143,7 @@ BEGIN
       COALESCE(SUM(s.faturamento), 0) AS faturamento
     FROM dashboard_sku_daily_stats s
     WHERE s.sku_pai = p_sku_pai
-      AND s.data_pedido BETWEEN v_ini_mes AND CURRENT_DATE
+      AND s.data_pedido BETWEEN p_data_inicio AND p_data_fim
       AND (p_lojas IS NULL OR s.ecommerce_nome = ANY(p_lojas))
   ),
   anterior AS (
@@ -153,7 +152,7 @@ BEGIN
       COALESCE(SUM(s.faturamento), 0) AS faturamento
     FROM dashboard_sku_daily_stats s
     WHERE s.sku_pai = p_sku_pai
-      AND s.data_pedido BETWEEN v_ini_mes_ant AND v_fim_mes_ant
+      AND s.data_pedido BETWEEN (p_data_inicio - v_dias) AND (p_data_inicio - 1)
       AND (p_lojas IS NULL OR s.ecommerce_nome = ANY(p_lojas))
   )
   SELECT
@@ -169,7 +168,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION rpc_sku_modal_kpis(TEXT, TEXT[]) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION rpc_sku_modal_kpis(TEXT, DATE, DATE, TEXT[]) TO anon, authenticated;
 
 -- 4. Impacto da alteração: média de vendas 3 dias antes vs 3 dias depois
 -- p_lojas é aceito (mas ignorado) porque a rota /api/dashboard/rpc
