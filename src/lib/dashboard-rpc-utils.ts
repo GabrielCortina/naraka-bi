@@ -32,6 +32,10 @@ export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_alertas_tendencia',
   'rpc_alteracoes_listar',
   'rpc_alteracoes_por_sku',
+  'rpc_sku_modal_serie_temporal',
+  'rpc_sku_modal_por_loja',
+  'rpc_sku_modal_kpis',
+  'rpc_sku_modal_impacto_alteracao',
 ]);
 
 interface LojaConfigRow {

@@ -12,6 +12,7 @@ interface Props {
   loading: boolean;
   onPin: (sku: string) => void;
   isPinToggling: (sku: string) => boolean;
+  onCardClick?: (alerta: Alerta) => void;
   iaColumn: React.ReactNode;
 }
 
@@ -23,7 +24,7 @@ function SkeletonCards() {
   );
 }
 
-export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggling, iaColumn }: Props) {
+export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggling, onCardClick, iaColumn }: Props) {
   const [mobileTab, setMobileTab] = useState<'quedas' | 'picos' | 'ia'>('quedas');
   const [showAllQuedas, setShowAllQuedas] = useState(false);
   const [showAllPicos, setShowAllPicos] = useState(false);
@@ -41,7 +42,7 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
           {quedasVisiveis.map(a => (
-            <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} />
+            <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} onClick={onCardClick ? () => onCardClick(a) : undefined} />
           ))}
           {quedas.length === 0 && <p className="text-xs text-gray-400 dark:text-gray-500 text-center py-4">Nenhuma queda detectada</p>}
           {quedas.length > 8 && !showAllQuedas && (
@@ -69,7 +70,7 @@ export function AlertasGrid({ quedas, picos, resumo, loading, onPin, isPinToggli
       {loading ? <SkeletonCards /> : (
         <div className="space-y-3">
           {picosVisiveis.map(a => (
-            <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} />
+            <AlertaCard key={a.sku_pai} alerta={a} onPin={onPin} isPinToggling={isPinToggling(a.sku_pai)} onClick={onCardClick ? () => onCardClick(a) : undefined} />
           ))}
           {picos.length === 0 && <p className="text-xs text-gray-400 dark:text-gray-500 text-center py-4">Nenhum pico detectado</p>}
           {picos.length > 8 && !showAllPicos && (

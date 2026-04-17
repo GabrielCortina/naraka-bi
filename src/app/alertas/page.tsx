@@ -6,10 +6,12 @@ import type { PresetPeriodo } from './lib/types';
 import { useAlertas } from './hooks/useAlertas';
 import { usePinados } from './hooks/usePinados';
 import { useAlertasIA } from './hooks/useAlertasIA';
+import { useSkuModal } from './hooks/useSkuModal';
 import { AlertasHeader } from './components/AlertasHeader';
 import { AlertasPinados } from './components/AlertasPinados';
 import { AlertasGrid } from './components/AlertasGrid';
 import { AlertasIA } from './components/AlertasIA';
+import { SkuModal } from './components/SkuModal';
 
 interface LojaOption {
   nome_exibicao: string;
@@ -24,6 +26,7 @@ export default function AlertasPage() {
   const { quedas, picos, resumo, pinados, periodos, horaCorte, loading, lastUpdated, refetch, alertas } = useAlertas(preset, loja, ordenarPor);
   const { togglePin, isToggling } = usePinados(refetch);
   const ia = useAlertasIA();
+  const skuModal = useSkuModal();
 
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
@@ -80,6 +83,7 @@ export default function AlertasPage() {
         loading={loading}
         onPin={togglePin}
         isPinToggling={isToggling}
+        onCardClick={skuModal.openModal}
         iaColumn={
           <AlertasIA
             texto={ia.texto}
@@ -89,6 +93,11 @@ export default function AlertasPage() {
             onGerar={handleGerarIA}
           />
         }
+      />
+
+      <SkuModal
+        state={skuModal}
+        lojasDisponiveis={lojas.map(l => l.nome_exibicao)}
       />
     </div>
   );
