@@ -44,13 +44,17 @@ $$;
 
 GRANT EXECUTE ON FUNCTION rpc_sku_modal_serie_temporal(TEXT, DATE, DATE, TEXT[]) TO anon, authenticated;
 
--- 2. Breakdown por loja com variação vs período anterior do mesmo tamanho
+-- 2. Breakdown por loja com variação vs período anterior do mesmo tamanho.
+-- p_lojas é aceito (mas ignorado, sempre queremos ver todas para comparar)
+-- porque a rota /api/dashboard/rpc sempre injeta esse parâmetro.
+DROP FUNCTION IF EXISTS rpc_sku_modal_por_loja(TEXT, DATE, DATE, TEXT[]);
 DROP FUNCTION IF EXISTS rpc_sku_modal_por_loja(TEXT, DATE, DATE);
 
 CREATE OR REPLACE FUNCTION rpc_sku_modal_por_loja(
   p_sku_pai     TEXT,
   p_data_inicio DATE,
-  p_data_fim    DATE
+  p_data_fim    DATE,
+  p_lojas       TEXT[] DEFAULT NULL
 )
 RETURNS TABLE (
   out_loja             TEXT,
@@ -101,7 +105,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION rpc_sku_modal_por_loja(TEXT, DATE, DATE) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION rpc_sku_modal_por_loja(TEXT, DATE, DATE, TEXT[]) TO anon, authenticated;
 
 -- 3. KPIs: mês atual (até hoje) vs mês anterior (mesma janela)
 DROP FUNCTION IF EXISTS rpc_sku_modal_kpis(TEXT, TEXT[]);

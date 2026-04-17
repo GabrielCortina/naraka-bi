@@ -125,12 +125,22 @@ interface RpcAlteracaoSku {
   out_observacao: string | null;
 }
 
-function callRpc(rpc: string, params: Record<string, unknown>) {
-  return fetch('/api/dashboard/rpc', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rpc, params }),
-  }).then(r => r.json()).catch(() => null);
+async function callRpc(rpc: string, params: Record<string, unknown>) {
+  try {
+    const res = await fetch('/api/dashboard/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rpc, params }),
+    });
+    const json = await res.json();
+    if (!res.ok || json?.error) {
+      console.error(`[useSkuModal] ${rpc} falhou:`, json?.error ?? res.statusText, params);
+    }
+    return json;
+  } catch (err) {
+    console.error(`[useSkuModal] ${rpc} exceção:`, err);
+    return null;
+  }
 }
 
 async function fetchAlteracoes(sku: string, dias: number): Promise<RpcAlteracaoSku[]> {

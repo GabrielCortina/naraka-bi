@@ -53,18 +53,20 @@ export function SkuModal({ state, lojasDisponiveis }: Props) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="sku-modal-title"
-      className="fixed inset-0 z-50 flex items-start md:items-center justify-center bg-black/60 backdrop-blur-sm overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-stretch md:items-center justify-center p-0 md:p-4 bg-black/60 backdrop-blur-sm"
       onClick={closeModal}
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="w-full md:max-w-5xl md:my-6 rounded-none md:rounded-xl shadow-xl dark:bg-[#0f1117] bg-white border border-current/10"
+        className="w-full md:max-w-5xl max-h-full md:max-h-[90vh] flex flex-col rounded-none md:rounded-xl shadow-xl dark:bg-[#0f1117] bg-white border border-current/10 overflow-hidden"
       >
         <div id="sku-modal-title" className="sr-only">Detalhes do SKU {alerta.sku_pai}</div>
 
-        <SkuModalHeader alerta={alerta} onClose={closeModal} />
+        <div className="shrink-0">
+          <SkuModalHeader alerta={alerta} onClose={closeModal} />
+        </div>
 
-        <div className="p-5">
+        <div className="p-5 overflow-y-auto flex-1">
           <SkuModalFilters
             periodo={periodo}
             onPeriodoChange={setPeriodo}
