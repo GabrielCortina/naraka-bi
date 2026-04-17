@@ -19,6 +19,13 @@ export function createServiceClient(): SupabaseClient {
 
   _serviceClient = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      // Força no-store em todas as chamadas REST do Supabase a partir do
+      // servidor. O Next.js 14 wrappa global fetch e aplica cache por padrão
+      // em várias rotas — o que causou leituras obsoletas de tiny_tokens no
+      // endpoint /api/status. Sem cache, cada request lê fresh do banco.
+      fetch: (input, init) => fetch(input, { ...init, cache: 'no-store' }),
+    },
   });
 
   return _serviceClient;

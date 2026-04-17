@@ -3,6 +3,8 @@ import { isTinyConnected } from '@/lib/tiny-auth';
 import { createServiceClient } from '@/lib/supabase-server';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
 
 // GET /api/status
 // Retorna status da conexão Tiny e dados do polling
