@@ -108,16 +108,20 @@ export async function getValidAccessToken(): Promise<string> {
 export async function isTinyConnected(): Promise<{
   connected: boolean;
   expiresAt: string | null;
+  reason?: string;
 }> {
+  let stored: TinyTokenRow | null = null;
   try {
-    const stored = await getStoredToken();
-    if (!stored) return { connected: false, expiresAt: null };
+    stored = await getStoredToken();
+    if (!stored) return { connected: false, expiresAt: null, reason: 'sem token armazenado' };
 
     await getValidAccessToken();
 
     const fresh = await getStoredToken();
     return { connected: true, expiresAt: fresh?.expires_at ?? stored.expires_at };
-  } catch {
-    return { connected: false, expiresAt: null };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'unknown';
+    console.error('[tiny-auth] isTinyConnected falhou:', reason);
+    return { connected: false, expiresAt: stored?.expires_at ?? null, reason };
   }
 }
