@@ -8,7 +8,9 @@
 -- ============================================================
 
 -- 1. Série temporal: soma de qtd/faturamento/pedidos por dia
+-- DROP com todas as assinaturas possíveis (dev tinha variações).
 DROP FUNCTION IF EXISTS rpc_sku_modal_serie_temporal(TEXT, DATE, DATE, TEXT[]);
+DROP FUNCTION IF EXISTS rpc_sku_modal_serie_temporal(TEXT, DATE, DATE);
 
 CREATE OR REPLACE FUNCTION rpc_sku_modal_serie_temporal(
   p_sku_pai     TEXT,
@@ -208,3 +210,51 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION rpc_sku_modal_impacto_alteracao(TEXT, DATE, TEXT[]) TO anon, authenticated;
+
+-- ============================================================
+-- 5. Hotfix: rpc_alteracoes_por_sku (migration 036) não aceitava
+-- p_lojas. A rota /api/dashboard/rpc injeta esse parâmetro
+-- automaticamente, então sem isso a chamada quebrava.
+-- Aceito mas ignorado — alterações são sempre retornadas.
+-- ============================================================
+DROP FUNCTION IF EXISTS rpc_alteracoes_por_sku(TEXT, INT, TEXT[]);
+DROP FUNCTION IF EXISTS rpc_alteracoes_por_sku(TEXT, INT);
+
+CREATE OR REPLACE FUNCTION rpc_alteracoes_por_sku(
+  p_sku        TEXT,
+  p_dias_atras INT    DEFAULT 30,
+  p_lojas      TEXT[] DEFAULT NULL
+)
+RETURNS TABLE (
+  out_id             UUID,
+  out_data_alteracao DATE,
+  out_tipo_alteracao TEXT,
+  out_lojas          TEXT[],
+  out_valor_antes    TEXT,
+  out_valor_depois   TEXT,
+  out_motivo         TEXT,
+  out_observacao     TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    a.id,
+    a.data_alteracao,
+    a.tipo_alteracao,
+    a.lojas,
+    a.valor_antes,
+    a.valor_depois,
+    a.motivo,
+    a.observacao
+  FROM alteracoes_anuncio a
+  WHERE a.excluido_em IS NULL
+    AND (a.sku = p_sku OR a.sku = split_part(p_sku, '-', 1))
+    AND a.data_alteracao >= CURRENT_DATE - p_dias_atras
+  ORDER BY a.data_alteracao DESC;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION rpc_alteracoes_por_sku(TEXT, INT, TEXT[]) TO anon, authenticated;

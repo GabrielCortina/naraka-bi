@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect } from 'react';
-import type { useSkuModal as useSkuModalType } from '../hooks/useSkuModal';
+import { useEffect, useMemo } from 'react';
+import type { useSkuModal as useSkuModalType, Marketplace, LojaConfigEntry } from '../hooks/useSkuModal';
+import { normalizeMarketplace } from '../hooks/useSkuModal';
 import { SkuModalHeader } from './SkuModalHeader';
 import { SkuModalFilters } from './SkuModalFilters';
 import { SkuModalKPIs } from './SkuModalKPIs';
@@ -14,10 +15,26 @@ type ModalState = ReturnType<typeof useSkuModalType>;
 
 interface Props {
   state: ModalState;
-  lojasDisponiveis: string[];
+  lojaConfig: LojaConfigEntry[];
 }
 
-export function SkuModal({ state, lojasDisponiveis }: Props) {
+function ErrorBanner({ errors }: { errors: ModalState['errors'] }) {
+  const hasError = Object.values(errors).some(Boolean);
+  if (!hasError) return null;
+  return (
+    <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-600 dark:text-red-300">
+      <div className="font-medium mb-1">Algumas seções falharam ao carregar:</div>
+      <ul className="list-disc pl-4 space-y-0.5">
+        {errors.serie && <li><b>Série temporal:</b> {errors.serie}</li>}
+        {errors.loja && <li><b>Por loja:</b> {errors.loja}</li>}
+        {errors.kpis && <li><b>KPIs:</b> {errors.kpis}</li>}
+        {errors.alteracoes && <li><b>Alterações:</b> {errors.alteracoes}</li>}
+      </ul>
+    </div>
+  );
+}
+
+export function SkuModal({ state, lojaConfig }: Props) {
   const {
     alerta, isOpen,
     periodo, setPeriodo,
@@ -26,10 +43,26 @@ export function SkuModal({ state, lojasDisponiveis }: Props) {
     lojasSelecionadas, setLojasSelecionadas,
     marketplace, setMarketplace,
     metricaChart, setMetricaChart,
+    datas,
+    lojasDisponiveis,
     serie, porLoja, porMarketplace, kpis, tendencia, alteracoes,
+    errors,
     loadingSerie, loadingLoja, loadingKpis, loadingAlteracoes,
     closeModal,
   } = state;
+
+  // Mapa nome_loja → marketplace para o dropdown do filtro
+  const lojaToMarketplace = useMemo<Record<string, Marketplace | 'Outro'>>(() => {
+    const m: Record<string, Marketplace | 'Outro'> = {};
+    for (const c of lojaConfig) {
+      const key = c.nome_loja || c.nome_exibicao;
+      // Não sobrescreve se já houver um mapeamento específico
+      if (!m[key] || m[key] === 'Outro') {
+        m[key] = normalizeMarketplace(c.marketplace);
+      }
+    }
+    return m;
+  }, [lojaConfig]);
 
   // ESC para fechar + bloquear scroll do body
   useEffect(() => {
@@ -47,6 +80,8 @@ export function SkuModal({ state, lojasDisponiveis }: Props) {
   }, [isOpen, closeModal]);
 
   if (!isOpen || !alerta) return null;
+
+  const periodoLabel = `${datas.inicio} → ${datas.fim}`;
 
   return (
     <div
@@ -79,7 +114,14 @@ export function SkuModal({ state, lojasDisponiveis }: Props) {
             marketplace={marketplace}
             onMarketplaceChange={setMarketplace}
             lojasDisponiveis={lojasDisponiveis}
+            lojaToMarketplace={lojaToMarketplace}
           />
+
+          <p className="text-[10px] text-gray-500 dark:text-gray-400 mb-3 -mt-2">
+            Período: {periodoLabel}
+          </p>
+
+          <ErrorBanner errors={errors} />
 
           <SkuModalKPIs kpis={kpis} tendencia={tendencia} loading={loadingKpis} />
 

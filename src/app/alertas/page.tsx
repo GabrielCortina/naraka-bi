@@ -6,7 +6,7 @@ import type { PresetPeriodo } from './lib/types';
 import { useAlertas } from './hooks/useAlertas';
 import { usePinados } from './hooks/usePinados';
 import { useAlertasIA } from './hooks/useAlertasIA';
-import { useSkuModal } from './hooks/useSkuModal';
+import { useSkuModal, type LojaConfigEntry } from './hooks/useSkuModal';
 import { AlertasHeader } from './components/AlertasHeader';
 import { AlertasPinados } from './components/AlertasPinados';
 import { AlertasGrid } from './components/AlertasGrid';
@@ -22,20 +22,22 @@ export default function AlertasPage() {
   const [loja, setLoja] = useState('');
   const [ordenarPor, setOrdenarPor] = useState<'score' | 'pecas' | 'faturamento'>('score');
   const [lojas, setLojas] = useState<LojaOption[]>([]);
+  const [lojaConfig, setLojaConfig] = useState<LojaConfigEntry[]>([]);
 
   const { quedas, picos, resumo, pinados, periodos, horaCorte, loading, lastUpdated, refetch, alertas } = useAlertas(preset, loja, ordenarPor);
   const { togglePin, isToggling } = usePinados(refetch);
   const ia = useAlertasIA();
-  const skuModal = useSkuModal();
+  const skuModal = useSkuModal(lojaConfig);
 
   const loadLojas = useCallback(async () => {
     const db = createBrowserClient();
     const { data: configs } = await db.from('loja_config')
-      .select('nome_exibicao, nome_loja')
+      .select('ecommerce_nome_tiny, nome_exibicao, nome_loja, marketplace, ativo')
       .eq('ativo', true)
       .order('nome_exibicao');
 
     if (configs && configs.length > 0) {
+      setLojaConfig(configs as LojaConfigEntry[]);
       const nomes = configs.map(c => c.nome_loja || c.nome_exibicao);
       const unicos = Array.from(new Set(nomes)).sort();
       setLojas(unicos.map(nome => ({ nome_exibicao: nome })));
@@ -97,7 +99,7 @@ export default function AlertasPage() {
 
       <SkuModal
         state={skuModal}
-        lojasDisponiveis={lojas.map(l => l.nome_exibicao)}
+        lojaConfig={lojaConfig}
       />
     </div>
   );

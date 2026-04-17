@@ -2,7 +2,6 @@
 
 import { useRef, useState, useEffect } from 'react';
 import type { PeriodoPreset, Marketplace } from '../hooks/useSkuModal';
-import { getMarketplace } from '../hooks/useSkuModal';
 
 interface Props {
   periodo: PeriodoPreset;
@@ -16,6 +15,8 @@ interface Props {
   marketplace: Marketplace | null;
   onMarketplaceChange: (m: Marketplace | null) => void;
   lojasDisponiveis: string[];
+  // nome_loja → marketplace (da loja_config), fornecido pelo hook
+  lojaToMarketplace: Record<string, Marketplace | 'Outro'>;
 }
 
 const PRESETS: { key: PeriodoPreset; lineA: string; lineB: string }[] = [
@@ -40,18 +41,19 @@ function useClickOutside(onClose: () => void) {
 }
 
 function LojasDropdown({
-  lojasSelecionadas, onChange, lojasDisponiveis, marketplace,
+  lojasSelecionadas, onChange, lojasDisponiveis, marketplace, lojaToMarketplace,
 }: {
   lojasSelecionadas: string[];
   onChange: (l: string[]) => void;
   lojasDisponiveis: string[];
   marketplace: Marketplace | null;
+  lojaToMarketplace: Record<string, Marketplace | 'Outro'>;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useClickOutside(() => setOpen(false));
 
   const lojasFiltradas = marketplace
-    ? lojasDisponiveis.filter(l => getMarketplace(l) === marketplace)
+    ? lojasDisponiveis.filter(l => lojaToMarketplace[l] === marketplace)
     : lojasDisponiveis;
 
   const label = lojasSelecionadas.length === 0
@@ -165,7 +167,7 @@ export function SkuModalFilters({
   customInicio, customFim, onCustomInicioChange, onCustomFimChange,
   lojasSelecionadas, onLojasChange,
   marketplace, onMarketplaceChange,
-  lojasDisponiveis,
+  lojasDisponiveis, lojaToMarketplace,
 }: Props) {
   return (
     <div className="space-y-2 mb-5">
@@ -195,6 +197,7 @@ export function SkuModalFilters({
           onChange={onLojasChange}
           lojasDisponiveis={lojasDisponiveis}
           marketplace={marketplace}
+          lojaToMarketplace={lojaToMarketplace}
         />
         <MarketplaceDropdown
           marketplace={marketplace}
