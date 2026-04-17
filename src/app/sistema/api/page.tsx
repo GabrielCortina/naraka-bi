@@ -118,6 +118,8 @@ export default function SistemaApiPage() {
   const [lastCheck, setLastCheck] = useState<Date>(new Date());
   const [tinyConnected, setTinyConnected] = useState(false);
   const [tinyExpiry, setTinyExpiry] = useState<string | null>(null);
+  const [tinyUpdatedAt, setTinyUpdatedAt] = useState<string | null>(null);
+  const [tinyReason, setTinyReason] = useState<string | null>(null);
   const [ultimoRelatorio, setUltimoRelatorio] = useState<ReconciliacaoRelatorio | null>(null);
   const [deadLettersHoje, setDeadLettersHoje] = useState(0);
   const [itensSyncErrors, setItensSyncErrors] = useState(0);
@@ -135,7 +137,7 @@ export default function SistemaApiPage() {
         .order('iniciado_em', { ascending: false }),
       db.from('polling_logs').select('status, pedidos_processados, duracao_ms, camada')
         .gte('iniciado_em', inicioDia),
-      fetch('/api/status').then(r => r.json()).catch(() => null),
+      fetch('/api/status', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
       db.from('reconciliacao_relatorio').select('*')
         .order('iniciada_em', { ascending: false }).limit(1).maybeSingle(),
       db.from('webhook_retry_queue').select('*', { count: 'exact', head: true })
@@ -159,6 +161,8 @@ export default function SistemaApiPage() {
     if (statusRes?.tiny) {
       setTinyConnected(statusRes.tiny.connected);
       setTinyExpiry(statusRes.tiny.expiresAt);
+      setTinyUpdatedAt(statusRes.tiny.updatedAt ?? null);
+      setTinyReason(statusRes.tiny.reason ?? null);
     }
 
     // Monta status de cada camada a partir do último log individual
@@ -242,6 +246,14 @@ export default function SistemaApiPage() {
               )}
             </div>
           </div>
+          {!tinyConnected && (tinyReason || tinyUpdatedAt) && (
+            <div className="pl-4 pb-1 text-[10px] opacity-50 space-y-0.5">
+              {tinyReason && <div>Motivo: {tinyReason}</div>}
+              {tinyUpdatedAt && (
+                <div>Último update do token: {new Date(tinyUpdatedAt).toLocaleString('pt-BR')}</div>
+              )}
+            </div>
+          )}
 
           {/* Camadas */}
           {camadas.map(c => (
