@@ -37,25 +37,7 @@ export function getAuthUrl(): string {
 
   const path = '/api/v2/shop/auth_partner';
   const timestamp = Math.floor(Date.now() / 1000);
-  const baseString = `${cfg.partnerId}${path}${timestamp}`;
   const sign = signPublicPath(path, timestamp);
-
-  // DEBUG temporário — remover após validar "Wrong sign".
-  // Não expõe a partner_key (só prefix/suffix/length).
-  const k = cfg.partnerKey;
-  console.log('[shopee-auth][DEBUG getAuthUrl]', {
-    host: getShopeeHost(),
-    isProduction: cfg.isProduction,
-    partner_id: cfg.partnerId,
-    partner_id_length: cfg.partnerId.length,
-    path,
-    timestamp,
-    base_string: baseString,
-    base_string_length: baseString.length,
-    sign,
-    partner_key_fingerprint: k ? `${k.slice(0, 4)}…${k.slice(-4)} (len=${k.length})` : '(vazio)',
-    redirect_url: cfg.redirectUrl,
-  });
 
   const params = new URLSearchParams({
     partner_id: cfg.partnerId,
