@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { refreshAccessToken } from '@/lib/shopee/auth';
 import { createServiceClient } from '@/lib/supabase-server';
 
+// Rotas Shopee assinam com timestamp fresh — nunca podem ser cacheadas.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
 
 // POST /api/auth/shopee/refresh

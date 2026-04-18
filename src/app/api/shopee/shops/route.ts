@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 
+// Status de tokens muda a cada refresh/expiração — não pode ser cacheado.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/shopee/shops
 // Lista lojas Shopee conectadas (metadata pública — sem tokens).
 export async function GET() {

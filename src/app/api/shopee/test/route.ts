@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { shopeeApiCall } from '@/lib/shopee/client';
 import { createServiceClient } from '@/lib/supabase-server';
 
+// Rotas Shopee assinam com timestamp fresh — nunca podem ser cacheadas.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // GET /api/shopee/test?shop_id=<number>
 // Testa a conexão chamando GET /api/v2/shop/get_shop_info com os tokens salvos.
 export async function GET(request: NextRequest) {
