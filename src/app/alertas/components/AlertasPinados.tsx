@@ -10,9 +10,10 @@ interface Props {
   onUnpin: (skuPai: string) => void;
   onPin: (skuPai: string) => void;
   isToggling: (skuPai: string) => boolean;
+  onCardClick?: (pinado: PinadoStatus) => void;
 }
 
-export function AlertasPinados({ pinados, loading, onUnpin, onPin, isToggling }: Props) {
+export function AlertasPinados({ pinados, loading, onUnpin, onPin, isToggling, onCardClick }: Props) {
   const [search, setSearch] = useState('');
   const [feedback, setFeedback] = useState('');
 
@@ -82,10 +83,11 @@ export function AlertasPinados({ pinados, loading, onUnpin, onPin, isToggling }:
             return (
               <div
                 key={p.sku_pai}
-                className={`card-secondary rounded-md p-2.5 border-l-[3px] ${borderColor} relative`}
+                onClick={onCardClick ? () => onCardClick(p) : undefined}
+                className={`card-secondary rounded-md p-2.5 border-l-[3px] ${borderColor} relative ${onCardClick ? 'cursor-pointer transition-colors hover:brightness-[1.02] dark:hover:brightness-110' : ''}`}
               >
                 <button
-                  onClick={() => onUnpin(p.sku_pai)}
+                  onClick={e => { e.stopPropagation(); onUnpin(p.sku_pai); }}
                   disabled={isToggling(p.sku_pai)}
                   className="absolute top-1.5 right-1.5 w-4 h-4 flex items-center justify-center text-[10px] opacity-30 hover:opacity-80 transition-opacity"
                   title="Remover monitoramento"

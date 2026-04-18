@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { createBrowserClient } from '@/lib/supabase-browser';
-import type { PresetPeriodo } from './lib/types';
+import type { PresetPeriodo, PinadoStatus, Alerta } from './lib/types';
 import { useAlertas } from './hooks/useAlertas';
 import { usePinados } from './hooks/usePinados';
 import { useAlertasIA } from './hooks/useAlertasIA';
@@ -46,6 +46,29 @@ export default function AlertasPage() {
 
   useEffect(() => { loadLojas(); }, [loadLojas]);
 
+  // Pinado pode ter tipo 'ESTAVEL', mas Alerta só aceita PICO/QUEDA.
+  // Usa o sinal da variação para escolher um tipo aproximado — o modal
+  // sobrescreve os números via RPCs baseadas no filtro interno de qualquer forma.
+  const abrirModalDePinado = useCallback((p: PinadoStatus) => {
+    const asAlerta: Alerta = {
+      sku_pai: p.sku_pai,
+      tipo: p.tipo === 'ESTAVEL' ? (p.variacao_pct >= 0 ? 'PICO' : 'QUEDA') : p.tipo,
+      severidade: p.severidade,
+      periodo_a_pecas: 0,
+      periodo_b_pecas: 0,
+      delta_pecas: p.delta_pecas,
+      periodo_a_faturamento: 0,
+      periodo_b_faturamento: 0,
+      delta_faturamento: p.delta_faturamento,
+      variacao_pct: p.variacao_pct,
+      score: 0,
+      lojas_afetadas: [],
+      breakdown_lojas: [],
+      is_pinado: true,
+    };
+    skuModal.openModal(asAlerta);
+  }, [skuModal]);
+
   const handleGerarIA = useCallback(() => {
     ia.gerarAnalise(
       alertas.slice(0, 20),
@@ -76,6 +99,7 @@ export default function AlertasPage() {
         onUnpin={togglePin}
         onPin={togglePin}
         isToggling={isToggling}
+        onCardClick={abrirModalDePinado}
       />
 
       <AlertasGrid
