@@ -194,6 +194,21 @@ export function useAlertas(preset: PresetPeriodo, loja: string, ordenarPor: 'sco
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  // No preset "hoje", refetch imediato quando vira a hora (checa a cada 60s)
+  useEffect(() => {
+    if (preset !== 'hoje') return;
+    let lastHour = new Date().getHours();
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const currentHour = new Date().getHours();
+      if (currentHour !== lastHour) {
+        lastHour = currentHour;
+        fetchData();
+      }
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [preset, fetchData]);
+
   const quedas = alertas.filter(a => a.tipo === 'QUEDA');
   const picos = alertas.filter(a => a.tipo === 'PICO');
 

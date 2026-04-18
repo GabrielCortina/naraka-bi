@@ -229,6 +229,7 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
   const [loadingLoja, setLoadingLoja] = useState(false);
   const [loadingKpis, setLoadingKpis] = useState(false);
   const [loadingAlteracoes, setLoadingAlteracoes] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
   const fetchIdRef = useRef(0);
 
   // === Mapas derivados da loja_config ===
@@ -321,6 +322,15 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
   }, []);
 
   const closeModal = useCallback(() => setAlerta(null), []);
+
+  // Auto-refresh no filtro "hoje" para capturar novas horas
+  useEffect(() => {
+    if (!isOpen || periodo !== 'hoje') return;
+    const interval = setInterval(() => {
+      setRefreshTick(t => t + 1);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [isOpen, periodo]);
 
   // Fetch reativo a alerta, datas, lojasEfetivas
   useEffect(() => {
@@ -457,7 +467,7 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
       setAlteracoes(enriched);
       setLoadingAlteracoes(false);
     })();
-  }, [alerta, periodo, datas, lojasEfetivasEcomm]);
+  }, [alerta, periodo, datas, lojasEfetivasEcomm, refreshTick]);
 
   // Agrega porLojaRaw (em ecommerce_nome) → por nome_loja de display
   const porLoja = useMemo<LojaRow[]>(() => {
