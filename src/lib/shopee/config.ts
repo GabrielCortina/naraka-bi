@@ -11,12 +11,14 @@ export interface ShopeeConfig {
   isProduction: boolean;
 }
 
+// .trim() defensivo: whitespace/newline invisível no .env quebra o HMAC silenciosamente
+// (sign do partner_id/partner_key entra no base_string byte-a-byte).
 export function getShopeeConfig(): ShopeeConfig {
   return {
-    partnerId: process.env.SHOPEE_PARTNER_ID ?? '',
-    partnerKey: process.env.SHOPEE_PARTNER_KEY ?? '',
-    redirectUrl: process.env.SHOPEE_REDIRECT_URL ?? '',
-    isProduction: process.env.SHOPEE_IS_PRODUCTION === 'true',
+    partnerId: (process.env.SHOPEE_PARTNER_ID ?? '').trim(),
+    partnerKey: (process.env.SHOPEE_PARTNER_KEY ?? '').trim(),
+    redirectUrl: (process.env.SHOPEE_REDIRECT_URL ?? '').trim(),
+    isProduction: (process.env.SHOPEE_IS_PRODUCTION ?? '').trim() === 'true',
   };
 }
 
