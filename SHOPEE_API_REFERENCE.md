@@ -13,9 +13,13 @@ Test Partner ID: 1232147
 App Category: Seller In House System (acesso total a todas as APIs)
 App Status: Developing (sandbox)
 Redirect URL: https://naraka-bi.vercel.app
-Sandbox Host: https://partner.test-stable.shopeemobile.com
+Sandbox Host: https://openplatform.sandbox.test-stable.shopee.sg  [C — confirmado via API Test Tool]
 Production Host: https://partner.shopeemobile.com
 API Base Path: /api/v2/
+
+⚠️ ATENÇÃO: o host `partner.test-stable.shopeemobile.com` (divulgado em diversas
+fontes) devolve "Wrong sign" mesmo com a assinatura correta. Usar sempre
+`openplatform.sandbox.test-stable.shopee.sg` em sandbox.
 ```
 
 **Regra:** Nunca expor partner_key no frontend. Toda chamada Shopee pelo backend (API Routes).

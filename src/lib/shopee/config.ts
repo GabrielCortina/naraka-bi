@@ -1,7 +1,9 @@
 // Configuração centralizada da integração Shopee Open Platform (API v2).
 // Referência técnica: SHOPEE_API_REFERENCE.md
 
-const SANDBOX_HOST = 'https://partner.test-stable.shopeemobile.com';
+// Host oficial do sandbox confirmado via API Test Tool da Shopee.
+// NÃO usar partner.test-stable.shopeemobile.com (documentado errado em vários lugares).
+const SANDBOX_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
 const PRODUCTION_HOST = 'https://partner.shopeemobile.com';
 
 export interface ShopeeConfig {
