@@ -147,10 +147,12 @@ sign = HMAC-SHA256(partner_key, {partner_id}{path}{timestamp}{access_token}{shop
 
 **get_escrow_list params [C]:**
 - release_time_from / release_time_to: período de liberação
+- Janela aceita até 30 dias por chamada [C — confirmado sandbox BR]
 - Útil para buscar em lote por período
 
-**get_wallet_transaction_list [C/I]:**
+**get_wallet_transaction_list [C]:**
 - create_time_from / create_time_to
+- Janela MAX 15 dias por chamada — acima disso retorna `time_invalid` [C — confirmado sandbox BR]
 - Retorna transações com: transaction_id, amount, transaction_type, status, create_time
 - transaction_type pode incluir [?]: ORDER_INCOME, ADS_SPEND, WITHDRAWAL, REFUND, ADJUSTMENT
 - Pode ou não vincular order_sn por transação [? — TESTAR NO SANDBOX]
@@ -165,6 +167,8 @@ sign = HMAC-SHA256(partner_key, {partner_id}{path}{timestamp}{access_token}{shop
 | /api/v2/returns/dispute | POST | Disputar devolução |
 
 Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_time
+
+**Janela temporal [C]:** get_return_list aceita MAX 15 dias entre create_time_from/create_time_to — acima disso retorna erro "não deve ser superior a 15 dias" (confirmado sandbox BR).
 
 ### 3.4 Logistics (Logística) [C]
 
@@ -207,6 +211,9 @@ Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_
 
 **IMPORTANTE:** Ads são por PERÍODO, nunca por pedido. Não tentar vincular gasto Ads a order_sn.
 
+**Formato de data [C]:** Shopee BR exige `DD-MM-YYYY` (ex: `18-04-2026`) em start_date/end_date.
+`YYYY-MM-DD` é rejeitado com erro de formato (confirmado sandbox BR).
+
 ### 3.8 Discount / Voucher / Marketing [C]
 
 | Módulo | Descrição |
@@ -245,6 +252,9 @@ Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_
 | /api/v2/account_health/shop_performance | GET | Métricas de performance |
 | /api/v2/account_health/shop_penalty | GET | Penalidades |
 
+**⚠️ Sandbox [C]:** `shop_performance` **não está disponível no sandbox** —
+retorna erro. Testar apenas em produção (confirmado sandbox BR).
+
 ### 3.11 Income Report (Relatório Oficial) [C]
 
 | Endpoint | Método | Descrição |
@@ -270,10 +280,13 @@ Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_
 - Implementar throttling conservador: 1-2 req/s
 - HTTP 429 = rate limit atingido → exponential backoff
 
-### Janela temporal [I]
-- get_order_list: máximo ~15 dias por chamada
-- Backfill histórico: varrer em janelas encadeadas de 14 dias
+### Janela temporal
+- get_order_list: máximo 15 dias por chamada [I]
+- get_wallet_transaction_list: máximo 15 dias (create_time_from → create_time_to) [C — sandbox BR]
+- get_return_list: máximo 15 dias (create_time_from → create_time_to) [C — sandbox BR]
+- get_escrow_list: até 30 dias (release_time_from → release_time_to) [C — sandbox BR]
 - get_escrow_detail: por order_sn (sem limite de janela, mas respeitar rate limit)
+- Backfill histórico: varrer em janelas encadeadas de 14 dias (margem de segurança sob o limite de 15)
 
 ### Token [C]
 - access_token expira em 4h → refresh proativo a cada 3h

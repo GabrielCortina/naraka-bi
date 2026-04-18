@@ -10,12 +10,13 @@ export const revalidate = 0;
 
 const DAY_SEC = 24 * 60 * 60;
 
-function fmtYMD(ts: number): string {
+// Shopee BR (/ads/*) exige DD-MM-YYYY. YYYY-MM-DD é rejeitado.
+function fmtDMY(ts: number): string {
   const d = new Date(ts * 1000);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const y = d.getUTCFullYear();
+  return `${day}-${m}-${y}`;
 }
 
 type TestName =
@@ -58,6 +59,8 @@ function buildCall(
   orderSn: string | null,
 ): TestCall | { error: string } {
   const sevenAgo = nowSec - 7 * DAY_SEC;
+  // wallet e returns falham com "janela > 15 dias" — usar 14 dias por segurança.
+  const fourteenAgo = nowSec - 14 * DAY_SEC;
   const thirtyAgo = nowSec - 30 * DAY_SEC;
 
   switch (test) {
@@ -96,7 +99,7 @@ function buildCall(
         params: {
           page_no: 1,
           page_size: 20,
-          create_time_from: thirtyAgo,
+          create_time_from: fourteenAgo,
           create_time_to: nowSec,
         },
       };
@@ -108,19 +111,19 @@ function buildCall(
         params: {
           page_no: 1,
           page_size: 20,
-          create_time_from: thirtyAgo,
+          create_time_from: fourteenAgo,
           create_time_to: nowSec,
         },
       };
 
     case 'ads':
-      // Ads requer datas em YYYY-MM-DD
+      // Shopee BR exige DD-MM-YYYY (confirmado empiricamente no sandbox).
       return {
         path: '/api/v2/ads/get_all_cpc_ads_daily_performance',
         method: 'GET',
         params: {
-          start_date: fmtYMD(sevenAgo),
-          end_date: fmtYMD(nowSec),
+          start_date: fmtDMY(sevenAgo),
+          end_date: fmtDMY(nowSec),
         },
       };
 
