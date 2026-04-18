@@ -21,9 +21,15 @@ interface Props {
 }
 
 function pad2(n: number): string { return String(n).padStart(2, '0'); }
-function fmtLabel(iso: string): string {
-  const [, m, d] = iso.split('-');
-  return `${pad2(Number(d))}/${pad2(Number(m))}`;
+function fmtLabel(val: string): string {
+  // Labels horários ("14h") passam direto
+  if (/^\d{1,2}h$/.test(val)) return val;
+  // Data "YYYY-MM-DD" → "DD/MM"
+  const parts = val.split('-');
+  if (parts.length === 3) {
+    return `${pad2(Number(parts[2]))}/${pad2(Number(parts[1]))}`;
+  }
+  return val;
 }
 
 interface MarkerLayout {
@@ -139,7 +145,9 @@ export function SkuModalChart({ serie, alteracoes, metrica, onMetricaChange, loa
           callback: (_: unknown, index: number) => {
             if (serie.length === 0) return '';
             const step = Math.max(1, Math.floor(serie.length / 6));
-            if (index === serie.length - 1) return 'Hoje';
+            const isHourly = /^\d{1,2}h$/.test(labels[0] ?? '');
+            // Modo diário: última label vira "Hoje"; modo horário mostra a hora normal
+            if (!isHourly && index === serie.length - 1) return 'Hoje';
             return index % step === 0 ? fmtLabel(labels[index]) : '';
           },
           maxRotation: 0,

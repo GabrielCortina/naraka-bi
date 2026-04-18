@@ -122,6 +122,15 @@ interface RpcSerie {
   out_faturamento: number | string;
   out_pedidos: number | string;
 }
+interface RpcSerieHoje {
+  out_hora: number;
+  out_quantidade: number | string;
+  out_faturamento: number | string;
+  out_pedidos: number | string;
+}
+interface RpcKpisHoje extends RpcKpis {
+  out_hora_corte?: number;
+}
 interface RpcLoja {
   out_loja: string;
   out_quantidade: number | string;
@@ -325,31 +334,45 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
     setLoadingAlteracoes(true);
     setErrors({});
 
-    // Série temporal
-    callRpc('rpc_sku_modal_serie_temporal', {
-      p_sku_pai: skuPai,
-      p_data_inicio: datas.inicio,
-      p_data_fim: datas.fim,
-      p_lojas: lojasEfetivasEcomm,
-    }).then(res => {
+    const isHoje = periodo === 'hoje';
+
+    // Série temporal — usa RPC _hoje (hourly_stats) quando periodo=hoje
+    const serieRpc = isHoje ? 'rpc_sku_modal_serie_hoje' : 'rpc_sku_modal_serie_temporal';
+    const serieParams: Record<string, unknown> = isHoje
+      ? { p_sku_pai: skuPai, p_lojas: lojasEfetivasEcomm }
+      : { p_sku_pai: skuPai, p_data_inicio: datas.inicio, p_data_fim: datas.fim, p_lojas: lojasEfetivasEcomm };
+
+    callRpc(serieRpc, serieParams).then(res => {
       if (currentId !== fetchIdRef.current) return;
       if (res.error) setErrors(prev => ({ ...prev, serie: res.error }));
-      const rows = (res.data ?? []) as RpcSerie[];
-      setSerie(rows.map(r => ({
-        data: String(r.out_data),
-        quantidade: Number(r.out_quantidade) || 0,
-        faturamento: Number(r.out_faturamento) || 0,
-        pedidos: Number(r.out_pedidos) || 0,
-      })));
+
+      if (isHoje) {
+        const rows = (res.data ?? []) as RpcSerieHoje[];
+        setSerie(rows.map(r => ({
+          data: `${String(r.out_hora).padStart(2, '0')}h`,
+          quantidade: Number(r.out_quantidade) || 0,
+          faturamento: Number(r.out_faturamento) || 0,
+          pedidos: Number(r.out_pedidos) || 0,
+        })));
+      } else {
+        const rows = (res.data ?? []) as RpcSerie[];
+        setSerie(rows.map(r => ({
+          data: String(r.out_data),
+          quantidade: Number(r.out_quantidade) || 0,
+          faturamento: Number(r.out_faturamento) || 0,
+          pedidos: Number(r.out_pedidos) || 0,
+        })));
+      }
       setLoadingSerie(false);
     });
 
-    // Breakdown por loja — mostra todas para permitir comparação entre elas.
-    callRpc('rpc_sku_modal_por_loja', {
-      p_sku_pai: skuPai,
-      p_data_inicio: datas.inicio,
-      p_data_fim: datas.fim,
-    }).then(res => {
+    // Breakdown por loja — variante _hoje quando periodo=hoje
+    const lojaRpc = isHoje ? 'rpc_sku_modal_por_loja_hoje' : 'rpc_sku_modal_por_loja';
+    const lojaParams: Record<string, unknown> = isHoje
+      ? { p_sku_pai: skuPai }
+      : { p_sku_pai: skuPai, p_data_inicio: datas.inicio, p_data_fim: datas.fim };
+
+    callRpc(lojaRpc, lojaParams).then(res => {
       if (currentId !== fetchIdRef.current) return;
       if (res.error) setErrors(prev => ({ ...prev, loja: res.error }));
       const rows = (res.data ?? []) as RpcLoja[];
@@ -362,16 +385,16 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
       setLoadingLoja(false);
     });
 
-    // KPIs — usa o período do filtro (não mais hardcode de mês)
-    callRpc('rpc_sku_modal_kpis', {
-      p_sku_pai: skuPai,
-      p_data_inicio: datas.inicio,
-      p_data_fim: datas.fim,
-      p_lojas: lojasEfetivasEcomm,
-    }).then(res => {
+    // KPIs — usa _hoje (hora-a-hora) quando periodo=hoje; senão usa o período completo
+    const kpisRpc = isHoje ? 'rpc_sku_modal_kpis_hoje' : 'rpc_sku_modal_kpis';
+    const kpisParams: Record<string, unknown> = isHoje
+      ? { p_sku_pai: skuPai, p_lojas: lojasEfetivasEcomm }
+      : { p_sku_pai: skuPai, p_data_inicio: datas.inicio, p_data_fim: datas.fim, p_lojas: lojasEfetivasEcomm };
+
+    callRpc(kpisRpc, kpisParams).then(res => {
       if (currentId !== fetchIdRef.current) return;
       if (res.error) setErrors(prev => ({ ...prev, kpis: res.error }));
-      const rows = (res.data ?? []) as RpcKpis[];
+      const rows = (res.data ?? []) as RpcKpisHoje[];
       const r = rows[0];
       setKpis(r ? {
         vendas: Number(r.out_vendas) || 0,
@@ -434,7 +457,7 @@ export function useSkuModal(lojaConfig: LojaConfigEntry[] = []) {
       setAlteracoes(enriched);
       setLoadingAlteracoes(false);
     })();
-  }, [alerta, datas, lojasEfetivasEcomm]);
+  }, [alerta, periodo, datas, lojasEfetivasEcomm]);
 
   // Agrega porLojaRaw (em ecommerce_nome) → por nome_loja de display
   const porLoja = useMemo<LojaRow[]>(() => {

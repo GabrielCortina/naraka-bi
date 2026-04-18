@@ -36,6 +36,9 @@ export const ALLOWED_RPCS: ReadonlySet<string> = new Set([
   'rpc_sku_modal_por_loja',
   'rpc_sku_modal_kpis',
   'rpc_sku_modal_impacto_alteracao',
+  'rpc_sku_modal_serie_hoje',
+  'rpc_sku_modal_por_loja_hoje',
+  'rpc_sku_modal_kpis_hoje',
 ]);
 
 interface LojaConfigRow {
