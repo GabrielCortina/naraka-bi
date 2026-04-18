@@ -81,6 +81,15 @@ export function SettingsPanel({ open, onClose, sidebarWidth, onOpenLojaConfig }:
           />
         </div>
 
+        <div className="mx-3.5 border-t dark:border-white/[0.06] border-black/[0.06]" />
+
+        <div className="p-2">
+          <p className="text-[9px] uppercase tracking-wider opacity-40 px-3.5 py-2">Integrações</p>
+          <Link href="/configuracoes/shopee" onClick={onClose}>
+            <SettingsItem icon="🔶" label="Shopee" onClick={onClose} />
+          </Link>
+        </div>
+
         {/* Footer */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t dark:border-white/[0.06] border-black/[0.06]">
           <p className="text-[9px] opacity-30">naraka-bi v1.0</p>
