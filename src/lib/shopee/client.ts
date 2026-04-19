@@ -46,6 +46,9 @@ export async function shopeeApiCall<T = unknown>(
     body = JSON.stringify(params);
   }
 
+  // Log da URL SEM partes sensíveis (access_token/sign). `path` e host bastam para diagnóstico.
+  console.log(`[shopee-client] calling ${method} ${getShopeeHost()}${path}`);
+
   const res = await fetch(url, {
     method,
     headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
@@ -53,7 +56,23 @@ export async function shopeeApiCall<T = unknown>(
     cache: 'no-store',
   });
 
-  const json = (await res.json()) as ShopeeApiResponse<T>;
+  // Capturamos como texto primeiro: se Shopee devolver HTML (host errado, 4xx/5xx do
+  // proxy, etc.), res.json() dá "Unexpected non-whitespace character after JSON at
+  // position N" e perdemos o corpo real do erro.
+  const rawText = await res.text();
+  console.log(
+    `[shopee-client] ${method} ${path} status=${res.status} body(first 500)=`,
+    rawText.substring(0, 500),
+  );
+
+  let json: ShopeeApiResponse<T>;
+  try {
+    json = JSON.parse(rawText) as ShopeeApiResponse<T>;
+  } catch {
+    throw new Error(
+      `Shopee ${path}: resposta não-JSON (status ${res.status}). Body: ${rawText.substring(0, 200)}`,
+    );
+  }
 
   if (!res.ok || json?.error) {
     console.error(`[shopee-client] ${method} ${path} falhou:`, {
