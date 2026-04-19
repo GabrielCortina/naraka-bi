@@ -1,4 +1,4 @@
-import { getShopeeConfig, getShopeeHost, assertShopeeConfig } from './config';
+import { getShopeeConfig, getShopeeApiHost, assertShopeeConfig } from './config';
 import { signShopPath } from './auth';
 
 export interface ShopeeApiResponse<T = unknown> {
@@ -34,7 +34,7 @@ export async function shopeeApiCall<T = unknown>(
     sign,
   });
 
-  let url = `${getShopeeHost()}${path}?${commonParams.toString()}`;
+  let url = `${getShopeeApiHost()}${path}?${commonParams.toString()}`;
   let body: string | undefined;
 
   if (method === 'GET') {
@@ -47,7 +47,7 @@ export async function shopeeApiCall<T = unknown>(
   }
 
   // Log da URL SEM partes sensíveis (access_token/sign). `path` e host bastam para diagnóstico.
-  console.log(`[shopee-client] calling ${method} ${getShopeeHost()}${path}`);
+  console.log(`[shopee-client] calling ${method} ${getShopeeApiHost()}${path}`);
 
   const res = await fetch(url, {
     method,

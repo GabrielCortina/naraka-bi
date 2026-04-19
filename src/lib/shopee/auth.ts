@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { getShopeeConfig, getShopeeHost, assertShopeeConfig } from './config';
+import { getShopeeConfig, getShopeeAuthHost, assertShopeeConfig } from './config';
 
 // HMAC-SHA256 usado em toda assinatura Shopee (ref §2).
 // base_string montado conforme o tipo de chamada:
@@ -46,7 +46,7 @@ export function getAuthUrl(): string {
     redirect: cfg.redirectUrl,
   });
 
-  return `${getShopeeHost()}${path}?${params.toString()}`;
+  return `${getShopeeAuthHost()}${path}?${params.toString()}`;
 }
 
 export interface ShopeeTokenResponse {
@@ -71,7 +71,7 @@ export async function getAccessToken(
   const sign = signPublicPath(path, timestamp);
 
   const url =
-    `${getShopeeHost()}${path}` +
+    `${getShopeeAuthHost()}${path}` +
     `?partner_id=${cfg.partnerId}` +
     `&timestamp=${timestamp}` +
     `&sign=${sign}`;
@@ -118,7 +118,7 @@ export async function refreshAccessToken(
   const sign = signPublicPath(path, timestamp);
 
   const url =
-    `${getShopeeHost()}${path}` +
+    `${getShopeeAuthHost()}${path}` +
     `?partner_id=${cfg.partnerId}` +
     `&timestamp=${timestamp}` +
     `&sign=${sign}`;

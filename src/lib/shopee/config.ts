@@ -1,14 +1,16 @@
 // Configuração centralizada da integração Shopee Open Platform (API v2).
 // Referência técnica: SHOPEE_API_REFERENCE.md
 
-// Host oficial do sandbox confirmado via API Test Tool da Shopee.
-// NÃO usar partner.test-stable.shopeemobile.com (documentado errado em vários lugares).
-const SANDBOX_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
-// Produção: host documentado oficialmente. No sandbox o host documentado estava errado
-// (era openplatform.sandbox.test-stable.shopee.sg, não partner.test-stable.shopeemobile.com),
-// então se em produção aparecer "Wrong sign" mesmo com assinatura correta, testar o alternativo
-// https://openplatform.shopee.com antes de investigar o HMAC.
-const PRODUCTION_HOST = 'https://partner.shopeemobile.com';
+// A Shopee usa hosts DIFERENTES para OAuth e para chamadas de API em produção BR:
+//   • OAuth (auth_partner, auth/token/get, auth/access_token/get) → partner.shopeemobile.com
+//   • Chamadas autenticadas /api/v2/* (BR)                         → openplatform.shopee.com.br
+// Usar o host de API para OAuth → não emite o redirect de autorização.
+// Usar o host de OAuth para chamadas API em BR → HTTP 404 "page not found".
+// No sandbox os dois fluxos usam o MESMO host.
+const SANDBOX_AUTH_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
+const SANDBOX_API_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
+const PRODUCTION_AUTH_HOST = 'https://partner.shopeemobile.com';
+const PRODUCTION_API_HOST = 'https://openplatform.shopee.com.br';
 
 export interface ShopeeConfig {
   partnerId: string;
@@ -28,8 +30,14 @@ export function getShopeeConfig(): ShopeeConfig {
   };
 }
 
-export function getShopeeHost(): string {
-  return getShopeeConfig().isProduction ? PRODUCTION_HOST : SANDBOX_HOST;
+// Host para endpoints de OAuth (shop/auth_partner, auth/token/get, auth/access_token/get).
+export function getShopeeAuthHost(): string {
+  return getShopeeConfig().isProduction ? PRODUCTION_AUTH_HOST : SANDBOX_AUTH_HOST;
+}
+
+// Host para TODAS as chamadas autenticadas /api/v2/* (order, payment, logistics, ...).
+export function getShopeeApiHost(): string {
+  return getShopeeConfig().isProduction ? PRODUCTION_API_HOST : SANDBOX_API_HOST;
 }
 
 export function assertShopeeConfig(cfg: ShopeeConfig = getShopeeConfig()): void {

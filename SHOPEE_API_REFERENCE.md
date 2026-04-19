@@ -14,13 +14,24 @@ Live Partner ID: 2033268
 App Category: Seller In House System (acesso total a todas as APIs)
 App Status: Online (produção — Go Live aprovado)
 Redirect URL: https://naraka-bi.vercel.app
-Sandbox Host: https://openplatform.sandbox.test-stable.shopee.sg  [C — confirmado via API Test Tool]
-Production Host: https://partner.shopeemobile.com
+Sandbox Host (auth + API):   https://openplatform.sandbox.test-stable.shopee.sg  [C]
+Production Auth Host:        https://partner.shopeemobile.com                   [C]
+Production API Host (BR):    https://openplatform.shopee.com.br                 [C]
 API Base Path: /api/v2/
 
-⚠️ ATENÇÃO: o host `partner.test-stable.shopeemobile.com` (divulgado em diversas
-fontes) devolve "Wrong sign" mesmo com a assinatura correta. Usar sempre
-`openplatform.sandbox.test-stable.shopee.sg` em sandbox.
+⚠️ ATENÇÃO — produção BR usa DOIS hosts diferentes:
+  • OAuth (shop/auth_partner, auth/token/get, auth/access_token/get) → `partner.shopeemobile.com`
+  • Chamadas /api/v2/* autenticadas (order, payment, logistics...)   → `openplatform.shopee.com.br`
+
+Trocar um pelo outro falha silenciosamente:
+  • `partner.shopeemobile.com` em /api/v2/*           → HTTP 404 "page not found"
+  • `openplatform.shopee.com.br` em /shop/auth_partner → não redireciona para autorização
+
+No sandbox o host é o mesmo para ambos os fluxos. A distinção só existe em produção.
+Implementação: `getShopeeAuthHost()` vs `getShopeeApiHost()` em src/lib/shopee/config.ts.
+
+Host documentado em fontes públicas que NÃO funciona em produção BR:
+  • `partner.shopeemobile.com` para chamadas /api/v2/* → é o host SEA, não BR.
 
 ⚠️ Access to Sensitive Data: **No access** concedido pela Shopee no Go Live.
 Impacta APENAS dados do buyer (nome completo, telefone, endereço) — esses
@@ -121,9 +132,16 @@ sign = HMAC-SHA256(partner_key, {partner_id}{path}{timestamp}{access_token}{shop
 | Endpoint | Método | Descrição |
 |----------|--------|-----------|
 | /api/v2/payment/get_escrow_detail | GET | **Detalhamento financeiro completo por pedido** |
+| /api/v2/payment/get_escrow_detail_batch | POST | Escrow em lote (até N pedidos por chamada) [C — doc oficial] |
 | /api/v2/payment/get_escrow_list | GET | Lista de escrows por período de release [C] |
 | /api/v2/payment/get_payout_detail | GET | Detalhes de repasse/saque [I] |
+| /api/v2/payment/get_payout_info | GET | Informações consolidadas de payout [C — doc oficial] |
 | /api/v2/payment/get_wallet_transaction_list | GET | Transações da carteira (entradas, saídas, ajustes) [C] |
+| /api/v2/payment/get_billing_transaction_info | GET | Info de transações de billing [C — doc oficial] |
+| /api/v2/payment/generate_income_statement | POST | Gerar demonstrativo de receita (assíncrono) [C — doc oficial] |
+| /api/v2/payment/get_income_statement | GET | Baixar demonstrativo gerado [C — doc oficial] |
+| /api/v2/payment/get_income_overview | GET | Visão geral de receita [C — doc oficial] |
+| /api/v2/payment/get_income_detail | GET | Detalhamento de receita [C — doc oficial] |
 
 **get_escrow_detail — campos retornados [C]:**
 ```
@@ -222,6 +240,22 @@ Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_
 **Formato de data [C]:** Shopee BR exige `DD-MM-YYYY` (ex: `18-04-2026`) em start_date/end_date.
 `YYYY-MM-DD` é rejeitado com erro de formato (confirmado sandbox BR).
 
+**Módulo AMS (Affiliate Marketing Solution) [C — doc oficial]:**
+
+Shopee tem API de afiliados separada (não é "ads/*"). Endpoints conhecidos:
+
+| Endpoint | Descrição |
+|----------|-----------|
+| /api/v2/ams/get_shop_performance | Performance agregada da loja em afiliados |
+| /api/v2/ams/get_product_performance | Performance por produto |
+| /api/v2/ams/get_affiliate_performance | Performance por afiliado individual |
+| /api/v2/ams/get_content_performance | Performance por conteúdo/link |
+| /api/v2/ams/get_campaign_key_metrics_performance | Métricas-chave por campanha |
+| /api/v2/ams/get_conversion_report | Relatório de conversão |
+
+Métodos e params exatos a confirmar [?]. Usar como caminho para gasto/conversão de afiliados,
+já que o endpoint `ads/*` cobre só CPC tradicional.
+
 ### 3.8 Discount / Voucher / Marketing [C]
 
 | Módulo | Descrição |
@@ -239,6 +273,13 @@ Campos: return_sn, order_sn, status, reason, refund_amount, create_time, update_
 |----------|--------|-----------|
 | /api/v2/push/set_app_push_config | POST | Configurar callback URL e eventos |
 | /api/v2/push/get_app_push_config | GET | Ver configuração atual |
+| /api/v2/push/get_lost_push_message | GET | Recuperar pushes que falharam na entrega [C — doc oficial] |
+| /api/v2/push/confirm_consumed_lost_push_message | POST | Confirmar consumo de pushes recuperados [C — doc oficial] |
+
+**Recuperação de pushes perdidos [C]:** se o webhook cair (404/5xx/timeout), a Shopee
+guarda os eventos. `get_lost_push_message` retorna o backlog; após processar,
+`confirm_consumed_lost_push_message` marca como consumido para não repetir. Fluxo
+crítico para garantir que nenhum evento financeiro seja perdido durante deploys/downtime.
 
 **Eventos de push disponíveis [C]:**
 - order_status_push — mudança de status de pedido
@@ -369,7 +410,6 @@ Tiny.numero_pedido_ecommerce = Shopee.order_sn
 ## 8. O QUE NÃO EXISTE NA API
 
 - ❌ Gasto Ads por pedido individual (só por período/campanha)
-- ❌ Gasto Afiliados por pedido (endpoint não confirmado [?])
 - ❌ Custo do produto / CMV (vem do Tiny/ERP)
 - ❌ Dados de cliente para CRM (PII mascarada)
 - ❌ Reviews/avaliações via API v2 (não confirmado)
