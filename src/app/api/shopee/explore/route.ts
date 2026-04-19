@@ -81,7 +81,22 @@ function buildCall(
       return {
         path: '/api/v2/order/get_order_detail',
         method: 'POST',
-        params: { order_sn_list: [orderSn] },
+        params: {
+          order_sn_list: [orderSn],
+          response_optional_fields: [
+            'buyer_user_id', 'buyer_username', 'estimated_shipping_fee',
+            'recipient_address', 'actual_shipping_fee', 'goods_to_declare',
+            'note', 'note_update_time', 'item_list', 'pay_time',
+            'dropshipper', 'dropshipper_phone', 'split_up',
+            'buyer_cancel_reason', 'cancel_by', 'cancel_reason',
+            'actual_shipping_fee_confirmed', 'buyer_cpf_id',
+            'fulfillment_flag', 'pickup_done_time', 'package_list',
+            'shipping_carrier', 'payment_method', 'total_amount',
+            'invoice_data', 'checkout_shipping_carrier', 'reverse_shipping_fee',
+            'order_chargeable_weight_gram', 'edt',
+            'prescription_images', 'prescription_check_status',
+          ],
+        },
       };
 
     case 'escrow':
