@@ -10,18 +10,20 @@ import {
 } from '@/lib/shopee/sync-helpers';
 import { mapEscrowDetailToRow, type EscrowDetailResponse } from '@/lib/shopee/escrow-mapper';
 
-// Worker da fila shopee_sync_queue. Consome até N itens PENDING por rodada,
-// dispatching por action. Backoff em falha (5/15/60/360/1440 min); após
-// max_attempts falhas o item vira DEAD.
-// Proteção contra itens travados: reseta PROCESSING > 10min para PENDING.
+// Worker da fila shopee_sync_queue. Processa até BATCH_SIZE items por
+// execução, checando timeout entre items. Actions suportadas:
+//   - fetch_escrow_detail  (entity_id = order_sn)
+//   - fetch_return_detail  (entity_id = return_sn)
+//   - fetch_order_detail   (entity_id = order_sn)
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 300;
+export const maxDuration = 55;
 
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 5;
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const THROTTLE_MS = 1000;
+const MAX_ELAPSED_MS = 45 * 1000;
 
 interface QueueItem {
   id: number;
@@ -181,7 +183,7 @@ async function handleFetchEscrowDetail(item: QueueItem, shop: ActiveShop) {
     },
     { onConflict: 'shop_id,order_sn' },
   );
-  if (error) throw new Error(`UPSERT shopee_escrow falhou: ${error.message}`);
+  if (error) throw new Error(`UPSERT shopee_escrow: ${error.message}`);
 }
 
 async function handleFetchReturnDetail(item: QueueItem, shop: ActiveShop) {
@@ -219,7 +221,7 @@ async function handleFetchReturnDetail(item: QueueItem, shop: ActiveShop) {
     },
     { onConflict: 'shop_id,return_sn' },
   );
-  if (error) throw new Error(`UPSERT shopee_returns falhou: ${error.message}`);
+  if (error) throw new Error(`UPSERT shopee_returns: ${error.message}`);
 }
 
 async function handleFetchOrderDetail(item: QueueItem, shop: ActiveShop) {
@@ -258,13 +260,12 @@ async function handleFetchOrderDetail(item: QueueItem, shop: ActiveShop) {
   const { error } = await supabase
     .from('shopee_pedidos')
     .upsert(rows, { onConflict: 'shop_id,order_sn' });
-  if (error) throw new Error(`UPSERT shopee_pedidos falhou: ${error.message}`);
+  if (error) throw new Error(`UPSERT shopee_pedidos: ${error.message}`);
 }
 
 async function processItem(item: QueueItem): Promise<'ok' | 'fail' | 'dead'> {
   const shop = await getShopById(item.shop_id);
   if (!shop) {
-    console.warn(`[shopee-sync][worker] shop_id=${item.shop_id} inativo — DEAD ${item.id}`);
     await markFailed({ ...item, attempt_count: item.max_attempts - 1 }, 'Loja inativa');
     return 'dead';
   }
@@ -288,7 +289,7 @@ async function processItem(item: QueueItem): Promise<'ok' | 'fail' | 'dead'> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown';
     console.error(
-      `[shopee-sync][worker] item=${item.id} action=${item.action} shop_id=${item.shop_id} erro:`,
+      `[shopee-sync][worker] item=${item.id} action=${item.action} shop_id=${item.shop_id}:`,
       msg,
     );
     const outcome = await markFailed(item, msg);
@@ -297,28 +298,50 @@ async function processItem(item: QueueItem): Promise<'ok' | 'fail' | 'dead'> {
 }
 
 export async function GET() {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+
   const unstuck = await unstickProcessing();
-  if (unstuck > 0) console.log(`[shopee-sync][worker] desgrudou ${unstuck} items travados`);
+  if (unstuck > 0) console.log(`[shopee-sync][worker] unstuck=${unstuck}`);
 
   const items = await claimItems();
   if (items.length === 0) {
-    return NextResponse.json({ processed: 0, succeeded: 0, failed: 0, dead: 0, unstuck });
+    return NextResponse.json({
+      job: 'worker',
+      processed: 0, succeeded: 0, failed: 0, dead: 0, unstuck,
+      duration_ms: elapsed(),
+      stopped_reason: 'complete' as const,
+    });
   }
 
-  console.log(`[shopee-sync][worker] processando ${items.length} items`);
+  console.log(`[shopee-sync][worker] claimed=${items.length}`);
 
   let succeeded = 0;
   let failed = 0;
   let dead = 0;
+  let processed = 0;
+  let stoppedReason: 'complete' | 'timeout' = 'complete';
+
   for (const item of items) {
+    if (elapsed() >= MAX_ELAPSED_MS) {
+      stoppedReason = 'timeout';
+      console.log(`[shopee-sync][worker] timeout após ${processed}/${items.length} items`);
+      break;
+    }
     const outcome = await processItem(item);
+    processed++;
     if (outcome === 'ok') succeeded++;
     else if (outcome === 'dead') dead++;
     else failed++;
-    await sleep(THROTTLE_MS);
+    if (elapsed() < MAX_ELAPSED_MS - THROTTLE_MS) await sleep(THROTTLE_MS);
   }
 
-  const summary = { processed: items.length, succeeded, failed, dead, unstuck };
-  console.log('[shopee-sync][worker] rodada concluída:', summary);
+  const summary = {
+    job: 'worker',
+    processed, succeeded, failed, dead, unstuck,
+    duration_ms: elapsed(),
+    stopped_reason: stoppedReason,
+  };
+  console.log('[shopee-sync][worker] concluído:', summary);
   return NextResponse.json(summary);
 }

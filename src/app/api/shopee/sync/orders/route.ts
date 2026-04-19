@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 import {
-  getActiveShops,
+  resolveTargetShop,
   lockCheckpoint,
   updateCheckpoint,
   enqueueAction,
@@ -11,22 +11,27 @@ import {
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
 
-// Sync de pedidos: lista (get_order_list) + detalhes em chunks de 50
-// (get_order_detail, GET com CSV na query). Em transição para COMPLETED
-// enfileira fetch_escrow_detail. Checkpoint: sync_orders.
+// Sync incremental de pedidos — UMA loja + UMA página de list + UM chunk de
+// detail por execução. Multi-execução via cron: cada run avança um "pedaço"
+// e o checkpoint carrega o estado.
+//
+// ?shop_id=<n>    — força loja específica (bypass round-robin)
+// ?days=<n>       — força janela de N dias a partir de agora (bypass checkpoint)
+//
 // Ref: SHOPEE_API_REFERENCE.md §3.1, shopee-payment-docs.md §8.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 300;
+export const maxDuration = 55;
 
 const JOB_NAME = 'sync_orders';
-const THROTTLE_MS = 500;
+const MAX_ELAPSED_MS = 45 * 1000;
+const THROTTLE_MS = 300;
 const WINDOW_OVERLAP_SEC = 5 * 60;
-const BACKFILL_WINDOW_DAYS = 15;
+const FIRST_RUN_DAYS = 3;
 const WINDOW_MAX_DAYS = 14;
+const LIST_PAGE_SIZE = 50;
 const DETAIL_CHUNK = 50;
-const LIST_PAGE_SIZE = 100;
 
 const DETAIL_FIELDS = [
   'total_amount', 'pay_time', 'item_list', 'payment_method',
@@ -34,16 +39,8 @@ const DETAIL_FIELDS = [
   'actual_shipping_fee', 'cod', 'pickup_done_time',
 ].join(',');
 
-interface OrderListItem {
-  order_sn: string;
-  order_status?: string;
-}
-interface OrderListResponse {
-  more?: boolean;
-  next_cursor?: string;
-  order_list?: OrderListItem[];
-}
-
+interface OrderListItem { order_sn: string; order_status?: string }
+interface OrderListResp { more?: boolean; next_cursor?: string; order_list?: OrderListItem[] }
 interface OrderDetailItem {
   order_sn: string;
   order_status?: string;
@@ -60,114 +57,114 @@ interface OrderDetailItem {
   fulfillment_flag?: string;
   cod?: boolean;
 }
-interface OrderDetailResponse {
-  order_list?: OrderDetailItem[];
+interface OrderDetailResp { order_list?: OrderDetailItem[] }
+
+type StoppedReason =
+  | 'complete'
+  | 'page_limit'
+  | 'window_advanced'
+  | 'timeout'
+  | 'already_running'
+  | 'no_shops';
+
+interface Summary {
+  job: string;
+  shop_id: number | null;
+  processed: number;
+  enqueued: number;
+  duration_ms: number;
+  stopped_reason: StoppedReason;
+  next_cursor: string | null;
+  window?: { from: string; to: string };
 }
 
-interface ShopResult {
-  shop_id: number;
-  orders?: number;
-  enqueued?: number;
-  skipped?: boolean;
-  reason?: string;
-  error?: string;
-}
+async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<Summary> {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+  const timeLeft = () => MAX_ELAPSED_MS - elapsed();
 
-async function syncOneShop(shop: ActiveShop): Promise<ShopResult> {
   const acquired = await lockCheckpoint(shop.shop_id, JOB_NAME);
   if (!acquired) {
-    console.log(`[shopee-sync][orders] shop_id=${shop.shop_id} já está rodando — skip`);
-    return { shop_id: shop.shop_id, skipped: true, reason: 'already_running' };
+    return {
+      job: JOB_NAME, shop_id: shop.shop_id, processed: 0, enqueued: 0,
+      duration_ms: elapsed(), stopped_reason: 'already_running', next_cursor: null,
+    };
   }
 
   try {
     const supabase = createServiceClient();
     const { data: ck } = await supabase
       .from('shopee_sync_checkpoint')
-      .select('last_window_to, last_success_at')
+      .select('last_window_from, last_window_to, last_cursor, last_success_at')
       .eq('shop_id', shop.shop_id)
       .eq('job_name', JOB_NAME)
       .single();
 
     const nowSec = Math.floor(Date.now() / 1000);
-    let fromSec: number;
-    if (ck?.last_success_at && ck.last_window_to) {
-      fromSec =
-        Math.floor(new Date(ck.last_window_to).getTime() / 1000) - WINDOW_OVERLAP_SEC;
+    let windowFromSec: number;
+    let windowToSec: number;
+    let cursor = '';
+
+    if (forcedDays) {
+      windowFromSec = nowSec - forcedDays * 86400;
+      windowToSec = nowSec;
+    } else if (ck?.last_cursor && ck.last_window_from && ck.last_window_to) {
+      windowFromSec = Math.floor(new Date(ck.last_window_from).getTime() / 1000);
+      windowToSec = Math.floor(new Date(ck.last_window_to).getTime() / 1000);
+      cursor = ck.last_cursor;
+    } else if (ck?.last_success_at && ck.last_window_to) {
+      const prevTo = Math.floor(new Date(ck.last_window_to).getTime() / 1000);
+      windowFromSec = prevTo - WINDOW_OVERLAP_SEC;
+      windowToSec = Math.min(windowFromSec + WINDOW_MAX_DAYS * 86400, nowSec);
     } else {
-      fromSec = nowSec - BACKFILL_WINDOW_DAYS * 86400;
+      windowFromSec = nowSec - FIRST_RUN_DAYS * 86400;
+      windowToSec = nowSec;
     }
 
-    let totalOrders = 0;
-    let totalEnqueued = 0;
-    let windowFrom = fromSec;
+    const windowFromIso = new Date(windowFromSec * 1000).toISOString();
+    const windowToIso = new Date(windowToSec * 1000).toISOString();
 
-    while (windowFrom < nowSec) {
-      const windowTo = Math.min(windowFrom + WINDOW_MAX_DAYS * 86400, nowSec);
-      const r = await syncWindow(shop, windowFrom, windowTo);
-      totalOrders += r.orders;
-      totalEnqueued += r.enqueued;
-      windowFrom = windowTo;
-    }
-
-    await updateCheckpoint(shop.shop_id, JOB_NAME, {
-      last_window_from: new Date(fromSec * 1000).toISOString(),
-      last_window_to: new Date(nowSec * 1000).toISOString(),
-      last_success_at: new Date().toISOString(),
-      last_error_at: null,
-      last_error_message: null,
-      is_running: false,
-    });
-
-    console.log(
-      `[shopee-sync][orders] shop_id=${shop.shop_id} ok: ${totalOrders} pedidos, ${totalEnqueued} enfileirados`,
-    );
-    return { shop_id: shop.shop_id, orders: totalOrders, enqueued: totalEnqueued };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'unknown';
-    console.error(`[shopee-sync][orders] shop_id=${shop.shop_id} ERRO:`, msg);
-    await updateCheckpoint(shop.shop_id, JOB_NAME, {
-      last_error_at: new Date().toISOString(),
-      last_error_message: msg,
-      is_running: false,
-    });
-    return { shop_id: shop.shop_id, error: msg };
-  }
-}
-
-async function syncWindow(shop: ActiveShop, timeFrom: number, timeTo: number) {
-  const supabase = createServiceClient();
-  let cursor = '';
-  let ordersProcessed = 0;
-  let enqueued = 0;
-
-  while (true) {
-    const listResp = await shopeeCallWithRefresh<OrderListResponse>(
+    const listResp = await shopeeCallWithRefresh<OrderListResp>(
       shop,
       '/api/v2/order/get_order_list',
       {
         time_range_field: 'update_time',
-        time_from: timeFrom,
-        time_to: timeTo,
+        time_from: windowFromSec,
+        time_to: windowToSec,
         page_size: LIST_PAGE_SIZE,
         cursor,
       },
     );
     await sleep(THROTTLE_MS);
 
-    const snList = (listResp.response?.order_list ?? []).map((o: OrderListItem) => o.order_sn);
-    if (snList.length === 0) break;
+    const snList = (listResp.response?.order_list ?? []).map(o => o.order_sn);
+    const more = listResp.response?.more === true;
+    const nextCursorApi = listResp.response?.next_cursor || null;
 
-    for (let i = 0; i < snList.length; i += DETAIL_CHUNK) {
-      const chunk = snList.slice(i, i + DETAIL_CHUNK);
+    let processed = 0;
+    let enqueued = 0;
 
-      const detailResp = await shopeeCallWithRefresh<OrderDetailResponse>(
+    if (snList.length > 0) {
+      if (timeLeft() < 5000) {
+        await updateCheckpoint(shop.shop_id, JOB_NAME, {
+          last_window_from: windowFromIso,
+          last_window_to: windowToIso,
+          last_cursor: cursor || null,
+          is_running: false,
+        });
+        return {
+          job: JOB_NAME, shop_id: shop.shop_id, processed, enqueued,
+          duration_ms: elapsed(), stopped_reason: 'timeout',
+          next_cursor: cursor || null,
+          window: { from: windowFromIso, to: windowToIso },
+        };
+      }
+
+      const chunk = snList.slice(0, DETAIL_CHUNK);
+      const detailResp = await shopeeCallWithRefresh<OrderDetailResp>(
         shop,
         '/api/v2/order/get_order_detail',
-        {
-          order_sn_list: chunk.join(','),
-          response_optional_fields: DETAIL_FIELDS,
-        },
+        { order_sn_list: chunk.join(','), response_optional_fields: DETAIL_FIELDS },
       );
       await sleep(THROTTLE_MS);
 
@@ -218,57 +215,107 @@ async function syncWindow(shop: ActiveShop, timeFrom: number, timeTo: number) {
         const { error } = await supabase
           .from('shopee_pedidos')
           .upsert(rows, { onConflict: 'shop_id,order_sn' });
-        if (error) throw new Error(`UPSERT shopee_pedidos falhou: ${error.message}`);
+        if (error) throw new Error(`UPSERT shopee_pedidos: ${error.message}`);
       }
 
       for (const item of items) {
         const prev = snToPrev[item.order_sn];
         if (item.order_status === 'COMPLETED' && prev?.order_status !== 'COMPLETED') {
           const created = await enqueueAction(
-            shop.shop_id,
-            'escrow',
-            item.order_sn,
-            'fetch_escrow_detail',
-            3,
+            shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 3,
           );
           if (created) enqueued++;
         }
       }
 
-      ordersProcessed += items.length;
+      processed = items.length;
     }
 
-    if (!listResp.response?.more) break;
-    cursor = listResp.response?.next_cursor ?? '';
-    if (!cursor) break;
-  }
+    let stoppedReason: StoppedReason;
+    let nextCursorOut: string | null = null;
 
-  return { orders: ordersProcessed, enqueued };
+    if (more && nextCursorApi) {
+      stoppedReason = 'page_limit';
+      nextCursorOut = nextCursorApi;
+      await updateCheckpoint(shop.shop_id, JOB_NAME, {
+        last_window_from: windowFromIso,
+        last_window_to: windowToIso,
+        last_cursor: nextCursorApi,
+        is_running: false,
+      });
+    } else if (windowToSec < nowSec - 60) {
+      stoppedReason = 'window_advanced';
+      await updateCheckpoint(shop.shop_id, JOB_NAME, {
+        last_window_from: windowFromIso,
+        last_window_to: windowToIso,
+        last_cursor: null,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
+        is_running: false,
+      });
+    } else {
+      stoppedReason = 'complete';
+      await updateCheckpoint(shop.shop_id, JOB_NAME, {
+        last_window_from: windowFromIso,
+        last_window_to: new Date(nowSec * 1000).toISOString(),
+        last_cursor: null,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
+        is_running: false,
+      });
+    }
+
+    console.log(
+      `[shopee-sync][orders] shop_id=${shop.shop_id} processed=${processed} enqueued=${enqueued} reason=${stoppedReason} elapsed=${elapsed()}ms`,
+    );
+
+    return {
+      job: JOB_NAME, shop_id: shop.shop_id, processed, enqueued,
+      duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: nextCursorOut,
+      window: { from: windowFromIso, to: windowToIso },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    console.error(`[shopee-sync][orders] shop_id=${shop.shop_id} ERRO:`, msg);
+    await updateCheckpoint(shop.shop_id, JOB_NAME, {
+      last_error_at: new Date().toISOString(),
+      last_error_message: msg,
+      is_running: false,
+    });
+    throw err;
+  }
 }
 
 export async function GET(request: NextRequest) {
-  const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
-  const all = await getActiveShops();
-  const target = shopIdRaw ? all.filter(s => s.shop_id === Number(shopIdRaw)) : all;
+  const shopIdParam = request.nextUrl.searchParams.get('shop_id');
+  const daysRaw = request.nextUrl.searchParams.get('days');
 
-  if (target.length === 0) {
-    return NextResponse.json({ error: 'Nenhuma loja ativa encontrada' }, { status: 404 });
+  let forcedDays: number | null = null;
+  if (daysRaw != null) {
+    const parsed = Number(daysRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return NextResponse.json({ error: 'days deve ser inteiro positivo' }, { status: 400 });
+    }
+    forcedDays = parsed;
   }
 
-  console.log(`[shopee-sync][orders] iniciando — ${target.length} loja(s)`);
-  const results: ShopResult[] = [];
-  for (const shop of target) {
-    results.push(await syncOneShop(shop));
+  const shop = await resolveTargetShop(JOB_NAME, shopIdParam);
+  if (!shop) {
+    return NextResponse.json({
+      job: JOB_NAME, shop_id: null, processed: 0, enqueued: 0,
+      duration_ms: 0, stopped_reason: 'no_shops' as const, next_cursor: null,
+    });
   }
 
-  const summary = {
-    job: JOB_NAME,
-    shops_processed: results.length,
-    orders: results.reduce((s, r) => s + (r.orders ?? 0), 0),
-    enqueued: results.reduce((s, r) => s + (r.enqueued ?? 0), 0),
-    errors: results.filter(r => r.error).length,
-    results,
-  };
-  console.log('[shopee-sync][orders] concluído:', summary);
-  return NextResponse.json(summary);
+  try {
+    return NextResponse.json(await runOneShop(shop, forcedDays));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    return NextResponse.json(
+      { job: JOB_NAME, shop_id: shop.shop_id, error: msg },
+      { status: 502 },
+    );
+  }
 }

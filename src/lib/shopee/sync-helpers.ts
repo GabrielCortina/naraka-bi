@@ -57,6 +57,56 @@ export async function getShopById(shopId: number): Promise<ActiveShop | null> {
   return (data as ActiveShop | null) ?? null;
 }
 
+// Round-robin: seleciona a loja mais atrasada para este job (last_success_at
+// ASC, nulls first). Permite que cada execução do cron foque em UMA loja —
+// com 3 lojas e cron 10min, cada loja é processada ~a cada 30min.
+export async function pickNextShop(jobName: string): Promise<ActiveShop | null> {
+  const shops = await getActiveShops();
+  if (shops.length === 0) return null;
+  if (shops.length === 1) return shops[0];
+
+  const supabase = createServiceClient();
+  const { data: checkpoints } = await supabase
+    .from('shopee_sync_checkpoint')
+    .select('shop_id, last_success_at')
+    .eq('job_name', jobName)
+    .in(
+      'shop_id',
+      shops.map(s => s.shop_id),
+    );
+
+  const lastMap = new Map<number, string | null>();
+  for (const c of checkpoints ?? []) {
+    lastMap.set(c.shop_id as number, (c.last_success_at as string | null) ?? null);
+  }
+
+  shops.sort((a, b) => {
+    const la = lastMap.get(a.shop_id) ?? null;
+    const lb = lastMap.get(b.shop_id) ?? null;
+    if (la === null && lb === null) return a.shop_id - b.shop_id;
+    if (la === null) return -1;
+    if (lb === null) return 1;
+    return la.localeCompare(lb);
+  });
+
+  return shops[0];
+}
+
+// Resolve a loja-alvo para um job:
+// - Se shopIdParam foi informado: usa exatamente essa loja (manual override).
+// - Senão: round-robin via pickNextShop.
+export async function resolveTargetShop(
+  jobName: string,
+  shopIdParam: string | null,
+): Promise<ActiveShop | null> {
+  if (shopIdParam) {
+    const id = Number(shopIdParam);
+    if (!Number.isFinite(id)) return null;
+    return await getShopById(id);
+  }
+  return await pickNextShop(jobName);
+}
+
 // Busca o checkpoint. Cria row se ainda não existe. Auto-libera lock travado > 15min.
 export async function getCheckpoint(shopId: number, jobName: string): Promise<Checkpoint> {
   const supabase = createServiceClient();

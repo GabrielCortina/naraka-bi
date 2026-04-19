@@ -1,23 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 import {
-  getActiveShops,
+  resolveTargetShop,
   shopeeCallWithRefresh,
   sleep,
   fmtDMY,
+  updateCheckpoint,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
 
-// Sync de Shopee Ads daily. Janela fixa últimos 7 dias (rotina diária).
-// ⚠️ BR exige formato DD-MM-YYYY em start_date/end_date — YYYY-MM-DD é rejeitado.
-// Ref: SHOPEE_API_REFERENCE.md §3.7.
+// Sync Ads daily (últimos 7 dias). Uma loja por execução — round-robin.
+// ⚠️ BR exige DD-MM-YYYY em start_date/end_date. Ref: SHOPEE_API_REFERENCE.md §3.7.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 120;
+export const maxDuration = 55;
 
 const JOB_NAME = 'sync_ads';
-const THROTTLE_MS = 500;
+const MAX_ELAPSED_MS = 45 * 1000;
+const THROTTLE_MS = 300;
 const LOOKBACK_DAYS = 7;
 
 interface DailyPerformance {
@@ -43,13 +44,8 @@ interface AdsResp {
   daily_performance?: DailyPerformance[];
 }
 
-interface ShopResult {
-  shop_id: number;
-  days?: number;
-  error?: string;
-}
+type StoppedReason = 'complete' | 'timeout' | 'no_shops';
 
-// Shopee retorna date em DD-MM-YYYY nos BR. Normaliza para YYYY-MM-DD (DATE do PG).
 function normalizeDate(d: string | undefined): string | null {
   if (!d) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
@@ -58,10 +54,20 @@ function normalizeDate(d: string | undefined): string | null {
   return null;
 }
 
-async function syncOneShop(shop: ActiveShop): Promise<ShopResult> {
+async function runOneShop(shop: ActiveShop) {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+
   try {
     const nowSec = Math.floor(Date.now() / 1000);
     const fromSec = nowSec - LOOKBACK_DAYS * 86400;
+
+    if (elapsed() > MAX_ELAPSED_MS) {
+      return {
+        job: JOB_NAME, shop_id: shop.shop_id, processed: 0,
+        duration_ms: elapsed(), stopped_reason: 'timeout' as StoppedReason, next_cursor: null,
+      };
+    }
 
     const resp = await shopeeCallWithRefresh<AdsResp>(
       shop,
@@ -70,7 +76,6 @@ async function syncOneShop(shop: ActiveShop): Promise<ShopResult> {
     );
     await sleep(THROTTLE_MS);
 
-    // A resposta pode vir em response.shop_performance.daily_performance ou response.daily_performance
     const daily =
       resp.response?.shop_performance?.daily_performance ??
       resp.response?.daily_performance ??
@@ -107,29 +112,47 @@ async function syncOneShop(shop: ActiveShop): Promise<ShopResult> {
       if (error) throw new Error(`UPSERT shopee_ads_daily: ${error.message}`);
     }
 
+    await updateCheckpoint(shop.shop_id, JOB_NAME, {
+      last_success_at: new Date().toISOString(),
+      last_error_at: null,
+      last_error_message: null,
+      is_running: false,
+    });
+
     console.log(`[shopee-sync][ads] shop_id=${shop.shop_id} days=${rows.length}`);
-    return { shop_id: shop.shop_id, days: rows.length };
+    return {
+      job: JOB_NAME, shop_id: shop.shop_id, processed: rows.length,
+      duration_ms: elapsed(), stopped_reason: 'complete' as StoppedReason, next_cursor: null,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown';
     console.error(`[shopee-sync][ads] shop_id=${shop.shop_id} ERRO:`, msg);
-    return { shop_id: shop.shop_id, error: msg };
+    await updateCheckpoint(shop.shop_id, JOB_NAME, {
+      last_error_at: new Date().toISOString(),
+      last_error_message: msg,
+      is_running: false,
+    });
+    throw err;
   }
 }
 
 export async function GET(request: NextRequest) {
-  const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
-  const all = await getActiveShops();
-  const target = shopIdRaw ? all.filter(s => s.shop_id === Number(shopIdRaw)) : all;
-  if (target.length === 0) return NextResponse.json({ error: 'Nenhuma loja ativa' }, { status: 404 });
+  const shopIdParam = request.nextUrl.searchParams.get('shop_id');
+  const shop = await resolveTargetShop(JOB_NAME, shopIdParam);
+  if (!shop) {
+    return NextResponse.json({
+      job: JOB_NAME, shop_id: null, processed: 0, duration_ms: 0,
+      stopped_reason: 'no_shops' as const, next_cursor: null,
+    });
+  }
 
-  const results: ShopResult[] = [];
-  for (const shop of target) results.push(await syncOneShop(shop));
-
-  return NextResponse.json({
-    job: JOB_NAME,
-    shops_processed: results.length,
-    days_synced: results.reduce((s, r) => s + (r.days ?? 0), 0),
-    errors: results.filter(r => r.error).length,
-    results,
-  });
+  try {
+    return NextResponse.json(await runOneShop(shop));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    return NextResponse.json(
+      { job: JOB_NAME, shop_id: shop.shop_id, error: msg },
+      { status: 502 },
+    );
+  }
 }

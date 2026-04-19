@@ -1,24 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
-import { getActiveShops, type ActiveShop } from '@/lib/shopee/sync-helpers';
+import {
+  resolveTargetShop,
+  updateCheckpoint,
+  type ActiveShop,
+} from '@/lib/shopee/sync-helpers';
 
-// Reconciliação Tiny × Shopee por pedido. Classifica cada pedido em um dos
-// 14 estados (SHOPEE_API_REFERENCE.md §7) e UPSERTA em shopee_conciliacao.
-// Toda mudança de classificação gera uma linha em shopee_conciliacao_log.
-//
-// Estratégia: iterar shopee_pedidos (cada um com shop_id conhecido) nas
-// últimas 60 dias e LEFT JOIN com Tiny por order_sn. Pedidos do Tiny sem
-// contraparte na Shopee (SEM_VINCULO_FINANCEIRO) requerem shop_id inferido
-// — TODO, deixado fora do MVP.
+// Reconciliação Tiny × Shopee. Uma loja por execução — round-robin.
+// Processa pedidos dos últimos LOOKBACK_DAYS em lotes de CHUNK. Para assim
+// que elapsed > MAX_ELAPSED_MS, salvando progresso implicitamente (idempotente).
+// Ref: SHOPEE_API_REFERENCE.md §7 (14 estados).
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 300;
+export const maxDuration = 55;
 
 const JOB_NAME = 'run_reconciliation';
+const MAX_ELAPSED_MS = 45 * 1000;
 const LOOKBACK_DAYS = 60;
 const SLA_DAYS = 15;
 const DIVERGENCE_TOLERANCE_PCT = 1.0;
+const PROCESS_LIMIT = 1000;
+const UPSERT_CHUNK = 500;
 
 interface ShopeePedidoRow {
   shop_id: number;
@@ -69,12 +72,9 @@ function classify(
   returns: ShopeeReturnRow[],
   tiny: TinyPedidoRow | null,
 ): Classification {
-  if (!tiny) {
-    return { classificacao: 'ORFAO_SHOPEE', severidade: 'critical' };
-  }
+  if (!tiny) return { classificacao: 'ORFAO_SHOPEE', severidade: 'critical' };
 
   const status = p.order_status;
-
   if (status === 'CANCELLED' || status === 'IN_CANCEL') {
     return { classificacao: 'CANCELADO', severidade: 'info' };
   }
@@ -174,50 +174,61 @@ function buildRow(
     order_sn: p.order_sn,
     tiny_pedido_id: tiny?.id ?? null,
     tiny_numero_pedido: tiny?.numero_pedido ?? null,
-
     status_tiny: tiny ? String(tiny.situacao) : null,
     data_entrega_tiny: tiny?.data_entrega ?? null,
-
     status_shopee: p.order_status,
     data_completed_shopee: p.complete_time,
-
     valor_bruto_shopee: valorBrutoShopee,
     valor_liquido_shopee: valorLiquidoShopee,
     valor_comissao: escrow?.commission_fee ?? null,
     valor_taxa_servico: escrow?.service_fee ?? null,
     valor_frete_liquido: valorFreteLiquido,
     valor_reembolso: ret?.refund_amount ?? escrow?.seller_return_refund ?? null,
-
     valor_bruto_tiny: valorBrutoTiny,
     divergencia_valor: divergenciaValor,
     divergencia_percentual: divergenciaPercentual,
-
     data_escrow_release: escrow?.escrow_release_time ?? null,
     valor_pago: escrow?.payout_amount ?? escrow?.escrow_amount ?? null,
     dias_para_pagamento: diasParaPagamento,
-
     classificacao: cls.classificacao,
     classificacao_severidade: cls.severidade,
-
     processado_em: now,
   };
 }
 
-async function reconcileOneShop(shop: ActiveShop) {
+type StoppedReason = 'complete' | 'timeout' | 'no_shops';
+
+async function runOneShop(shop: ActiveShop) {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
   const supabase = createServiceClient();
   const sinceIso = new Date(Date.now() - LOOKBACK_DAYS * 86400000).toISOString();
 
-  const { data: pedidos, error: errP } = await supabase
+  const { data: pedidosData, error: errP } = await supabase
     .from('shopee_pedidos')
     .select('shop_id, order_sn, order_status, complete_time, update_time')
     .eq('shop_id', shop.shop_id)
-    .gte('update_time', sinceIso);
+    .gte('update_time', sinceIso)
+    .order('update_time', { ascending: false })
+    .limit(PROCESS_LIMIT);
   if (errP) throw new Error(`fetch shopee_pedidos: ${errP.message}`);
-  if (!pedidos || pedidos.length === 0) {
-    return { shop_id: shop.shop_id, total: 0, changed: 0, by_class: {} };
+
+  const pedidos = (pedidosData as ShopeePedidoRow[] | null) ?? [];
+  if (pedidos.length === 0) {
+    await updateCheckpoint(shop.shop_id, JOB_NAME, {
+      last_success_at: new Date().toISOString(),
+      last_error_at: null,
+      last_error_message: null,
+      is_running: false,
+    });
+    return {
+      job: JOB_NAME, shop_id: shop.shop_id, processed: 0, changed: 0,
+      duration_ms: elapsed(), stopped_reason: 'complete' as StoppedReason, next_cursor: null,
+      by_class: {},
+    };
   }
 
-  const orderSns = pedidos.map(p => p.order_sn as string);
+  const orderSns = pedidos.map(p => p.order_sn);
 
   const [escrowsRes, returnsRes, tinyRes, existingRes] = await Promise.all([
     supabase
@@ -253,7 +264,6 @@ async function reconcileOneShop(shop: ActiveShop) {
     list.push(r);
     returnsBySn.set(r.order_sn, list);
   }
-  // Ordenar returns mais recentes primeiro
   Array.from(returnsBySn.values()).forEach((list: ShopeeReturnRow[]) => {
     list.sort((a, b) => (b.update_time ?? '').localeCompare(a.update_time ?? ''));
   });
@@ -278,8 +288,15 @@ async function reconcileOneShop(shop: ActiveShop) {
     dados_snapshot: unknown;
   }> = [];
   const byClass: Record<string, number> = {};
+  let stoppedReason: StoppedReason = 'complete';
+  let processed = 0;
 
-  for (const p of pedidos as ShopeePedidoRow[]) {
+  for (const p of pedidos) {
+    if (elapsed() >= MAX_ELAPSED_MS) {
+      stoppedReason = 'timeout';
+      break;
+    }
+
     const tiny = tinyBySn.get(p.order_sn) ?? null;
     const escrow = escrowBySn.get(p.order_sn) ?? null;
     const rets = returnsBySn.get(p.order_sn) ?? [];
@@ -305,12 +322,15 @@ async function reconcileOneShop(shop: ActiveShop) {
         },
       });
     }
+    processed++;
   }
 
-  // Bulk UPSERT em chunks (Supabase limita tamanho de request)
-  const CHUNK = 500;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
+  for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+    if (elapsed() >= MAX_ELAPSED_MS) {
+      stoppedReason = 'timeout';
+      break;
+    }
+    const chunk = rows.slice(i, i + UPSERT_CHUNK);
     const { error } = await supabase
       .from('shopee_conciliacao')
       .upsert(chunk, { onConflict: 'shop_id,order_sn' });
@@ -322,40 +342,42 @@ async function reconcileOneShop(shop: ActiveShop) {
     if (error) console.error('[shopee-sync][reconciliation] log insert:', error.message);
   }
 
+  await updateCheckpoint(shop.shop_id, JOB_NAME, {
+    last_success_at: stoppedReason === 'complete' ? new Date().toISOString() : null,
+    last_error_at: null,
+    last_error_message: null,
+    is_running: false,
+  });
+
   console.log(
-    `[shopee-sync][reconciliation] shop_id=${shop.shop_id} total=${rows.length} changed=${logs.length} byClass=`,
+    `[shopee-sync][reconciliation] shop_id=${shop.shop_id} processed=${processed}/${pedidos.length} changed=${logs.length} reason=${stoppedReason} byClass=`,
     byClass,
   );
 
-  return { shop_id: shop.shop_id, total: rows.length, changed: logs.length, by_class: byClass };
+  return {
+    job: JOB_NAME, shop_id: shop.shop_id, processed, changed: logs.length,
+    duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: null,
+    by_class: byClass,
+  };
 }
 
 export async function GET(request: NextRequest) {
-  const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
-  const all = await getActiveShops();
-  const target = shopIdRaw ? all.filter(s => s.shop_id === Number(shopIdRaw)) : all;
-  if (target.length === 0) return NextResponse.json({ error: 'Nenhuma loja ativa' }, { status: 404 });
-
-  const results = [];
-  for (const shop of target) {
-    try {
-      results.push(await reconcileOneShop(shop));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'unknown';
-      console.error(`[shopee-sync][reconciliation] shop_id=${shop.shop_id} ERRO:`, msg);
-      results.push({ shop_id: shop.shop_id, error: msg });
-    }
+  const shopIdParam = request.nextUrl.searchParams.get('shop_id');
+  const shop = await resolveTargetShop(JOB_NAME, shopIdParam);
+  if (!shop) {
+    return NextResponse.json({
+      job: JOB_NAME, shop_id: null, processed: 0, changed: 0, duration_ms: 0,
+      stopped_reason: 'no_shops' as const, next_cursor: null,
+    });
   }
 
-  const total = results.reduce((s, r) => s + ('total' in r ? r.total : 0), 0);
-  const changed = results.reduce((s, r) => s + ('changed' in r ? r.changed : 0), 0);
-
-  return NextResponse.json({
-    job: JOB_NAME,
-    shops_processed: results.length,
-    total,
-    changed,
-    errors: results.filter(r => 'error' in r).length,
-    results,
-  });
+  try {
+    return NextResponse.json(await runOneShop(shop));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    return NextResponse.json(
+      { job: JOB_NAME, shop_id: shop.shop_id, error: msg },
+      { status: 502 },
+    );
+  }
 }
