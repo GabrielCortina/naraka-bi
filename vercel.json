@@ -23,6 +23,34 @@
     {
       "path": "/api/alertas/whatsapp",
       "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/shopee/sync/orders",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/worker",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/escrow-list",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/wallet",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/returns",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/ads",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/shopee/sync/reconciliation",
+      "schedule": "*/15 * * * *"
     }
   ]
 }
