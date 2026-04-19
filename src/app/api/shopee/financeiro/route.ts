@@ -186,7 +186,7 @@ async function fetchPeriod(
   shopIds: number[],
 ): Promise<PeriodData> {
   // 1. Pedidos no período (order_sn + create_time) — backbone dos joins.
-  let pedidosQ = supabase
+  const pedidosQ = supabase
     .from('shopee_pedidos')
     .select('order_sn, create_time')
     .gte('create_time', fromIso)

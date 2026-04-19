@@ -483,7 +483,7 @@ export default function FinanceiroShopeePage() {
             <div className="card p-4 rounded-lg mb-4">
               <h3 className="text-xs font-medium opacity-70 mb-3">Detalhamento de outros custos</h3>
               {data.outros_custos_detalhe.length === 0 ? (
-                <p className="text-xs opacity-40">Nenhum custo "outros" no período</p>
+                <p className="text-xs opacity-40">Nenhum custo classificado como &quot;outros&quot; no período</p>
               ) : (
                 <>
                   <div className="overflow-x-auto">
