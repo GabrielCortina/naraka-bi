@@ -78,11 +78,14 @@ function buildCall(
 
     case 'order_detail':
       if (!orderSn) return { error: 'query param order_sn é obrigatório para test=order_detail' };
+      // get_order_detail é GET (metadata: method:2). order_sn_list e response_optional_fields
+      // são strings CSV na query string — NÃO arrays JSON no body.
+      // Ref: shopee-payment-docs.md §8 + _metadata.json.
       return {
         path: '/api/v2/order/get_order_detail',
-        method: 'POST',
+        method: 'GET',
         params: {
-          order_sn_list: [orderSn],
+          order_sn_list: orderSn,
           response_optional_fields: [
             'buyer_user_id', 'buyer_username', 'estimated_shipping_fee',
             'recipient_address', 'actual_shipping_fee', 'goods_to_declare',
@@ -95,7 +98,7 @@ function buildCall(
             'invoice_data', 'checkout_shipping_carrier', 'reverse_shipping_fee',
             'order_chargeable_weight_gram', 'edt',
             'prescription_images', 'prescription_check_status',
-          ],
+          ].join(','),
         },
       };
 

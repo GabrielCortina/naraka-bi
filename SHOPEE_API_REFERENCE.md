@@ -14,24 +14,30 @@ Live Partner ID: 2033268
 App Category: Seller In House System (acesso total a todas as APIs)
 App Status: Online (produção — Go Live aprovado)
 Redirect URL: https://naraka-bi.vercel.app
-Sandbox Host (auth + API):   https://openplatform.sandbox.test-stable.shopee.sg  [C]
-Production Auth Host:        https://partner.shopeemobile.com                   [C]
-Production API Host (BR):    https://openplatform.shopee.com.br                 [C]
 API Base Path: /api/v2/
 
-⚠️ ATENÇÃO — produção BR usa DOIS hosts diferentes:
-  • OAuth (shop/auth_partner, auth/token/get, auth/access_token/get) → `partner.shopeemobile.com`
-  • Chamadas /api/v2/* autenticadas (order, payment, logistics...)   → `openplatform.shopee.com.br`
+**Hosts oficiais por região (doc oficial — shopee-docs-oficial.md §1):**
 
-Trocar um pelo outro falha silenciosamente:
-  • `partner.shopeemobile.com` em /api/v2/*           → HTTP 404 "page not found"
-  • `openplatform.shopee.com.br` em /shop/auth_partner → não redireciona para autorização
+| Região / Mercado        | Produção                              | Sandbox                                            |
+|-------------------------|---------------------------------------|----------------------------------------------------|
+| Global (SEA/ID/PH/TH...) | `https://partner.shopeemobile.com`    | `https://openplatform.sandbox.test-stable.shopee.sg` |
+| **Brasil (BR)**         | `https://openplatform.shopee.com.br`  | (usar sandbox Global — não há sandbox BR exclusiva)  |
+| China Continental (CNSC)| `https://openplatform.shopee.cn`      | `https://openplatform.sandbox.test-stable.shopee.cn` |
 
-No sandbox o host é o mesmo para ambos os fluxos. A distinção só existe em produção.
-Implementação: `getShopeeAuthHost()` vs `getShopeeApiHost()` em src/lib/shopee/config.ts.
+**Config do projeto (BR em produção):**
+- `getShopeeAuthHost()` → `openplatform.shopee.com.br`
+- `getShopeeApiHost()`  → `openplatform.shopee.com.br`
+- Sandbox (ambos) → `openplatform.sandbox.test-stable.shopee.sg`
 
-Host documentado em fontes públicas que NÃO funciona em produção BR:
-  • `partner.shopeemobile.com` para chamadas /api/v2/* → é o host SEA, não BR.
+⚠️ **Decisão empírica:** a doc oficial (§1.2) lista o fluxo de OAuth em `partner.shopeemobile.com`
+para "Produção Global" (sem entrada para BR). Testamos empiricamente que, para produção BR,
+tanto OAuth quanto /api/v2/* usam `openplatform.shopee.com.br`. Tokens emitidos por
+`partner.shopeemobile.com` são rejeitados por `openplatform.shopee.com.br` com
+`invalid access_token` — a Shopee mantém base de tokens isolada por região/host.
+
+Outros hosts vistos em fontes públicas que NÃO funcionam em BR:
+  • `partner.shopeemobile.com` para /api/v2/*                      → HTTP 404
+  • `partner.test-stable.shopeemobile.com` para sandbox            → "Wrong sign" mesmo com HMAC correto
 
 ⚠️ Access to Sensitive Data: **No access** concedido pela Shopee no Go Live.
 Impacta APENAS dados do buyer (nome completo, telefone, endereço) — esses
@@ -108,7 +114,7 @@ sign = HMAC-SHA256(partner_key, {partner_id}{path}{timestamp}{access_token}{shop
 | Endpoint | Método | Descrição |
 |----------|--------|-----------|
 | /api/v2/order/get_order_list | GET | Lista pedidos por período (janela ~15 dias max [I]) |
-| /api/v2/order/get_order_detail | POST | Detalhes de até 50 pedidos por chamada |
+| /api/v2/order/get_order_detail | GET | Detalhes de até 50 pedidos por chamada (⚠️ GET, não POST) |
 | /api/v2/order/get_shipment_list | GET | Pedidos READY_TO_SHIP |
 | /api/v2/order/cancel_order | POST | Cancelar pedido |
 | /api/v2/order/handle_buyer_cancellation | POST | Aceitar/rejeitar cancelamento do buyer |
@@ -176,12 +182,47 @@ sign = HMAC-SHA256(partner_key, {partner_id}{path}{timestamp}{access_token}{shop
 - Janela aceita até 30 dias por chamada [C — confirmado sandbox BR]
 - Útil para buscar em lote por período
 
-**get_wallet_transaction_list [C]:**
+**get_wallet_transaction_list [C — doc oficial + empírico]:**
 - create_time_from / create_time_to
-- Janela MAX 15 dias por chamada — acima disso retorna `time_invalid` [C — confirmado sandbox BR]
-- Retorna transações com: transaction_id, amount, transaction_type, status, create_time
-- transaction_type pode incluir [?]: ORDER_INCOME, ADS_SPEND, WITHDRAWAL, REFUND, ADJUSTMENT
-- Pode ou não vincular order_sn por transação [? — TESTAR NO SANDBOX]
+- Janela MAX 15 dias por chamada — acima disso retorna `time_invalid` [C]
+- Only applicable for **local shops** (CB usa get_payout_detail).
+- Resposta inclui: `status` (FAILED/COMPLETED/PENDING/INITIAL), `transaction_type`, `amount`,
+  `current_balance`, `create_time`, `order_sn`, `refund_sn`, `withdrawal_type`,
+  `transaction_fee`, `description`, `buyer_name`, `pay_order_list[]`, `withdrawal_id`,
+  `reason`, `root_withdrawal_id`, `transaction_tab_type`, `money_flow`, `outlet_shop_name`.
+- Filtros opcionais: `transaction_type`, `money_flow` (`MONEY_IN`/`MONEY_OUT`), `wallet_type`, `transaction_tab_type`.
+
+**transaction_type — enum oficial [C — shopee-payment-docs.md §3]:**
+
+| Code | Nome                              | Semântica (BR)                                                          |
+|------|-----------------------------------|-------------------------------------------------------------------------|
+| 101  | `ESCROW_VERIFIED_ADD`             | Escrow verificado, valor creditado ao vendedor (**receita do pedido**)  |
+| 102  | `ESCROW_VERIFIED_MINUS`           | Escrow verificado negativo (cobrado do vendedor)                        |
+| 201  | `WITHDRAWAL_CREATED`              | Saque criado (saldo debitado)                                           |
+| 202  | `WITHDRAWAL_COMPLETED`            | Saque concluído (ongoing diminui)                                       |
+| 203  | `WITHDRAWAL_CANCELLED`            | Saque cancelado (valor volta ao saldo)                                  |
+| 401  | `ADJUSTMENT_ADD`                  | Ajuste positivo                                                         |
+| 402  | `ADJUSTMENT_MINUS`                | Ajuste negativo                                                         |
+| 404  | `FBS_ADJUSTMENT_ADD`              | Ajuste FBS positivo                                                     |
+| 405  | `FBS_ADJUSTMENT_MINUS`            | Ajuste FBS negativo                                                     |
+| 406  | `ADJUSTMENT_CENTER_ADD`           | Adjustment Center positivo                                              |
+| 407  | `ADJUSTMENT_CENTER_DEDUCT`        | Adjustment Center negativo                                              |
+| 408  | `FSF_COST_PASSING_DEDUCT`         | FSF cost passing (pedidos cancelados/inválidos)                         |
+| 450  | `PAID_ADS`                        | **Gasto de Ads debitado do saldo**                                      |
+| 451  | `PAID_ADS_REFUND`                 | Reembolso de Ads                                                        |
+| 452  | `FAST_ESCROW_DISBURSE`            | Primeiro desembolso de fast escrow                                      |
+| 455  | `AFFILIATE_ADS_SELLER_FEE`        | **Taxa de Ads de afiliado debitada**                                    |
+| 456  | `AFFILIATE_ADS_SELLER_FEE_REFUND` | Reembolso de taxa de Ads de afiliado                                    |
+| 458  | `FAST_ESCROW_DEDUCT`              | Fast escrow deduzido (return/refund)                                    |
+| 459  | `FAST_ESCROW_DISBURSE_REMAIN`     | Segundo desembolso de fast escrow                                       |
+| 460  | `AFFILIATE_FEE_DEDUCT`            | **Taxa de afiliado (MKT) debitada**                                     |
+
+Implicações para o módulo financeiro:
+- **Receita de pedido** = somar `ESCROW_VERIFIED_ADD` (101) por `order_sn`.
+- **Gasto Ads** = somar `PAID_ADS` (450) − `PAID_ADS_REFUND` (451) no período.
+- **Gasto Afiliados** = `AFFILIATE_ADS_SELLER_FEE` (455) + `AFFILIATE_FEE_DEDUCT` (460), menos
+  `AFFILIATE_ADS_SELLER_FEE_REFUND` (456). Combinar com AMS performance endpoints para conversão.
+- Transações 450/455/460 geralmente **não** carregam `order_sn` (são por período/campanha).
 
 ### 3.3 Returns (Devoluções) [C]
 
