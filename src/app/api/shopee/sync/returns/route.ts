@@ -24,7 +24,7 @@ const WINDOW_OVERLAP_SEC = 5 * 60;
 const BACKFILL_DAYS = 14;
 const WINDOW_MAX_DAYS = 14;
 const PAGE_SIZE = 20;
-const MAX_PAGES_PER_RUN = 2;
+const MAX_PAGES_PER_RUN = 3;
 
 interface ReturnItem {
   return_sn?: string;

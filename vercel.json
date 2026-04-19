@@ -26,23 +26,23 @@
     },
     {
       "path": "/api/shopee/sync/orders",
-      "schedule": "*/10 * * * *"
-    },
-    {
-      "path": "/api/shopee/sync/worker",
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/shopee/sync/worker",
+      "schedule": "*/2 * * * *"
+    },
+    {
       "path": "/api/shopee/sync/escrow-list",
-      "schedule": "*/30 * * * *"
+      "schedule": "*/10 * * * *"
     },
     {
       "path": "/api/shopee/sync/wallet",
-      "schedule": "*/30 * * * *"
+      "schedule": "*/10 * * * *"
     },
     {
       "path": "/api/shopee/sync/returns",
-      "schedule": "*/30 * * * *"
+      "schedule": "*/15 * * * *"
     },
     {
       "path": "/api/shopee/sync/ads",
@@ -50,7 +50,7 @@
     },
     {
       "path": "/api/shopee/sync/reconciliation",
-      "schedule": "*/15 * * * *"
+      "schedule": "*/10 * * * *"
     }
   ]
 }

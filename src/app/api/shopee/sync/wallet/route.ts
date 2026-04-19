@@ -25,7 +25,7 @@ const WINDOW_OVERLAP_SEC = 5 * 60;
 const BACKFILL_DAYS = 14;
 const WINDOW_MAX_DAYS = 14;
 const PAGE_SIZE = 100;
-const MAX_PAGES_PER_RUN = 2;
+const MAX_PAGES_PER_RUN = 3;
 
 const TYPE_CODE: Record<string, number> = {
   ESCROW_VERIFIED_ADD: 101, ESCROW_VERIFIED_MINUS: 102,

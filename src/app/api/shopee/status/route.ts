@@ -13,7 +13,7 @@ const TRACKED_JOBS: Array<{ job_name: string; label: string }> = [
   { job_name: 'sync_wallet', label: 'Wallet' },
   { job_name: 'sync_returns', label: 'Returns' },
   { job_name: 'sync_ads', label: 'Ads' },
-  { job_name: 'run_reconciliation', label: 'Reconciliação' },
+  { job_name: 'sync_reconciliation', label: 'Reconciliação' },
 ];
 
 function startOfTodayIso(): string {

@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 import {
   resolveTargetShop,
-  updateCheckpoint,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
 
@@ -15,12 +14,12 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const maxDuration = 55;
 
-const JOB_NAME = 'run_reconciliation';
+const JOB_NAME = 'sync_reconciliation';
 const MAX_ELAPSED_MS = 45 * 1000;
 const LOOKBACK_DAYS = 60;
 const SLA_DAYS = 15;
 const DIVERGENCE_TOLERANCE_PCT = 1.0;
-const PROCESS_LIMIT = 1000;
+const PROCESS_LIMIT = 5000;
 const UPSERT_CHUNK = 500;
 
 interface ShopeePedidoRow {
@@ -203,6 +202,22 @@ async function runOneShop(shop: ActiveShop) {
   const elapsed = () => Date.now() - startedAt;
   const supabase = createServiceClient();
   const sinceIso = new Date(Date.now() - LOOKBACK_DAYS * 86400000).toISOString();
+  const nowIso = new Date().toISOString();
+
+  const upsertCheckpoint = async (patch: Record<string, unknown>) => {
+    const { error } = await supabase.from('shopee_sync_checkpoint').upsert(
+      {
+        shop_id: shop.shop_id,
+        job_name: JOB_NAME,
+        last_window_from: sinceIso,
+        last_window_to: nowIso,
+        is_running: false,
+        ...patch,
+      },
+      { onConflict: 'shop_id,job_name' },
+    );
+    if (error) console.error('[shopee-sync][reconciliation] checkpoint upsert:', error.message);
+  };
 
   const { data: pedidosData, error: errP } = await supabase
     .from('shopee_pedidos')
@@ -215,11 +230,10 @@ async function runOneShop(shop: ActiveShop) {
 
   const pedidos = (pedidosData as ShopeePedidoRow[] | null) ?? [];
   if (pedidos.length === 0) {
-    await updateCheckpoint(shop.shop_id, JOB_NAME, {
-      last_success_at: new Date().toISOString(),
+    await upsertCheckpoint({
+      last_success_at: nowIso,
       last_error_at: null,
       last_error_message: null,
-      is_running: false,
     });
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed: 0, changed: 0,
@@ -343,11 +357,10 @@ async function runOneShop(shop: ActiveShop) {
   }
 
   // Progresso parcial (timeout) também conta como sucesso — o próximo run completa.
-  await updateCheckpoint(shop.shop_id, JOB_NAME, {
+  await upsertCheckpoint({
     last_success_at: new Date().toISOString(),
     last_error_at: null,
     last_error_message: null,
-    is_running: false,
   });
 
   console.log(

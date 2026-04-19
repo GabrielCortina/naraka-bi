@@ -118,12 +118,21 @@ async function runOneShop(shop: ActiveShop) {
       if (error) throw new Error(`UPSERT shopee_ads_daily: ${error.message}`);
     }
 
-    await updateCheckpoint(shop.shop_id, JOB_NAME, {
-      last_success_at: new Date().toISOString(),
-      last_error_at: null,
-      last_error_message: null,
-      is_running: false,
-    });
+    // Upsert explícito — cria linha na primeira execução, atualiza nas subsequentes.
+    const { error: ckErr } = await supabase.from('shopee_sync_checkpoint').upsert(
+      {
+        shop_id: shop.shop_id,
+        job_name: JOB_NAME,
+        last_window_from: new Date(fromSec * 1000).toISOString(),
+        last_window_to: new Date(nowSec * 1000).toISOString(),
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
+        is_running: false,
+      },
+      { onConflict: 'shop_id,job_name' },
+    );
+    if (ckErr) console.error('[shopee-sync][ads] checkpoint upsert:', ckErr.message);
 
     console.log(`[shopee-sync][ads] shop_id=${shop.shop_id} days=${rows.length}`);
     return {

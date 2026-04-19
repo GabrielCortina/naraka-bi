@@ -30,8 +30,9 @@ const THROTTLE_MS = 300;
 const WINDOW_OVERLAP_SEC = 5 * 60;
 const FIRST_RUN_DAYS = 3;
 const WINDOW_MAX_DAYS = 14;
-const LIST_PAGE_SIZE = 50;
+const LIST_PAGE_SIZE = 100;
 const DETAIL_CHUNK = 50;
+const MAX_LIST_PAGES_PER_RUN = 2;
 
 const DETAIL_FIELDS = [
   'total_amount', 'pay_time', 'item_list', 'payment_method',
@@ -124,125 +125,144 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
     const windowFromIso = new Date(windowFromSec * 1000).toISOString();
     const windowToIso = new Date(windowToSec * 1000).toISOString();
 
-    const listResp = await shopeeCallWithRefresh<OrderListResp>(
-      shop,
-      '/api/v2/order/get_order_list',
-      {
-        time_range_field: 'update_time',
-        time_from: windowFromSec,
-        time_to: windowToSec,
-        page_size: LIST_PAGE_SIZE,
-        cursor,
-      },
-    );
-    await sleep(THROTTLE_MS);
-
-    const snList = (listResp.response?.order_list ?? []).map(o => o.order_sn);
-    const more = listResp.response?.more === true;
-    const nextCursorApi = listResp.response?.next_cursor || null;
-
+    // Loop: até MAX_LIST_PAGES_PER_RUN páginas de list, cada uma com detail chunks.
+    // Avança `cursor` apenas após TODOS os chunks de uma página concluírem — assim,
+    // timeout mid-chunks re-fetcha a mesma página (UPSERT é idempotente).
     let processed = 0;
     let enqueued = 0;
+    let pagesConsumed = 0;
+    let more = false;
+    let nextCursorApi: string | null = null;
+    let timedOut = false;
 
-    if (snList.length > 0) {
-      if (timeLeft() < 5000) {
-        await updateCheckpoint(shop.shop_id, JOB_NAME, {
-          last_window_from: windowFromIso,
-          last_window_to: windowToIso,
-          last_cursor: cursor || null,
-          is_running: false,
-        });
-        return {
-          job: JOB_NAME, shop_id: shop.shop_id, processed, enqueued,
-          duration_ms: elapsed(), stopped_reason: 'timeout',
-          next_cursor: cursor || null,
-          window: { from: windowFromIso, to: windowToIso },
-        };
-      }
+    while (pagesConsumed < MAX_LIST_PAGES_PER_RUN) {
+      if (timeLeft() < 5000) { timedOut = true; break; }
 
-      const chunk = snList.slice(0, DETAIL_CHUNK);
-      const detailResp = await shopeeCallWithRefresh<OrderDetailResp>(
+      const listResp = await shopeeCallWithRefresh<OrderListResp>(
         shop,
-        '/api/v2/order/get_order_detail',
-        { order_sn_list: chunk.join(','), response_optional_fields: DETAIL_FIELDS },
+        '/api/v2/order/get_order_list',
+        {
+          time_range_field: 'update_time',
+          time_from: windowFromSec,
+          time_to: windowToSec,
+          page_size: LIST_PAGE_SIZE,
+          cursor,
+        },
       );
       await sleep(THROTTLE_MS);
 
-      const items = detailResp.response?.order_list ?? [];
+      const snList = (listResp.response?.order_list ?? []).map(o => o.order_sn);
+      more = listResp.response?.more === true;
+      nextCursorApi = listResp.response?.next_cursor || null;
 
-      const snToPrev: Record<string, { order_status: string | null; complete_time: string | null }> = {};
-      const { data: prevRows } = await supabase
-        .from('shopee_pedidos')
-        .select('order_sn, order_status, complete_time')
-        .eq('shop_id', shop.shop_id)
-        .in('order_sn', chunk);
-      for (const p of prevRows ?? []) {
-        snToPrev[p.order_sn as string] = {
-          order_status: (p.order_status as string | null) ?? null,
-          complete_time: (p.complete_time as string | null) ?? null,
-        };
-      }
+      if (snList.length === 0) { more = false; break; }
 
-      const rows = items.map((item: OrderDetailItem) => {
-        const prev = snToPrev[item.order_sn];
-        const updateIso = tsToIso(item.update_time);
-        let completeTime = prev?.complete_time ?? null;
-        if (item.order_status === 'COMPLETED' && !completeTime) {
-          completeTime = updateIso ?? new Date().toISOString();
-        }
-        return {
-          shop_id: shop.shop_id,
-          order_sn: item.order_sn,
-          order_status: item.order_status ?? null,
-          currency: item.currency ?? 'BRL',
-          total_amount: item.total_amount ?? null,
-          payment_method: item.payment_method ?? null,
-          shipping_carrier: item.shipping_carrier ?? null,
-          estimated_shipping_fee: item.estimated_shipping_fee ?? null,
-          actual_shipping_fee: item.actual_shipping_fee ?? null,
-          create_time: tsToIso(item.create_time),
-          pay_time: tsToIso(item.pay_time),
-          ship_time: tsToIso(item.pickup_done_time),
-          complete_time: completeTime,
-          update_time: updateIso,
-          fulfillment_flag: item.fulfillment_flag ?? null,
-          cod: item.cod ?? false,
-          synced_at: new Date().toISOString(),
-        };
-      });
+      let allChunksDone = true;
+      for (let i = 0; i < snList.length; i += DETAIL_CHUNK) {
+        if (timeLeft() < 5000) { timedOut = true; allChunksDone = false; break; }
+        const chunk = snList.slice(i, i + DETAIL_CHUNK);
 
-      if (rows.length > 0) {
-        const { error } = await supabase
+        const detailResp = await shopeeCallWithRefresh<OrderDetailResp>(
+          shop,
+          '/api/v2/order/get_order_detail',
+          { order_sn_list: chunk.join(','), response_optional_fields: DETAIL_FIELDS },
+        );
+        await sleep(THROTTLE_MS);
+
+        const items = detailResp.response?.order_list ?? [];
+
+        const snToPrev: Record<string, { order_status: string | null; complete_time: string | null }> = {};
+        const { data: prevRows } = await supabase
           .from('shopee_pedidos')
-          .upsert(rows, { onConflict: 'shop_id,order_sn' });
-        if (error) throw new Error(`UPSERT shopee_pedidos: ${error.message}`);
-      }
-
-      for (const item of items) {
-        const prev = snToPrev[item.order_sn];
-        if (item.order_status === 'COMPLETED' && prev?.order_status !== 'COMPLETED') {
-          const created = await enqueueAction(
-            shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 3,
-          );
-          if (created) enqueued++;
+          .select('order_sn, order_status, complete_time')
+          .eq('shop_id', shop.shop_id)
+          .in('order_sn', chunk);
+        for (const p of prevRows ?? []) {
+          snToPrev[p.order_sn as string] = {
+            order_status: (p.order_status as string | null) ?? null,
+            complete_time: (p.complete_time as string | null) ?? null,
+          };
         }
+
+        const rows = items.map((item: OrderDetailItem) => {
+          const prev = snToPrev[item.order_sn];
+          const updateIso = tsToIso(item.update_time);
+          let completeTime = prev?.complete_time ?? null;
+          if (item.order_status === 'COMPLETED' && !completeTime) {
+            completeTime = updateIso ?? new Date().toISOString();
+          }
+          return {
+            shop_id: shop.shop_id,
+            order_sn: item.order_sn,
+            order_status: item.order_status ?? null,
+            currency: item.currency ?? 'BRL',
+            total_amount: item.total_amount ?? null,
+            payment_method: item.payment_method ?? null,
+            shipping_carrier: item.shipping_carrier ?? null,
+            estimated_shipping_fee: item.estimated_shipping_fee ?? null,
+            actual_shipping_fee: item.actual_shipping_fee ?? null,
+            create_time: tsToIso(item.create_time),
+            pay_time: tsToIso(item.pay_time),
+            ship_time: tsToIso(item.pickup_done_time),
+            complete_time: completeTime,
+            update_time: updateIso,
+            fulfillment_flag: item.fulfillment_flag ?? null,
+            cod: item.cod ?? false,
+            synced_at: new Date().toISOString(),
+          };
+        });
+
+        if (rows.length > 0) {
+          const { error } = await supabase
+            .from('shopee_pedidos')
+            .upsert(rows, { onConflict: 'shop_id,order_sn' });
+          if (error) throw new Error(`UPSERT shopee_pedidos: ${error.message}`);
+        }
+
+        for (const item of items) {
+          const prev = snToPrev[item.order_sn];
+          if (item.order_status === 'COMPLETED' && prev?.order_status !== 'COMPLETED') {
+            const created = await enqueueAction(
+              shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 3,
+            );
+            if (created) enqueued++;
+          }
+        }
+
+        processed += items.length;
       }
 
-      processed = items.length;
+      if (!allChunksDone) break;
+
+      pagesConsumed++;
+      cursor = nextCursorApi ?? '';
+      if (!more || !cursor) break;
     }
 
     let stoppedReason: StoppedReason;
     let nextCursorOut: string | null = null;
 
-    if (more && nextCursorApi) {
+    if (timedOut) {
+      stoppedReason = 'timeout';
+      nextCursorOut = cursor || null;
+      await updateCheckpoint(shop.shop_id, JOB_NAME, {
+        last_window_from: windowFromIso,
+        last_window_to: windowToIso,
+        last_cursor: cursor || null,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
+        is_running: false,
+      });
+    } else if (more && cursor && pagesConsumed >= MAX_LIST_PAGES_PER_RUN) {
       stoppedReason = 'page_limit';
-      nextCursorOut = nextCursorApi;
+      nextCursorOut = cursor;
       // Progresso parcial ainda é sucesso — registra last_success_at para o
       // monitoramento não mostrar "nunca executou" durante o backfill.
       await updateCheckpoint(shop.shop_id, JOB_NAME, {
         last_window_from: windowFromIso,
         last_window_to: windowToIso,
-        last_cursor: nextCursorApi,
+        last_cursor: cursor,
         last_success_at: new Date().toISOString(),
         last_error_at: null,
         last_error_message: null,

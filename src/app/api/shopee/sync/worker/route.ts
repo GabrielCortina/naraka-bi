@@ -20,7 +20,7 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const maxDuration = 55;
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 15;
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const THROTTLE_MS = 1000;
 const MAX_ELAPSED_MS = 45 * 1000;
