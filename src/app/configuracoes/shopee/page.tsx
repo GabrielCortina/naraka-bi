@@ -5,11 +5,10 @@ import { useSearchParams } from 'next/navigation';
 
 // Valores fixos do app Shopee (Partner Portal). Referência: SHOPEE_API_REFERENCE.md §1.
 const APP_INFO = {
-  partnerId: '1232147',
+  partnerId: '2033268',
   category: 'Seller In House System',
-  // Sandbox enquanto o app está em status "Developing" no Partner Portal.
-  environment: 'Sandbox' as 'Sandbox' | 'Produção',
-  goLiveStatus: 'Em review ⏳',
+  environment: 'Produção' as 'Sandbox' | 'Produção',
+  goLiveStatus: 'Aprovado ✅',
   redirectUrl: 'https://naraka-bi.vercel.app/api/auth/shopee/callback',
 };
 

@@ -4,6 +4,10 @@
 // Host oficial do sandbox confirmado via API Test Tool da Shopee.
 // NÃO usar partner.test-stable.shopeemobile.com (documentado errado em vários lugares).
 const SANDBOX_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
+// Produção: host documentado oficialmente. No sandbox o host documentado estava errado
+// (era openplatform.sandbox.test-stable.shopee.sg, não partner.test-stable.shopeemobile.com),
+// então se em produção aparecer "Wrong sign" mesmo com assinatura correta, testar o alternativo
+// https://openplatform.shopee.com antes de investigar o HMAC.
 const PRODUCTION_HOST = 'https://partner.shopeemobile.com';
 
 export interface ShopeeConfig {
