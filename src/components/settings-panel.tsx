@@ -56,6 +56,9 @@ export function SettingsPanel({ open, onClose, sidebarWidth, onOpenLojaConfig }:
           <Link href="/sistema/api" onClick={onClose}>
             <SettingsItem icon="⚡" label="API & Monitoramento" onClick={onClose} />
           </Link>
+          <Link href="/shopee-status" onClick={onClose}>
+            <SettingsItem icon="🔶" label="Shopee Sync" onClick={onClose} />
+          </Link>
         </div>
 
         <div className="mx-3.5 border-t dark:border-white/[0.06] border-black/[0.06]" />
