@@ -169,6 +169,9 @@ async function runOneShop(shop: ActiveShop) {
         last_window_from: windowFromIso,
         last_window_to: windowToIso,
         last_cursor: nextPageStr,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
         is_running: false,
       });
     } else if (windowToSec < nowSec - 60) {

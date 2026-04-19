@@ -237,10 +237,15 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
     if (more && nextCursorApi) {
       stoppedReason = 'page_limit';
       nextCursorOut = nextCursorApi;
+      // Progresso parcial ainda é sucesso — registra last_success_at para o
+      // monitoramento não mostrar "nunca executou" durante o backfill.
       await updateCheckpoint(shop.shop_id, JOB_NAME, {
         last_window_from: windowFromIso,
         last_window_to: windowToIso,
         last_cursor: nextCursorApi,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
         is_running: false,
       });
     } else if (windowToSec < nowSec - 60) {

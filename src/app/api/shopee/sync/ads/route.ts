@@ -39,10 +39,13 @@ interface DailyPerformance {
   direct_roas?: number;
   broad_roas?: number;
 }
-interface AdsResp {
-  shop_performance?: { daily_performance?: DailyPerformance[] };
-  daily_performance?: DailyPerformance[];
-}
+// Shopee BR retorna response como ARRAY direto: { response: [ {...}, {...} ] }.
+// Outras regiões/versões devolvem `{ daily_performance: [...] }` ou
+// `{ shop_performance: { daily_performance: [...] } }`. Testamos os três formatos.
+type AdsResp =
+  | DailyPerformance[]
+  | { shop_performance?: { daily_performance?: DailyPerformance[] } }
+  | { daily_performance?: DailyPerformance[] };
 
 type StoppedReason = 'complete' | 'timeout' | 'no_shops';
 
@@ -76,10 +79,13 @@ async function runOneShop(shop: ActiveShop) {
     );
     await sleep(THROTTLE_MS);
 
-    const daily =
-      resp.response?.shop_performance?.daily_performance ??
-      resp.response?.daily_performance ??
-      [];
+    // Parsing defensivo: aceita array direto (BR) ou objetos aninhados (outras regiões).
+    const rawResp = resp.response as AdsResp | undefined;
+    const daily: DailyPerformance[] = Array.isArray(rawResp)
+      ? rawResp
+      : (rawResp && 'shop_performance' in rawResp && rawResp.shop_performance?.daily_performance) ||
+        (rawResp && 'daily_performance' in rawResp && rawResp.daily_performance) ||
+        [];
 
     const supabase = createServiceClient();
     const rows = daily

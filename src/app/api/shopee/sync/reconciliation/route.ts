@@ -342,8 +342,9 @@ async function runOneShop(shop: ActiveShop) {
     if (error) console.error('[shopee-sync][reconciliation] log insert:', error.message);
   }
 
+  // Progresso parcial (timeout) também conta como sucesso — o próximo run completa.
   await updateCheckpoint(shop.shop_id, JOB_NAME, {
-    last_success_at: stoppedReason === 'complete' ? new Date().toISOString() : null,
+    last_success_at: new Date().toISOString(),
     last_error_at: null,
     last_error_message: null,
     is_running: false,

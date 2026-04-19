@@ -128,24 +128,35 @@ async function runOneShop(shop: ActiveShop) {
         .in('order_sn', orderSns);
       const existingSet = new Set((existing ?? []).map(e => e.order_sn as string));
 
+      // UPSERT para TODOS os itens: escrow_release_time + payout_amount + is_released=true.
+      // Para linhas novas, outras colunas ficam NULL e serão preenchidas pelo worker via
+      // fetch_escrow_detail. Para linhas existentes, só os 3 campos de release são
+      // atualizados (supabase.upsert só toca colunas presentes no payload).
+      const now = new Date().toISOString();
+      const rows = list.map(item => ({
+        shop_id: shop.shop_id,
+        order_sn: item.order_sn,
+        escrow_release_time: tsToIso(item.escrow_release_time),
+        payout_amount: item.payout_amount ?? null,
+        is_released: true,
+        synced_at: now,
+      }));
+      const { error: upErr } = await supabase
+        .from('shopee_escrow')
+        .upsert(rows, { onConflict: 'shop_id,order_sn' });
+      if (upErr) throw new Error(`UPSERT shopee_escrow (release): ${upErr.message}`);
+      processed += rows.length;
+
+      // Itens novos: enfileira fetch_escrow_detail para preencher os outros 30+ campos.
       for (const item of list) {
-        const releaseIso = tsToIso(item.escrow_release_time);
-        if (existingSet.has(item.order_sn)) {
-          await supabase
-            .from('shopee_escrow')
-            .update({
-              escrow_release_time: releaseIso,
-              payout_amount: item.payout_amount ?? null,
-              is_released: true,
-            })
-            .eq('shop_id', shop.shop_id)
-            .eq('order_sn', item.order_sn);
-          processed++;
-        } else {
+        if (!existingSet.has(item.order_sn)) {
           const created = await enqueueAction(
             shop.shop_id, 'escrow', item.order_sn,
             'fetch_escrow_detail', 3,
-            { release_time: releaseIso, payout_amount: item.payout_amount },
+            {
+              release_time: tsToIso(item.escrow_release_time),
+              payout_amount: item.payout_amount,
+            },
           );
           if (created) enqueued++;
         }
@@ -170,6 +181,9 @@ async function runOneShop(shop: ActiveShop) {
         last_window_from: windowFromIso,
         last_window_to: windowToIso,
         last_cursor: nextPageStr,
+        last_success_at: new Date().toISOString(),
+        last_error_at: null,
+        last_error_message: null,
         is_running: false,
       });
     } else if (windowToSec < nowSec - 60) {

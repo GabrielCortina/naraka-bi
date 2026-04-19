@@ -27,6 +27,30 @@ export async function GET() {
   const twentyFourHIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const twoHoursIso = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
+  // Lojas ativas primeiro — todas as demais queries usam esses shop_ids como filtro
+  // para que a UI não polua com dados de lojas inativas (sandbox, deletadas, etc).
+  const { data: activeShopsData } = await supabase
+    .from('shopee_tokens')
+    .select('shop_id, shop_name, is_active, token_expires_at, refresh_expires_at, updated_at')
+    .eq('is_active', true)
+    .order('shop_id');
+  const activeShopIds = (activeShopsData ?? []).map(s => s.shop_id as number);
+
+  // Se não há lojas ativas, retornamos snapshot vazio (UI não quebra).
+  if (activeShopIds.length === 0) {
+    return NextResponse.json({
+      checked_at: new Date().toISOString(),
+      tracked_jobs: TRACKED_JOBS,
+      shops: [],
+      checkpoints: [],
+      queue: { pending: 0, processing: 0, done_24h: 0, failed: 0, dead: 0 },
+      worker: { status: 'sem_dados' as const, last_done_at: null },
+      table_counts: [],
+      recent_errors: [],
+      stats_today: { queue_done: 0, queue_failed: 0, success_rate: null, pedidos_synced: 0, escrow_synced: 0 },
+    });
+  }
+
   const [
     shopsRes,
     checkpointsRes,
@@ -42,66 +66,75 @@ export async function GET() {
     recentErrorsRes,
     lastWorkerDoneRes,
   ] = await Promise.all([
-    supabase
-      .from('shopee_tokens')
-      .select('shop_id, shop_name, is_active, token_expires_at, refresh_expires_at, updated_at')
-      .order('shop_id'),
+    Promise.resolve({ data: activeShopsData }),
     supabase
       .from('shopee_sync_checkpoint')
       .select(
         'shop_id, job_name, last_window_from, last_window_to, last_cursor, last_success_at, last_error_at, last_error_message, is_running, updated_at',
       )
+      .in('shop_id', activeShopIds)
       .order('updated_at', { ascending: false }),
     supabase
       .from('shopee_sync_queue')
       .select('*', { count: 'exact', head: true })
-      .eq('status', 'PENDING'),
+      .eq('status', 'PENDING')
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_sync_queue')
       .select('*', { count: 'exact', head: true })
-      .eq('status', 'PROCESSING'),
-    supabase
-      .from('shopee_sync_queue')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'DONE')
-      .gte('completed_at', twentyFourHIso),
-    supabase
-      .from('shopee_sync_queue')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'FAILED'),
-    supabase
-      .from('shopee_sync_queue')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'DEAD'),
+      .eq('status', 'PROCESSING')
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_sync_queue')
       .select('*', { count: 'exact', head: true })
       .eq('status', 'DONE')
-      .gte('completed_at', todayIso),
+      .gte('completed_at', twentyFourHIso)
+      .in('shop_id', activeShopIds),
+    supabase
+      .from('shopee_sync_queue')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'FAILED')
+      .in('shop_id', activeShopIds),
+    supabase
+      .from('shopee_sync_queue')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'DEAD')
+      .in('shop_id', activeShopIds),
+    supabase
+      .from('shopee_sync_queue')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'DONE')
+      .gte('completed_at', todayIso)
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_sync_queue')
       .select('*', { count: 'exact', head: true })
       .in('status', ['FAILED', 'DEAD'])
-      .gte('updated_at', todayIso),
+      .gte('updated_at', todayIso)
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_pedidos')
       .select('*', { count: 'exact', head: true })
-      .gte('synced_at', todayIso),
+      .gte('synced_at', todayIso)
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_escrow')
       .select('*', { count: 'exact', head: true })
-      .gte('synced_at', todayIso),
+      .gte('synced_at', todayIso)
+      .in('shop_id', activeShopIds),
     supabase
       .from('shopee_sync_queue')
       .select('id, shop_id, entity_type, entity_id, action, status, attempt_count, max_attempts, last_error, updated_at')
       .in('status', ['FAILED', 'DEAD'])
       .gte('updated_at', twentyFourHIso)
+      .in('shop_id', activeShopIds)
       .order('updated_at', { ascending: false })
       .limit(20),
     supabase
       .from('shopee_sync_queue')
       .select('completed_at')
       .eq('status', 'DONE')
+      .in('shop_id', activeShopIds)
       .order('completed_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
