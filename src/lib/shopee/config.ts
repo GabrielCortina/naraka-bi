@@ -1,15 +1,16 @@
 // Configuração centralizada da integração Shopee Open Platform (API v2).
 // Referência técnica: SHOPEE_API_REFERENCE.md
 
-// A Shopee usa hosts DIFERENTES para OAuth e para chamadas de API em produção BR:
-//   • OAuth (auth_partner, auth/token/get, auth/access_token/get) → partner.shopeemobile.com
-//   • Chamadas autenticadas /api/v2/* (BR)                         → openplatform.shopee.com.br
-// Usar o host de API para OAuth → não emite o redirect de autorização.
-// Usar o host de OAuth para chamadas API em BR → HTTP 404 "page not found".
-// No sandbox os dois fluxos usam o MESMO host.
+// Em produção BR, OAuth e chamadas /api/v2/* usam o MESMO host: openplatform.shopee.com.br.
+// Histórico: tokens emitidos por `partner.shopeemobile.com` (host global SEA) foram
+// rejeitados por `openplatform.shopee.com.br` com "invalid access_token" — a Shopee
+// separa a base de tokens por região, então o token só é aceito no host que o emitiu.
+// Fallback: se emissão falhar em openplatform.shopee.com.br, testar partner.shopeemobile.com
+// (mas nesse caso as chamadas /api/v2/* também precisam ir para o mesmo host).
+// No sandbox os dois fluxos também usam o mesmo host.
 const SANDBOX_AUTH_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
 const SANDBOX_API_HOST = 'https://openplatform.sandbox.test-stable.shopee.sg';
-const PRODUCTION_AUTH_HOST = 'https://partner.shopeemobile.com';
+const PRODUCTION_AUTH_HOST = 'https://openplatform.shopee.com.br';
 const PRODUCTION_API_HOST = 'https://openplatform.shopee.com.br';
 
 export interface ShopeeConfig {
