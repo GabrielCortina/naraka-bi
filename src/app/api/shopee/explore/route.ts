@@ -53,10 +53,16 @@ interface TestCall {
   params: Record<string, unknown>;
 }
 
+interface OrdersOptions {
+  days?: number;
+  orderStatus?: string;
+}
+
 function buildCall(
   test: TestName,
   nowSec: number,
   orderSn: string | null,
+  ordersOpts: OrdersOptions = {},
 ): TestCall | { error: string } {
   const sevenAgo = nowSec - 7 * DAY_SEC;
   // wallet e returns falham com "janela > 15 dias" — usar 14 dias por segurança.
@@ -64,17 +70,22 @@ function buildCall(
   const thirtyAgo = nowSec - 30 * DAY_SEC;
 
   switch (test) {
-    case 'orders':
+    case 'orders': {
+      const days = ordersOpts.days ?? 7;
+      const timeFrom = nowSec - days * DAY_SEC;
+      const params: Record<string, unknown> = {
+        time_range_field: 'create_time',
+        time_from: timeFrom,
+        time_to: nowSec,
+        page_size: 20,
+      };
+      if (ordersOpts.orderStatus) params.order_status = ordersOpts.orderStatus;
       return {
         path: '/api/v2/order/get_order_list',
         method: 'GET',
-        params: {
-          time_range_field: 'create_time',
-          time_from: sevenAgo,
-          time_to: nowSec,
-          page_size: 20,
-        },
+        params,
       };
+    }
 
     case 'order_detail':
       if (!orderSn) return { error: 'query param order_sn é obrigatório para test=order_detail' };
@@ -167,11 +178,14 @@ function buildCall(
   }
 }
 
-// GET /api/shopee/explore?shop_id=<n>&test=<name>[&order_sn=<sn>]
+// GET /api/shopee/explore?shop_id=<n>&test=<name>[&order_sn=<sn>][&status=<enum>][&days=<n>]
+// status/days só têm efeito em test=orders (filtram get_order_list).
 export async function GET(request: NextRequest) {
   const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
   const test = request.nextUrl.searchParams.get('test') as TestName | null;
   const orderSn = request.nextUrl.searchParams.get('order_sn');
+  const status = request.nextUrl.searchParams.get('status');
+  const daysRaw = request.nextUrl.searchParams.get('days');
 
   if (!shopIdRaw) {
     return NextResponse.json({ error: 'query param shop_id é obrigatório' }, { status: 400 });
@@ -186,6 +200,14 @@ export async function GET(request: NextRequest) {
       { status: 400 },
     );
   }
+  let days: number | undefined;
+  if (daysRaw != null) {
+    const parsed = Number(daysRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return NextResponse.json({ error: 'days deve ser inteiro positivo' }, { status: 400 });
+    }
+    days = parsed;
+  }
 
   const accessToken = await getAccessTokenForShop(shopId);
   if (!accessToken) {
@@ -196,7 +218,7 @@ export async function GET(request: NextRequest) {
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const call = buildCall(test, nowSec, orderSn);
+  const call = buildCall(test, nowSec, orderSn, { days, orderStatus: status ?? undefined });
   if ('error' in call) {
     return NextResponse.json({ error: call.error }, { status: 400 });
   }
