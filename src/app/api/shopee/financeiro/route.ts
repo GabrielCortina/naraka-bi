@@ -257,21 +257,27 @@ async function fetchPeriod(
     for (const r of rows) {
       escrow.count++;
 
-      // Detecta se o detail foi sincronizado — quando ausente, os campos
-      // finos ficam NULL e só temos payout_amount do escrow-list.
-      const hasDetail =
-        r.escrow_amount != null || r.buyer_total_amount != null;
+      // GMV (bruto) só existe quando o escrow_detail foi sincronizado —
+      // payout_amount é LÍQUIDO, não bruto. Usar payout como fallback para
+      // GMV igualaria "bruto = líquido" (100%), mascarando comissão e taxas.
+      const buyerRaw = r.buyer_total_amount;
+      const hasBuyerTotal = buyerRaw != null && num(buyerRaw) !== 0;
+      const b = hasBuyerTotal ? num(buyerRaw) : 0;
 
-      // COALESCE(escrow_amount, payout_amount, 0) — fallback preserva GMV
-      // e receita líquida mesmo antes do worker enriquecer a linha.
+      // Receita líquida pode usar payout_amount como fallback — ambos são
+      // o valor líquido que caiu/cairá na carteira.
       const payout = num(r.payout_amount);
-      const b = r.buyer_total_amount != null ? num(r.buyer_total_amount) : payout;
       const a = r.escrow_amount != null ? num(r.escrow_amount) : payout;
+
       const com = num(r.commission_fee);
       const svc = num(r.service_fee);
 
       escrow.buyer_total += b;
       escrow.escrow_amount += a;
+
+      // "Detail completo" = temos escrow_detail sincronizado (buyer_total OU
+      // escrow_amount não-nulos — por padrão, ambos vêm juntos).
+      const hasDetail = hasBuyerTotal || r.escrow_amount != null;
 
       if (hasDetail) {
         escrow.count_with_detail++;
@@ -625,7 +631,10 @@ export async function GET(request: NextRequest) {
   // Custos aquisição
   const adsExpense = cur.ads.expense;
   const adsRoas = adsExpense > 0 ? cur.ads.broad_gmv / adsExpense : 0;
-  const adsTacos = pctOf(adsExpense, gmv);
+  // TACOS = expense / broad_gmv (tudo da mesma fonte: shopee_ads_daily).
+  // Usar GMV do escrow como denominador infla o TACOS quando o backfill
+  // do detail está incompleto, porque expense é integral mas GMV é parcial.
+  const adsTacos = pctOf(adsExpense, cur.ads.broad_gmv);
   const afiliadosLiquido = Math.max(0, cur.wallet.afiliados_debito - cur.wallet.afiliados_credito);
   const aquisicaoTotal = adsExpense + afiliadosLiquido;
 

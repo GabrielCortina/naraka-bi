@@ -443,7 +443,11 @@ export default function FinanceiroShopeePage() {
             label="GMV (Faturamento bruto)"
             value={fmtBRL(r.gmv)}
             delta={r.gmv_variacao}
-            sub={`${fmtInt(r.total_pedidos)} pedidos com escrow`}
+            sub={
+              r.gmv < r.receita_liquida && info
+                ? `Baseado em ${fmtInt(info.escrows_com_detail)} pedidos com detail completo`
+                : `${fmtInt(r.total_pedidos)} pedidos com escrow`
+            }
           />
           <MetricCard
             label="Receita líquida"
