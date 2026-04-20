@@ -176,8 +176,10 @@ interface EscrowAggr {
   commission_fee: number;
   service_fee: number;
   seller_transaction_fee: number;
+  credit_card_transaction_fee: number;  // taxa de cartão cobrada do seller
   fbs_fee: number;
   processing_fee: number; // não existe na tabela → fica 0 (placeholder)
+  order_ams_commission_fee: number;     // afiliados por pedido (fonte alternativa à wallet)
   shopee_discount: number;
   voucher_from_shopee: number;
   voucher_from_seller: number;
@@ -185,7 +187,7 @@ interface EscrowAggr {
   coins: number;
   credit_card_promotion: number;
   pix_discount: number;
-  shopee_shipping_rebate: number;
+  shopee_shipping_rebate: number;       // informativo; NÃO entra no subsídio
   reverse_shipping_fee_total: number;
   reverse_shipping_fee_positive: number;
   reverse_shipping_fee_count: number;
@@ -198,7 +200,9 @@ function emptyEscrow(): EscrowAggr {
     buyer_total: 0, escrow_amount: 0, buyer_total_with_detail: 0,
     order_discounted_price: 0,
     commission_fee: 0, service_fee: 0, seller_transaction_fee: 0,
+    credit_card_transaction_fee: 0,
     fbs_fee: 0, processing_fee: 0,
+    order_ams_commission_fee: 0,
     shopee_discount: 0, voucher_from_shopee: 0, voucher_from_seller: 0,
     seller_discount: 0, coins: 0, credit_card_promotion: 0, pix_discount: 0,
     shopee_shipping_rebate: 0,
@@ -289,7 +293,7 @@ async function fetchPeriod(
     const { data: rows } = await supabase
       .from('shopee_escrow')
       .select(
-        'buyer_total_amount, escrow_amount, payout_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
+        'buyer_total_amount, escrow_amount, payout_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, credit_card_transaction_fee, fbs_fee, order_ams_commission_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
       )
       .in('shop_id', shopIds)
       .eq('is_released', true)
@@ -333,7 +337,9 @@ async function fetchPeriod(
         escrow.commission_fee += com;
         escrow.service_fee += svc;
         escrow.seller_transaction_fee += num(r.seller_transaction_fee);
+        escrow.credit_card_transaction_fee += num(r.credit_card_transaction_fee);
         escrow.fbs_fee += num(r.fbs_fee);
+        escrow.order_ams_commission_fee += num(r.order_ams_commission_fee);
         escrow.shopee_discount += num(r.shopee_discount);
         escrow.voucher_from_shopee += num(r.voucher_from_shopee);
         escrow.voucher_from_seller += num(r.voucher_from_seller);
@@ -482,6 +488,12 @@ async function fetchPeriod(
     const d = a.date as string;
     ads.by_date.set(d, (ads.by_date.get(d) ?? 0) + expense);
   }
+
+  // Diagnóstico: se o dashboard mostrar ads zerados ou muito baixos, geralmente
+  // é porque a tabela tem só alguns dias sincronizados. Loga janela + linhas.
+  console.log(
+    `[financeiro] ads filter shop_ids=${shopIds.join(',')} from=${fromDate} to=${toDate} rows=${adsRows?.length ?? 0} expense=${ads.expense.toFixed(2)}`,
+  );
 
   return {
     escrow,
@@ -671,9 +683,14 @@ export async function GET(request: NextRequest) {
   // Take rate: comissão + taxa de serviço (somas são baseadas em detail).
   const takeRateValor = cur.escrow.commission_fee + cur.escrow.service_fee;
 
-  // Custos plataforma
+  // Custos plataforma — inclui taxa de cartão (credit_card_transaction_fee),
+  // que estava sendo ignorada e custa ~R$ 300/dia de acordo com a OxeanJeans.
+  const taxaCartao = cur.escrow.credit_card_transaction_fee;
   const plataformaOutros =
-    cur.escrow.seller_transaction_fee + cur.escrow.fbs_fee + cur.escrow.processing_fee;
+    cur.escrow.seller_transaction_fee +
+    taxaCartao +
+    cur.escrow.fbs_fee +
+    cur.escrow.processing_fee;
   const plataformaTotal = takeRateValor + plataformaOutros;
 
   // Custos aquisição
@@ -683,7 +700,13 @@ export async function GET(request: NextRequest) {
   // Usar GMV do escrow como denominador infla o TACOS quando o backfill
   // do detail está incompleto, porque expense é integral mas GMV é parcial.
   const adsTacos = pctOf(adsExpense, cur.ads.broad_gmv);
-  const afiliadosLiquido = Math.max(0, cur.wallet.afiliados_debito - cur.wallet.afiliados_credito);
+
+  // Afiliados: duas fontes possíveis. Wallet (AFFILIATE_*) pode não ter
+  // registros para o período; o escrow tem order_ams_commission_fee por
+  // pedido. Pegamos o maior — se uma fonte está vazia, a outra cobre.
+  const afiliadosWallet = Math.max(0, cur.wallet.afiliados_debito - cur.wallet.afiliados_credito);
+  const afiliadosEscrow = cur.escrow.order_ams_commission_fee;
+  const afiliadosLiquido = Math.max(afiliadosWallet, afiliadosEscrow);
   const aquisicaoTotal = adsExpense + afiliadosLiquido;
 
   // Custos fricção
@@ -707,14 +730,16 @@ export async function GET(request: NextRequest) {
     - adsExpense - afiliadosLiquido
     - devolucoesFrete - difal - pedidosNegativos - fbsCustosLiquido - outrosCustos;
 
-  // Subsídio Shopee
+  // Subsídio Shopee — o que a Shopee BANCOU do bolso dela (desconto, voucher,
+  // coins, promo cartão, pix discount). NÃO inclui shopee_shipping_rebate:
+  // frete "grátis" não é subsídio — está embutido na taxa de serviço que o
+  // seller paga, logo é custo dele, não presente da Shopee.
   const subsidioTotal =
     cur.escrow.shopee_discount +
     cur.escrow.voucher_from_shopee +
     cur.escrow.coins +
     cur.escrow.credit_card_promotion +
-    cur.escrow.pix_discount +
-    cur.escrow.shopee_shipping_rebate;
+    cur.escrow.pix_discount;
 
   // Cobertura financeira — global (não filtra por período).
   const cobertura = pctOf(totalEscrowGlobal, totalPedidosGlobal);
@@ -808,6 +833,7 @@ export async function GET(request: NextRequest) {
         taxa_servico: round2(cur.escrow.service_fee),
         taxa_servico_pct: round1(pctOf(cur.escrow.service_fee, gmvDetail)),
         taxa_transacao: round2(cur.escrow.seller_transaction_fee),
+        taxa_cartao: round2(taxaCartao),
         fbs_fee: round2(cur.escrow.fbs_fee),
         processing_fee: round2(cur.escrow.processing_fee),
       },
@@ -852,7 +878,6 @@ export async function GET(request: NextRequest) {
       coins: round2(cur.escrow.coins),
       promo_cartao: round2(cur.escrow.credit_card_promotion),
       pix_discount: round2(cur.escrow.pix_discount),
-      frete_subsidiado: round2(cur.escrow.shopee_shipping_rebate),
       pct_gmv: round1(pctOf(subsidioTotal, gmv)),
     },
 
@@ -921,7 +946,7 @@ function emptyPayload(
     },
     take_rate: { percentual: 0, valor: 0 },
     custos: {
-      plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, fbs_fee: 0, processing_fee: 0 },
+      plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, taxa_cartao: 0, fbs_fee: 0, processing_fee: 0 },
       aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0 },
       friccao: {
         total: 0, pct_gmv: 0,
@@ -931,7 +956,7 @@ function emptyPayload(
       total: 0, total_pct_gmv: 0,
     },
     margem: { valor: 0, pct_gmv: 0 },
-    subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, frete_subsidiado: 0, pct_gmv: 0 },
+    subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, pct_gmv: 0 },
     informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0, detail_coverage: 0, escrows_com_detail: 0, escrows_sem_detail: 0 },
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],

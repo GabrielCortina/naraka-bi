@@ -47,7 +47,8 @@ interface ApiResponse {
       total: number; pct_gmv: number;
       comissao: number; comissao_pct: number;
       taxa_servico: number; taxa_servico_pct: number;
-      taxa_transacao: number; fbs_fee: number; processing_fee: number;
+      taxa_transacao: number; taxa_cartao: number;
+      fbs_fee: number; processing_fee: number;
     };
     aquisicao: {
       total: number; pct_gmv: number;
@@ -67,7 +68,7 @@ interface ApiResponse {
   subsidio_shopee: {
     total: number; desconto_shopee: number; voucher_shopee: number;
     coins: number; promo_cartao: number; pix_discount: number;
-    frete_subsidiado: number; pct_gmv: number;
+    pct_gmv: number;
   };
   informativo: {
     saques: number; saques_qtd: number; saldo_carteira: number;
@@ -505,12 +506,12 @@ export default function FinanceiroShopeePage() {
             valueColor={COLORS.vermelho}
             sub={`${fmtPct(cp.taxa_servico_pct)} do GMV`}
           />
-          {cp.taxa_transacao + cp.fbs_fee + cp.processing_fee > 0 ? (
+          {cp.taxa_transacao + cp.taxa_cartao + cp.fbs_fee + cp.processing_fee > 0 ? (
             <MetricCard
               label="Outros plataforma"
-              value={fmtBRL(cp.taxa_transacao + cp.fbs_fee + cp.processing_fee)}
+              value={fmtBRL(cp.taxa_transacao + cp.taxa_cartao + cp.fbs_fee + cp.processing_fee)}
               valueColor={COLORS.vermelho}
-              sub="FBS + transação + processing"
+              sub="Cartão + FBS + transação + processing"
             />
           ) : (
             <MetricCard
