@@ -51,6 +51,10 @@
     {
       "path": "/api/shopee/sync/reconciliation",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/backfill-escrow-detail?shop_id=869193731&limit=500",
+      "schedule": "*/2 * * * *"
     }
   ]
 }
