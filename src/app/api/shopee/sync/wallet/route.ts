@@ -4,6 +4,7 @@ import {
   resolveTargetShop,
   lockCheckpoint,
   updateCheckpoint,
+  enqueueAction,
   shopeeCallWithRefresh,
   sleep,
   tsToIso,
@@ -111,6 +112,8 @@ async function runOneShop(shop: ActiveShop) {
 
     let totalTxns = 0;
     let releasedMarked = 0;
+    let stubsCreated = 0;
+    let stubsEnqueued = 0;
     let pagesConsumed = 0;
     let moreAfter = false;
     let stoppedReason: StoppedReason = 'complete';
@@ -164,18 +167,76 @@ async function runOneShop(shop: ActiveShop) {
       }
       totalTxns += rows.length;
 
-      const releaseSns = txns
-        .filter(t => t.transaction_type === 'ESCROW_VERIFIED_ADD' && t.order_sn)
-        .map(t => t.order_sn!);
-      if (releaseSns.length > 0) {
-        const { data: updated } = await supabase
+      // ESCROW_VERIFIED_ADD é autoritativo para "o dinheiro caiu". Usamos
+      // create_time como escrow_release_time e amount como payout_amount.
+      // Se o escrow ainda não existe (get_escrow_list perdeu), inserimos um
+      // stub e enfileiramos fetch_escrow_detail para trazer o breakdown.
+      const releaseTxns = txns.filter(
+        t => t.transaction_type === 'ESCROW_VERIFIED_ADD' && t.order_sn && t.create_time != null,
+      );
+      if (releaseTxns.length > 0) {
+        // Dedup por order_sn — guarda o mais recente caso haja duplicatas.
+        const releaseBySn = new Map<string, WalletTxn>();
+        for (const t of releaseTxns) {
+          const prev = releaseBySn.get(t.order_sn!);
+          if (!prev || (t.create_time ?? 0) > (prev.create_time ?? 0)) {
+            releaseBySn.set(t.order_sn!, t);
+          }
+        }
+        const uniqSns = Array.from(releaseBySn.keys());
+
+        const { data: existingRows } = await supabase
           .from('shopee_escrow')
-          .update({ is_released: true })
+          .select('order_sn, is_released, escrow_release_time')
           .eq('shop_id', shop.shop_id)
-          .in('order_sn', releaseSns)
-          .eq('is_released', false)
-          .select('order_sn');
-        releasedMarked += updated?.length ?? 0;
+          .in('order_sn', uniqSns);
+        const existingMap = new Map<string, { is_released: boolean; escrow_release_time: string | null }>();
+        for (const e of existingRows ?? []) {
+          existingMap.set(e.order_sn as string, {
+            is_released: (e.is_released as boolean | null) ?? false,
+            escrow_release_time: (e.escrow_release_time as string | null) ?? null,
+          });
+        }
+
+        const nowIso = new Date().toISOString();
+        const rowsToUpsert: Array<{
+          shop_id: number; order_sn: string; is_released: boolean;
+          escrow_release_time: string | null; payout_amount: number | null;
+          synced_at: string;
+        }> = [];
+        const newSns: string[] = [];
+
+        for (const [orderSn, txn] of Array.from(releaseBySn.entries())) {
+          const ex = existingMap.get(orderSn);
+          const needsRelease = !ex || !ex.is_released || !ex.escrow_release_time;
+          if (!needsRelease) continue;
+
+          rowsToUpsert.push({
+            shop_id: shop.shop_id,
+            order_sn: orderSn,
+            is_released: true,
+            escrow_release_time: tsToIso(txn.create_time!),
+            payout_amount: txn.amount ?? null,
+            synced_at: nowIso,
+          });
+          if (!ex) newSns.push(orderSn);
+          else releasedMarked++;
+        }
+
+        if (rowsToUpsert.length > 0) {
+          // Upsert só mexe nas colunas presentes no payload — linhas com
+          // detail já preenchido mantêm os campos finos intocados.
+          const { error: upErr } = await supabase
+            .from('shopee_escrow')
+            .upsert(rowsToUpsert, { onConflict: 'shop_id,order_sn' });
+          if (upErr) throw new Error(`UPSERT shopee_escrow (release via wallet): ${upErr.message}`);
+        }
+
+        stubsCreated += newSns.length;
+        for (const sn of newSns) {
+          const ok = await enqueueAction(shop.shop_id, 'escrow', sn, 'fetch_escrow_detail', 5);
+          if (ok) stubsEnqueued++;
+        }
       }
 
       pagesConsumed++;
@@ -224,12 +285,15 @@ async function runOneShop(shop: ActiveShop) {
     }
 
     console.log(
-      `[shopee-sync][wallet] shop_id=${shop.shop_id} txns=${totalTxns} released=${releasedMarked} pages=${pagesConsumed} reason=${stoppedReason}`,
+      `[shopee-sync][wallet] shop_id=${shop.shop_id} txns=${totalTxns} released=${releasedMarked} stubs_created=${stubsCreated} stubs_enqueued=${stubsEnqueued} pages=${pagesConsumed} reason=${stoppedReason}`,
     );
 
     return {
       job: JOB_NAME, shop_id: shop.shop_id,
-      processed: totalTxns, released_marked: releasedMarked,
+      processed: totalTxns,
+      released_marked: releasedMarked,
+      stubs_created: stubsCreated,
+      stubs_enqueued: stubsEnqueued,
       duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: nextPageStr,
       window: { from: windowFromIso, to: windowToIso },
     };
