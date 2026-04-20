@@ -6,6 +6,12 @@ import { createServiceClient } from '@/lib/supabase-server';
 // transação da wallet vem da tabela shopee_transaction_mapping — se a
 // Shopee criar um tipo novo, basta inserir uma linha lá.
 //
+// Filtros por período seguem a data de movimentação financeira:
+//   - escrow: escrow_release_time (is_released=true) — quando o dinheiro foi liberado
+//   - wallet: create_time — débito/crédito na carteira
+//   - ads: date — data do gasto
+//   - cobertura financeira, receita pendente: globais (sem filtro de período)
+//
 // Query:
 //   ?period=today|yesterday|7d|15d|month|last_month|custom
 //   ?from=YYYY-MM-DD & to=YYYY-MM-DD (quando period=custom)
@@ -190,7 +196,6 @@ interface PeriodData {
   wallet: WalletAggr;
   ads: AdsAggr;
   pedidos_by_day: Map<string, { gmv: number; liquido: number; comissao: number; taxa: number }>;
-  total_pedidos: number; // COUNT na shopee_pedidos no período
 }
 
 async function loadMapping(supabase: SupabaseClient): Promise<Map<string, MappingRow>> {
@@ -212,88 +217,78 @@ async function fetchPeriod(
   shopIds: number[],
   mapping: Map<string, MappingRow>,
 ): Promise<PeriodData> {
-  // 1. Pedidos no período — base de joins para escrow + contagem total.
-  const { data: pedidos } = await supabase
-    .from('shopee_pedidos')
-    .select('order_sn, create_time')
-    .gte('create_time', fromIso)
-    .lte('create_time', toIso)
-    .in('shop_id', shopIds)
-    .range(0, 49999);
-
-  const snToDate = new Map<string, string>();
-  const sns: string[] = [];
-  for (const p of pedidos ?? []) {
-    const sn = p.order_sn as string;
-    const ct = p.create_time as string | null;
-    if (!sn) continue;
-    sns.push(sn);
-    if (ct) snToDate.set(sn, ct.substring(0, 10));
-  }
-  const totalPedidos = sns.length;
-
   const escrow = emptyEscrow();
   const pedidosByDay = new Map<string, { gmv: number; liquido: number; comissao: number; taxa: number }>();
 
-  // 2. Escrow para SNs do período (em chunks).
-  if (sns.length > 0) {
-    const CHUNK = 500;
-    for (let i = 0; i < sns.length; i += CHUNK) {
-      const chunk = sns.slice(i, i + CHUNK);
-      const { data: rows } = await supabase
-        .from('shopee_escrow')
-        .select(
-          'order_sn, buyer_total_amount, escrow_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee',
-        )
-        .in('shop_id', shopIds)
-        .in('order_sn', chunk)
-        .range(0, 9999);
+  // 1. Escrow liberado no período — filtra pela data do release (movimentação
+  // financeira real). Escrows pendentes (is_released=false) ficam fora; são
+  // expostos separadamente como "receita pendente" (global, sem filtro).
+  let offset = 0;
+  const PAGE = 10000;
+  while (true) {
+    const { data: rows } = await supabase
+      .from('shopee_escrow')
+      .select(
+        'buyer_total_amount, escrow_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
+      )
+      .in('shop_id', shopIds)
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .gte('escrow_release_time', fromIso)
+      .lte('escrow_release_time', toIso)
+      .range(offset, offset + PAGE - 1);
 
-      for (const r of rows ?? []) {
-        escrow.count++;
-        const b = num(r.buyer_total_amount);
-        const a = num(r.escrow_amount);
-        const com = num(r.commission_fee);
-        const svc = num(r.service_fee);
+    if (!rows || rows.length === 0) break;
 
-        escrow.buyer_total += b;
-        escrow.escrow_amount += a;
-        escrow.order_discounted_price += num(r.order_discounted_price);
-        escrow.commission_fee += com;
-        escrow.service_fee += svc;
-        escrow.seller_transaction_fee += num(r.seller_transaction_fee);
-        escrow.fbs_fee += num(r.fbs_fee);
-        escrow.shopee_discount += num(r.shopee_discount);
-        escrow.voucher_from_shopee += num(r.voucher_from_shopee);
-        escrow.voucher_from_seller += num(r.voucher_from_seller);
-        escrow.seller_discount += num(r.seller_discount);
-        escrow.coins += num(r.coins);
-        escrow.credit_card_promotion += num(r.credit_card_promotion);
-        escrow.pix_discount += num(r.pix_discount);
-        escrow.shopee_shipping_rebate += num(r.shopee_shipping_rebate);
+    for (const r of rows) {
+      escrow.count++;
+      const b = num(r.buyer_total_amount);
+      const a = num(r.escrow_amount);
+      const com = num(r.commission_fee);
+      const svc = num(r.service_fee);
 
-        const rsf = num(r.reverse_shipping_fee);
-        escrow.reverse_shipping_fee_total += rsf;
-        if (rsf > 0) {
-          escrow.reverse_shipping_fee_positive += rsf;
-          escrow.reverse_shipping_fee_count++;
-        }
-        if (a < 0) {
-          escrow.negative_escrow_count++;
-          escrow.negative_escrow_total += Math.abs(a);
-        }
+      escrow.buyer_total += b;
+      escrow.escrow_amount += a;
+      escrow.order_discounted_price += num(r.order_discounted_price);
+      escrow.commission_fee += com;
+      escrow.service_fee += svc;
+      escrow.seller_transaction_fee += num(r.seller_transaction_fee);
+      escrow.fbs_fee += num(r.fbs_fee);
+      escrow.shopee_discount += num(r.shopee_discount);
+      escrow.voucher_from_shopee += num(r.voucher_from_shopee);
+      escrow.voucher_from_seller += num(r.voucher_from_seller);
+      escrow.seller_discount += num(r.seller_discount);
+      escrow.coins += num(r.coins);
+      escrow.credit_card_promotion += num(r.credit_card_promotion);
+      escrow.pix_discount += num(r.pix_discount);
+      escrow.shopee_shipping_rebate += num(r.shopee_shipping_rebate);
 
-        const date = snToDate.get(r.order_sn as string);
-        if (date) {
-          const e = pedidosByDay.get(date) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
-          e.gmv += b;
-          e.liquido += a;
-          e.comissao += com;
-          e.taxa += svc;
-          pedidosByDay.set(date, e);
-        }
+      const rsf = num(r.reverse_shipping_fee);
+      escrow.reverse_shipping_fee_total += rsf;
+      if (rsf > 0) {
+        escrow.reverse_shipping_fee_positive += rsf;
+        escrow.reverse_shipping_fee_count++;
+      }
+      if (a < 0) {
+        escrow.negative_escrow_count++;
+        escrow.negative_escrow_total += Math.abs(a);
+      }
+
+      // Série diária por DATE(escrow_release_time).
+      const rt = r.escrow_release_time as string | null;
+      if (rt) {
+        const date = rt.substring(0, 10);
+        const e = pedidosByDay.get(date) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
+        e.gmv += b;
+        e.liquido += a;
+        e.comissao += com;
+        e.taxa += svc;
+        pedidosByDay.set(date, e);
       }
     }
+
+    if (rows.length < PAGE) break;
+    offset += PAGE;
   }
 
   // 3. Wallet no período.
@@ -409,7 +404,6 @@ async function fetchPeriod(
     wallet,
     ads,
     pedidos_by_day: pedidosByDay,
-    total_pedidos: totalPedidos,
   };
 }
 
@@ -474,8 +468,11 @@ export async function GET(request: NextRequest) {
     fetchPeriod(supabase, prevFrom.toISOString(), prevTo.toISOString(), shopIds, mapping),
   ]);
 
-  // Conciliação + últimos pedidos + saldo wallet em paralelo.
-  const [conciliacaoRes, ultimosRes, walletBalanceRes] = await Promise.all([
+  // Conciliação + últimos pedidos liberados + saldo wallet + cobertura global + receita pendente em paralelo.
+  const [
+    conciliacaoRes, ultimosRes, walletBalanceRes,
+    totalPedidosGlobalRes, totalEscrowGlobalRes,
+  ] = await Promise.all([
     supabase
       .from('shopee_conciliacao')
       .select('classificacao')
@@ -484,10 +481,12 @@ export async function GET(request: NextRequest) {
     supabase
       .from('shopee_escrow')
       .select(
-        'order_sn, buyer_total_amount, commission_fee, service_fee, escrow_amount, buyer_payment_method, is_released, reverse_shipping_fee, order_ams_commission_fee',
+        'order_sn, buyer_total_amount, commission_fee, service_fee, escrow_amount, buyer_payment_method, is_released, reverse_shipping_fee, order_ams_commission_fee, escrow_release_time',
       )
       .in('shop_id', shopIds)
-      .order('synced_at', { ascending: false })
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .order('escrow_release_time', { ascending: false })
       .limit(20),
     supabase
       .from('shopee_wallet')
@@ -496,7 +495,38 @@ export async function GET(request: NextRequest) {
       .not('current_balance', 'is', null)
       .order('create_time', { ascending: false })
       .limit(1),
+    supabase
+      .from('shopee_pedidos')
+      .select('*', { count: 'exact', head: true })
+      .in('shop_id', shopIds),
+    supabase
+      .from('shopee_escrow')
+      .select('*', { count: 'exact', head: true })
+      .in('shop_id', shopIds),
   ]);
+
+  // Receita pendente = SUM(escrow_amount) onde is_released=false. Paginamos
+  // projetando apenas a coluna para manter payload leve.
+  let receitaPendente = 0;
+  {
+    let offset = 0;
+    const PAGE = 10000;
+    while (true) {
+      const { data: rows } = await supabase
+        .from('shopee_escrow')
+        .select('escrow_amount')
+        .in('shop_id', shopIds)
+        .eq('is_released', false)
+        .range(offset, offset + PAGE - 1);
+      if (!rows || rows.length === 0) break;
+      for (const r of rows) receitaPendente += num(r.escrow_amount);
+      if (rows.length < PAGE) break;
+      offset += PAGE;
+    }
+  }
+
+  const totalPedidosGlobal = totalPedidosGlobalRes.count ?? 0;
+  const totalEscrowGlobal = totalEscrowGlobalRes.count ?? 0;
 
   const ultimosEscrows =
     (ultimosRes.data as Array<{
@@ -509,6 +539,7 @@ export async function GET(request: NextRequest) {
       is_released: boolean | null;
       reverse_shipping_fee: number | null;
       order_ams_commission_fee: number | null;
+      escrow_release_time: string | null;
     }> | null) ?? [];
 
   const ultimosStatusMap = new Map<string, string>();
@@ -587,9 +618,9 @@ export async function GET(request: NextRequest) {
     cur.escrow.pix_discount +
     cur.escrow.shopee_shipping_rebate;
 
-  // Cobertura financeira
-  const cobertura = pctOf(cur.escrow.count, cur.total_pedidos);
-  const pedidosSemEscrow = Math.max(0, cur.total_pedidos - cur.escrow.count);
+  // Cobertura financeira — global (não filtra por período).
+  const cobertura = pctOf(totalEscrowGlobal, totalPedidosGlobal);
+  const pedidosSemEscrow = Math.max(0, totalPedidosGlobal - totalEscrowGlobal);
 
   // Variação GMV/receita líquida
   const gmvVariacao =
@@ -733,6 +764,7 @@ export async function GET(request: NextRequest) {
       saldo_carteira: round2(saldoWallet),
       cobertura_financeira: round1(cobertura),
       pedidos_sem_escrow: pedidosSemEscrow,
+      receita_pendente: round2(receitaPendente),
     },
 
     cupons_seller: {
@@ -796,7 +828,7 @@ function emptyPayload(
     },
     margem: { valor: 0, pct_gmv: 0 },
     subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, frete_subsidiado: 0, pct_gmv: 0 },
-    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0 },
+    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0 },
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],
     receita_por_dia: [],

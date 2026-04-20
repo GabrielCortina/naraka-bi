@@ -72,6 +72,7 @@ interface ApiResponse {
   informativo: {
     saques: number; saques_qtd: number; saldo_carteira: number;
     cobertura_financeira: number; pedidos_sem_escrow: number;
+    receita_pendente: number;
   };
   cupons_seller: { voucher_seller: number; seller_discount: number };
   outros_custos_detalhe: Array<{
@@ -458,8 +459,8 @@ export default function FinanceiroShopeePage() {
             value={fmtPct(info?.cobertura_financeira ?? 0)}
             valueColor={coberturaColor}
             sub={info && info.pedidos_sem_escrow > 0
-              ? `${fmtInt(info.pedidos_sem_escrow)} pedidos sem escrow`
-              : 'Todos os pedidos com escrow'}
+              ? `${fmtInt(info.pedidos_sem_escrow)} pedidos sem escrow (total histórico)`
+              : 'Todos os pedidos com escrow (total histórico)'}
           />
         </div>
       )}
@@ -669,6 +670,27 @@ export default function FinanceiroShopeePage() {
             sub={`${fmtInt(info.saques_qtd)} transferências para conta PJ`}
           />
         </div>
+      )}
+
+      {/* ============ INFORMATIVO (global, não filtrado) ============ */}
+      {!loading && info && (
+        <>
+          <SectionLabel>Informativo (global)</SectionLabel>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+            <MetricCard
+              label="Receita pendente"
+              value={fmtBRL(info.receita_pendente)}
+              valueColor={COLORS.amber}
+              sub="Escrow ainda não liberado — dinheiro a caminho da carteira"
+            />
+            <MetricCard
+              label="Saldo atual da carteira"
+              value={fmtBRL(info.saldo_carteira)}
+              valueColor={COLORS.azul}
+              sub="Último current_balance sincronizado"
+            />
+          </div>
+        </>
       )}
 
       {/* ============ SEÇÃO 6: GRÁFICOS ============ */}
