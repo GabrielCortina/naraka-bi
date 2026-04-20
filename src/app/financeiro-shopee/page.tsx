@@ -73,6 +73,9 @@ interface ApiResponse {
     saques: number; saques_qtd: number; saldo_carteira: number;
     cobertura_financeira: number; pedidos_sem_escrow: number;
     receita_pendente: number;
+    detail_coverage: number;
+    escrows_com_detail: number;
+    escrows_sem_detail: number;
   };
   cupons_seller: { voucher_seller: number; seller_discount: number };
   outros_custos_detalhe: Array<{
@@ -467,6 +470,17 @@ export default function FinanceiroShopeePage() {
 
       {/* ============ SEÇÃO 2: CUSTOS PLATAFORMA ============ */}
       <SectionLabel>Custos — Plataforma</SectionLabel>
+      {!loading && info && info.detail_coverage < 80 && info.escrows_com_detail + info.escrows_sem_detail > 0 && (
+        <div
+          className="rounded-lg px-3 py-2 mb-2 text-[11px]"
+          style={{ background: 'rgba(239,159,39,0.12)', color: '#8B5F0A' }}
+        >
+          Percentuais abaixo são baseados em <strong>{fmtInt(info.escrows_com_detail)}</strong> pedidos com detail completo
+          ({fmtPct(info.detail_coverage)} do período). Outros{' '}
+          <strong>{fmtInt(info.escrows_sem_detail)}</strong> ainda aguardam o fetch do escrow_detail —
+          GMV/Líquido usam fallback via <code>payout_amount</code>.
+        </div>
+      )}
       {loading || !cp || !tr ? <Skeleton4 /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <MetricCard

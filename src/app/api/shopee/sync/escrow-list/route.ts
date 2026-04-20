@@ -10,10 +10,17 @@ import {
   tsToIso,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { mapEscrowDetailToRow, type EscrowDetailResponse } from '@/lib/shopee/escrow-mapper';
 
 // Sync incremental de escrow list (liberações). Uma loja + até MAX_PAGES
 // páginas (page_no) por execução. page_no persistido em last_cursor.
 // Ref: SHOPEE_API_REFERENCE.md §3.2 — janela MAX 30 dias.
+//
+// Para cada item do escrow_list:
+//   - Se o escrow já tem detail completo no banco → só atualiza release info.
+//   - Se falta detail e ainda cabe no orçamento de chamadas da run → chama
+//     get_escrow_detail INLINE e faz upsert completo (sem depender do worker).
+//   - Se esgotou o orçamento → upsert parcial (release info) + enfileira no worker.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -22,11 +29,13 @@ export const maxDuration = 55;
 const JOB_NAME = 'sync_escrow_list';
 const MAX_ELAPSED_MS = 45 * 1000;
 const THROTTLE_MS = 400;
+const DETAIL_THROTTLE_MS = 500;
 const WINDOW_OVERLAP_SEC = 5 * 60;
 const BACKFILL_DAYS = 30;
 const WINDOW_MAX_DAYS = 30;
 const PAGE_SIZE = 100;
 const MAX_PAGES_PER_RUN = 3;
+const MAX_DETAILS_PER_RUN = 50;
 
 interface EscrowListItem {
   order_sn: string;
@@ -46,6 +55,95 @@ type StoppedReason =
   | 'already_running'
   | 'no_shops';
 
+type ItemAction = 'updated' | 'fetched' | 'enqueued' | 'failed_enqueued';
+
+interface ProcessResult {
+  action: ItemAction;
+  detailFetched: boolean;
+}
+
+async function upsertReleaseOnly(
+  supabase: ReturnType<typeof createServiceClient>,
+  shopId: number,
+  item: EscrowListItem,
+): Promise<void> {
+  const { error } = await supabase.from('shopee_escrow').upsert(
+    {
+      shop_id: shopId,
+      order_sn: item.order_sn,
+      escrow_release_time: tsToIso(item.escrow_release_time),
+      payout_amount: item.payout_amount ?? null,
+      is_released: true,
+      synced_at: new Date().toISOString(),
+    },
+    { onConflict: 'shop_id,order_sn' },
+  );
+  if (error) throw new Error(`UPSERT shopee_escrow (release): ${error.message}`);
+}
+
+async function processEscrowListItem(
+  shop: ActiveShop,
+  item: EscrowListItem,
+  hasDetail: boolean,
+  budgetAvailable: boolean,
+  supabase: ReturnType<typeof createServiceClient>,
+): Promise<ProcessResult> {
+  // Caso 1 — linha já tem detail: só atualiza release info.
+  if (hasDetail) {
+    await upsertReleaseOnly(supabase, shop.shop_id, item);
+    return { action: 'updated', detailFetched: false };
+  }
+
+  // Caso 2 — estourou orçamento de chamadas de detail: upsert parcial + worker.
+  if (!budgetAvailable) {
+    await upsertReleaseOnly(supabase, shop.shop_id, item);
+    await enqueueAction(
+      shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 5,
+      { release_time: tsToIso(item.escrow_release_time), payout_amount: item.payout_amount },
+    );
+    return { action: 'enqueued', detailFetched: false };
+  }
+
+  // Caso 3 — busca detail inline e faz upsert completo.
+  try {
+    const resp = await shopeeCallWithRefresh<EscrowDetailResponse>(
+      shop,
+      '/api/v2/payment/get_escrow_detail',
+      { order_sn: item.order_sn },
+    );
+    await sleep(DETAIL_THROTTLE_MS);
+
+    const response = resp.response;
+    if (!response?.order_sn) throw new Error('get_escrow_detail sem order_sn');
+
+    const row = mapEscrowDetailToRow(shop.shop_id, response, response);
+    const { error } = await supabase.from('shopee_escrow').upsert(
+      {
+        ...row,
+        escrow_release_time: tsToIso(item.escrow_release_time),
+        payout_amount: item.payout_amount ?? null,
+        is_released: true,
+        synced_at: new Date().toISOString(),
+      },
+      { onConflict: 'shop_id,order_sn' },
+    );
+    if (error) throw new Error(`UPSERT shopee_escrow (detail): ${error.message}`);
+    return { action: 'fetched', detailFetched: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    console.warn(
+      `[shopee-sync][escrow-list] fetch_escrow_detail inline falhou shop_id=${shop.shop_id} order_sn=${item.order_sn}:`,
+      msg,
+    );
+    await upsertReleaseOnly(supabase, shop.shop_id, item);
+    await enqueueAction(
+      shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 5,
+      { release_time: tsToIso(item.escrow_release_time), payout_amount: item.payout_amount },
+    );
+    return { action: 'failed_enqueued', detailFetched: false };
+  }
+}
+
 async function runOneShop(shop: ActiveShop) {
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
@@ -54,7 +152,8 @@ async function runOneShop(shop: ActiveShop) {
   const acquired = await lockCheckpoint(shop.shop_id, JOB_NAME);
   if (!acquired) {
     return {
-      job: JOB_NAME, shop_id: shop.shop_id, processed: 0, enqueued: 0,
+      job: JOB_NAME, shop_id: shop.shop_id, processed: 0,
+      details_fetched: 0, updated: 0, enqueued: 0,
       duration_ms: elapsed(), stopped_reason: 'already_running' as StoppedReason,
       next_cursor: null as string | null,
     };
@@ -91,12 +190,14 @@ async function runOneShop(shop: ActiveShop) {
     const windowToIso = new Date(windowToSec * 1000).toISOString();
 
     let processed = 0;
+    let detailsFetched = 0;
+    let updated = 0;
     let enqueued = 0;
     let pagesConsumed = 0;
     let moreAfter = false;
     let stoppedReason: StoppedReason = 'complete';
 
-    while (pagesConsumed < MAX_PAGES_PER_RUN) {
+    pageLoop: while (pagesConsumed < MAX_PAGES_PER_RUN) {
       if (timeLeft() < 5000) {
         stoppedReason = 'timeout';
         break;
@@ -120,46 +221,36 @@ async function runOneShop(shop: ActiveShop) {
         break;
       }
 
+      // Diagnóstico em um único round-trip: pega escrow_amount para decidir
+      // quem já tem detail (IS NOT NULL) e quem precisa.
       const orderSns = list.map(i => i.order_sn);
       const { data: existing } = await supabase
         .from('shopee_escrow')
-        .select('order_sn')
+        .select('order_sn, escrow_amount')
         .eq('shop_id', shop.shop_id)
         .in('order_sn', orderSns);
-      const existingSet = new Set((existing ?? []).map(e => e.order_sn as string));
+      const detailMap = new Map<string, boolean>();
+      for (const e of existing ?? []) {
+        detailMap.set(e.order_sn as string, e.escrow_amount != null);
+      }
 
-      // UPSERT para TODOS os itens: escrow_release_time + payout_amount + is_released=true.
-      // Para linhas novas, outras colunas ficam NULL e serão preenchidas pelo worker via
-      // fetch_escrow_detail. Para linhas existentes, só os 3 campos de release são
-      // atualizados (supabase.upsert só toca colunas presentes no payload).
-      const now = new Date().toISOString();
-      const rows = list.map(item => ({
-        shop_id: shop.shop_id,
-        order_sn: item.order_sn,
-        escrow_release_time: tsToIso(item.escrow_release_time),
-        payout_amount: item.payout_amount ?? null,
-        is_released: true,
-        synced_at: now,
-      }));
-      const { error: upErr } = await supabase
-        .from('shopee_escrow')
-        .upsert(rows, { onConflict: 'shop_id,order_sn' });
-      if (upErr) throw new Error(`UPSERT shopee_escrow (release): ${upErr.message}`);
-      processed += rows.length;
-
-      // Itens novos: enfileira fetch_escrow_detail para preencher os outros 30+ campos.
       for (const item of list) {
-        if (!existingSet.has(item.order_sn)) {
-          const created = await enqueueAction(
-            shop.shop_id, 'escrow', item.order_sn,
-            'fetch_escrow_detail', 3,
-            {
-              release_time: tsToIso(item.escrow_release_time),
-              payout_amount: item.payout_amount,
-            },
-          );
-          if (created) enqueued++;
+        if (timeLeft() < 5000) {
+          stoppedReason = 'timeout';
+          break pageLoop;
         }
+
+        processed++;
+        const result = await processEscrowListItem(
+          shop,
+          item,
+          detailMap.get(item.order_sn) === true,
+          detailsFetched < MAX_DETAILS_PER_RUN,
+          supabase,
+        );
+        if (result.detailFetched) detailsFetched++;
+        if (result.action === 'updated') updated++;
+        else if (result.action === 'enqueued' || result.action === 'failed_enqueued') enqueued++;
       }
 
       pagesConsumed++;
@@ -210,11 +301,12 @@ async function runOneShop(shop: ActiveShop) {
     }
 
     console.log(
-      `[shopee-sync][escrow-list] shop_id=${shop.shop_id} processed=${processed} enqueued=${enqueued} pages=${pagesConsumed} reason=${stoppedReason}`,
+      `[shopee-sync][escrow-list] shop_id=${shop.shop_id} processed=${processed} details_fetched=${detailsFetched} updated=${updated} enqueued=${enqueued} pages=${pagesConsumed} reason=${stoppedReason}`,
     );
 
     return {
-      job: JOB_NAME, shop_id: shop.shop_id, processed, enqueued,
+      job: JOB_NAME, shop_id: shop.shop_id, processed,
+      details_fetched: detailsFetched, updated, enqueued,
       duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: nextPageStr,
       window: { from: windowFromIso, to: windowToIso },
     };
@@ -235,7 +327,9 @@ export async function GET(request: NextRequest) {
   const shop = await resolveTargetShop(JOB_NAME, shopIdParam);
   if (!shop) {
     return NextResponse.json({
-      job: JOB_NAME, shop_id: null, processed: 0, duration_ms: 0,
+      job: JOB_NAME, shop_id: null, processed: 0,
+      details_fetched: 0, updated: 0, enqueued: 0,
+      duration_ms: 0,
       stopped_reason: 'no_shops' as const, next_cursor: null,
     });
   }

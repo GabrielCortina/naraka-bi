@@ -111,9 +111,21 @@ interface MappingRow {
 }
 
 interface EscrowAggr {
-  count: number;
+  // Contagens
+  count: number;              // todas as linhas liberadas no período
+  count_with_detail: number;  // linhas onde escrow_amount/buyer_total NÃO são NULL
+
+  // GMV e receita líquida — aplicam COALESCE(...,payout_amount,0). Cobrem
+  // TODAS as linhas, inclusive as que ainda não tiveram detail completo.
   buyer_total: number;
   escrow_amount: number;
+
+  // Base para percentuais — só linhas COM detail (senão o denominador
+  // infla e a % sai subestimada).
+  buyer_total_with_detail: number;
+
+  // Fees e subsídios — só existem em linhas com detail. Usar com o
+  // denominador buyer_total_with_detail.
   order_discounted_price: number;
   commission_fee: number;
   service_fee: number;
@@ -128,15 +140,17 @@ interface EscrowAggr {
   credit_card_promotion: number;
   pix_discount: number;
   shopee_shipping_rebate: number;
-  reverse_shipping_fee_total: number; // SUM total (diagnóstico)
-  reverse_shipping_fee_positive: number; // SUM WHERE > 0 (custo real)
+  reverse_shipping_fee_total: number;
+  reverse_shipping_fee_positive: number;
   reverse_shipping_fee_count: number;
   negative_escrow_count: number;
   negative_escrow_total: number;
 }
 function emptyEscrow(): EscrowAggr {
   return {
-    count: 0, buyer_total: 0, escrow_amount: 0, order_discounted_price: 0,
+    count: 0, count_with_detail: 0,
+    buyer_total: 0, escrow_amount: 0, buyer_total_with_detail: 0,
+    order_discounted_price: 0,
     commission_fee: 0, service_fee: 0, seller_transaction_fee: 0,
     fbs_fee: 0, processing_fee: 0,
     shopee_discount: 0, voucher_from_shopee: 0, voucher_from_seller: 0,
@@ -229,7 +243,7 @@ async function fetchPeriod(
     const { data: rows } = await supabase
       .from('shopee_escrow')
       .select(
-        'buyer_total_amount, escrow_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
+        'buyer_total_amount, escrow_amount, payout_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
       )
       .in('shop_id', shopIds)
       .eq('is_released', true)
@@ -242,33 +256,49 @@ async function fetchPeriod(
 
     for (const r of rows) {
       escrow.count++;
-      const b = num(r.buyer_total_amount);
-      const a = num(r.escrow_amount);
+
+      // Detecta se o detail foi sincronizado — quando ausente, os campos
+      // finos ficam NULL e só temos payout_amount do escrow-list.
+      const hasDetail =
+        r.escrow_amount != null || r.buyer_total_amount != null;
+
+      // COALESCE(escrow_amount, payout_amount, 0) — fallback preserva GMV
+      // e receita líquida mesmo antes do worker enriquecer a linha.
+      const payout = num(r.payout_amount);
+      const b = r.buyer_total_amount != null ? num(r.buyer_total_amount) : payout;
+      const a = r.escrow_amount != null ? num(r.escrow_amount) : payout;
       const com = num(r.commission_fee);
       const svc = num(r.service_fee);
 
       escrow.buyer_total += b;
       escrow.escrow_amount += a;
-      escrow.order_discounted_price += num(r.order_discounted_price);
-      escrow.commission_fee += com;
-      escrow.service_fee += svc;
-      escrow.seller_transaction_fee += num(r.seller_transaction_fee);
-      escrow.fbs_fee += num(r.fbs_fee);
-      escrow.shopee_discount += num(r.shopee_discount);
-      escrow.voucher_from_shopee += num(r.voucher_from_shopee);
-      escrow.voucher_from_seller += num(r.voucher_from_seller);
-      escrow.seller_discount += num(r.seller_discount);
-      escrow.coins += num(r.coins);
-      escrow.credit_card_promotion += num(r.credit_card_promotion);
-      escrow.pix_discount += num(r.pix_discount);
-      escrow.shopee_shipping_rebate += num(r.shopee_shipping_rebate);
 
-      const rsf = num(r.reverse_shipping_fee);
-      escrow.reverse_shipping_fee_total += rsf;
-      if (rsf > 0) {
-        escrow.reverse_shipping_fee_positive += rsf;
-        escrow.reverse_shipping_fee_count++;
+      if (hasDetail) {
+        escrow.count_with_detail++;
+        escrow.buyer_total_with_detail += num(r.buyer_total_amount);
+
+        escrow.order_discounted_price += num(r.order_discounted_price);
+        escrow.commission_fee += com;
+        escrow.service_fee += svc;
+        escrow.seller_transaction_fee += num(r.seller_transaction_fee);
+        escrow.fbs_fee += num(r.fbs_fee);
+        escrow.shopee_discount += num(r.shopee_discount);
+        escrow.voucher_from_shopee += num(r.voucher_from_shopee);
+        escrow.voucher_from_seller += num(r.voucher_from_seller);
+        escrow.seller_discount += num(r.seller_discount);
+        escrow.coins += num(r.coins);
+        escrow.credit_card_promotion += num(r.credit_card_promotion);
+        escrow.pix_discount += num(r.pix_discount);
+        escrow.shopee_shipping_rebate += num(r.shopee_shipping_rebate);
+
+        const rsf = num(r.reverse_shipping_fee);
+        escrow.reverse_shipping_fee_total += rsf;
+        if (rsf > 0) {
+          escrow.reverse_shipping_fee_positive += rsf;
+          escrow.reverse_shipping_fee_count++;
+        }
       }
+
       if (a < 0) {
         escrow.negative_escrow_count++;
         escrow.negative_escrow_total += Math.abs(a);
@@ -566,14 +596,25 @@ export async function GET(request: NextRequest) {
 
   // =================== KPIs ===================
 
+  // GMV / receita líquida — todas as linhas, com COALESCE(...,payout_amount,0)
+  // já aplicado no loop do fetchPeriod. Ou seja, inclui as linhas cujo detail
+  // ainda não foi buscado (fallback pelo payout_amount do escrow-list).
   const gmv = cur.escrow.buyer_total;
   const receitaLiquida = cur.escrow.escrow_amount;
   const ticketMedio = cur.escrow.count > 0 ? gmv / cur.escrow.count : 0;
-  // Preço efetivo: order_discounted_price / count de pedidos com escrow
-  // (quantidade de itens não está persistida — count de pedidos é o proxy).
-  const precoMedioEfetivo = cur.escrow.count > 0 ? cur.escrow.order_discounted_price / cur.escrow.count : 0;
 
-  // Take rate: comissão + taxa de serviço
+  // Base de percentuais que dependem de campos do detail (comissão, taxa,
+  // subsídios, etc.) — só conta linhas que têm detail completo. Evita
+  // subestimar a % quando parte das linhas ainda está sem detail.
+  const gmvDetail = cur.escrow.buyer_total_with_detail;
+  const countWithDetail = cur.escrow.count_with_detail;
+  const detailCoverage = pctOf(countWithDetail, cur.escrow.count);
+
+  const precoMedioEfetivo = countWithDetail > 0
+    ? cur.escrow.order_discounted_price / countWithDetail
+    : 0;
+
+  // Take rate: comissão + taxa de serviço (somas são baseadas em detail).
   const takeRateValor = cur.escrow.commission_fee + cur.escrow.service_fee;
 
   // Custos plataforma
@@ -697,18 +738,18 @@ export async function GET(request: NextRequest) {
     },
 
     take_rate: {
-      percentual: round1(pctOf(takeRateValor, gmv)),
+      percentual: round1(pctOf(takeRateValor, gmvDetail)),
       valor: round2(takeRateValor),
     },
 
     custos: {
       plataforma: {
         total: round2(plataformaTotal),
-        pct_gmv: round1(pctOf(plataformaTotal, gmv)),
+        pct_gmv: round1(pctOf(plataformaTotal, gmvDetail)),
         comissao: round2(cur.escrow.commission_fee),
-        comissao_pct: round1(pctOf(cur.escrow.commission_fee, gmv)),
+        comissao_pct: round1(pctOf(cur.escrow.commission_fee, gmvDetail)),
         taxa_servico: round2(cur.escrow.service_fee),
-        taxa_servico_pct: round1(pctOf(cur.escrow.service_fee, gmv)),
+        taxa_servico_pct: round1(pctOf(cur.escrow.service_fee, gmvDetail)),
         taxa_transacao: round2(cur.escrow.seller_transaction_fee),
         fbs_fee: round2(cur.escrow.fbs_fee),
         processing_fee: round2(cur.escrow.processing_fee),
@@ -765,6 +806,12 @@ export async function GET(request: NextRequest) {
       cobertura_financeira: round1(cobertura),
       pedidos_sem_escrow: pedidosSemEscrow,
       receita_pendente: round2(receitaPendente),
+      // Cobertura do detail no período: quantos escrows já têm campos finos
+      // (commission, service_fee, etc.). Os percentuais (take rate, comissão %)
+      // são calculados sobre esta amostra.
+      detail_coverage: round1(detailCoverage),
+      escrows_com_detail: countWithDetail,
+      escrows_sem_detail: Math.max(0, cur.escrow.count - countWithDetail),
     },
 
     cupons_seller: {
@@ -828,7 +875,7 @@ function emptyPayload(
     },
     margem: { valor: 0, pct_gmv: 0 },
     subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, frete_subsidiado: 0, pct_gmv: 0 },
-    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0 },
+    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0, detail_coverage: 0, escrows_com_detail: 0, escrows_sem_detail: 0 },
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],
     receita_por_dia: [],
