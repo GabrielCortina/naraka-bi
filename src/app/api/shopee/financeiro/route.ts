@@ -287,8 +287,13 @@ async function fetchPeriod(
   // 1. Escrow liberado no período — filtra pela data do release (movimentação
   // financeira real). Escrows pendentes (is_released=false) ficam fora; são
   // expostos separadamente como "receita pendente" (global, sem filtro).
+  //
+  // IMPORTANTE: Supabase/PostgREST limita respostas a 1000 linhas por default
+  // (max-rows do projeto). Usamos PAGE=1000 para paginação consistente —
+  // valores maiores retornariam só 1000 e o `rows.length < PAGE` abortaria o
+  // loop achando que acabou (bug observado na OxeanJeans com 5.6k escrows/7d).
   let offset = 0;
-  const PAGE = 10000;
+  const PAGE = 1000;
   while (true) {
     const { data: rows } = await supabase
       .from('shopee_escrow')
@@ -380,17 +385,26 @@ async function fetchPeriod(
     offset += PAGE;
   }
 
-  // 3. Wallet no período.
-  const { data: walletRows } = await supabase
-    .from('shopee_wallet')
-    .select('transaction_type, amount, description, create_time')
-    .gte('create_time', fromIso)
-    .lte('create_time', toIso)
-    .in('shop_id', shopIds)
-    .range(0, 99999);
-
+  // 3. Wallet no período — paginado (mesma limitação de 1000 do PostgREST).
   const wallet = emptyWallet();
-  for (const w of walletRows ?? []) {
+  const walletRows: Array<{ transaction_type: string; amount: number; description: string | null; create_time: string | null }> = [];
+  {
+    let wOffset = 0;
+    while (true) {
+      const { data: page } = await supabase
+        .from('shopee_wallet')
+        .select('transaction_type, amount, description, create_time')
+        .gte('create_time', fromIso)
+        .lte('create_time', toIso)
+        .in('shop_id', shopIds)
+        .range(wOffset, wOffset + PAGE - 1);
+      if (!page || page.length === 0) break;
+      walletRows.push(...(page as typeof walletRows));
+      if (page.length < PAGE) break;
+      wOffset += PAGE;
+    }
+  }
+  for (const w of walletRows) {
     const tt = ((w.transaction_type as string) ?? '').trim();
     const amount = num(w.amount);
     const desc = ((w.description as string | null) ?? '').trim();
@@ -565,15 +579,28 @@ export async function GET(request: NextRequest) {
   ]);
 
   // Conciliação + últimos pedidos liberados + saldo wallet + cobertura global + receita pendente em paralelo.
+  // Conciliação é paginada (pode passar de 1000 linhas — PostgREST limita por default).
   const [
-    conciliacaoRes, ultimosRes, walletBalanceRes,
+    conciliacaoRows, ultimosRes, walletBalanceRes,
     totalPedidosGlobalRes, totalEscrowGlobalRes,
   ] = await Promise.all([
-    supabase
-      .from('shopee_conciliacao')
-      .select('classificacao')
-      .in('shop_id', shopIds)
-      .range(0, 49999),
+    (async () => {
+      const out: Array<{ classificacao: string }> = [];
+      let off = 0;
+      const SIZE = 1000;
+      while (true) {
+        const { data } = await supabase
+          .from('shopee_conciliacao')
+          .select('classificacao')
+          .in('shop_id', shopIds)
+          .range(off, off + SIZE - 1);
+        if (!data || data.length === 0) break;
+        out.push(...(data as Array<{ classificacao: string }>));
+        if (data.length < SIZE) break;
+        off += SIZE;
+      }
+      return out;
+    })(),
     supabase
       .from('shopee_escrow')
       .select(
@@ -602,11 +629,12 @@ export async function GET(request: NextRequest) {
   ]);
 
   // Receita pendente = SUM(escrow_amount) onde is_released=false. Paginamos
-  // projetando apenas a coluna para manter payload leve.
+  // projetando apenas a coluna para manter payload leve. PAGE=1000 (limite
+  // de PostgREST); asking por mais retorna 1000 e o loop aborta cedo.
   let receitaPendente = 0;
   {
     let offset = 0;
-    const PAGE = 10000;
+    const PAGE = 1000;
     while (true) {
       const { data: rows } = await supabase
         .from('shopee_escrow')
@@ -654,7 +682,7 @@ export async function GET(request: NextRequest) {
   const conciliacao: Record<string, number> = Object.fromEntries(
     CONCILIACAO_KEYS.map(k => [k, 0]),
   );
-  for (const c of (conciliacaoRes.data as Array<{ classificacao: string }> | null) ?? []) {
+  for (const c of conciliacaoRows) {
     if (c.classificacao in conciliacao) conciliacao[c.classificacao]++;
   }
 
