@@ -22,6 +22,8 @@ export const revalidate = 0;
 export const maxDuration = 55;
 
 const DAY_MS = 86400000;
+const BR_OFFSET_HOURS = 3; // America/Sao_Paulo é UTC-3 (sem DST desde 2019).
+const BR_OFFSET_MS = BR_OFFSET_HOURS * 3600_000;
 
 type PeriodKey = 'today' | 'yesterday' | '7d' | '15d' | 'month' | 'last_month' | 'custom';
 
@@ -35,11 +37,41 @@ const PERIOD_LABELS: Record<string, string> = {
   custom: 'Personalizado',
 };
 
-function startOfDay(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+// Extrai os componentes de data "no relógio" BRT a partir de um instante UTC.
+// Subtrair 3h e ler os componentes UTC é equivalente a ler no fuso -03:00.
+function brParts(d: Date): { y: number; m: number; day: number } {
+  const shifted = new Date(d.getTime() - BR_OFFSET_MS);
+  return {
+    y: shifted.getUTCFullYear(),
+    m: shifted.getUTCMonth(),
+    day: shifted.getUTCDate(),
+  };
 }
-function endOfDay(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+
+// 00:00 BRT de uma data qualquer, como instante UTC (03:00 UTC).
+function startOfDayBRT(d: Date): Date {
+  const { y, m, day } = brParts(d);
+  return new Date(Date.UTC(y, m, day, BR_OFFSET_HOURS, 0, 0, 0));
+}
+
+// 23:59:59.999 BRT → 02:59:59.999 UTC do dia seguinte.
+function endOfDayBRT(d: Date): Date {
+  const { y, m, day } = brParts(d);
+  return new Date(Date.UTC(y, m, day + 1, BR_OFFSET_HOURS - 1, 59, 59, 999));
+}
+
+// Formato "YYYY-MM-DD" da data BR correspondente ao instante.
+function brDateString(d: Date): string {
+  const { y, m, day } = brParts(d);
+  return `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+// Constrói 00:00 BRT para um triple (ano, mês 0-based, dia).
+function startOfBrDate(y: number, m: number, day: number): Date {
+  return new Date(Date.UTC(y, m, day, BR_OFFSET_HOURS, 0, 0, 0));
+}
+function endOfBrDate(y: number, m: number, day: number): Date {
+  return new Date(Date.UTC(y, m, day + 1, BR_OFFSET_HOURS - 1, 59, 59, 999));
 }
 
 function computePeriod(
@@ -48,39 +80,53 @@ function computePeriod(
   toStr: string | null,
 ): { from: Date; to: Date; label: string } {
   const now = new Date();
+  const { y: nowY, m: nowM, day: nowD } = brParts(now);
+
   let from: Date;
   let to: Date;
 
   switch (period) {
     case 'today':
-      from = startOfDay(now); to = endOfDay(now); break;
+      from = startOfDayBRT(now); to = endOfDayBRT(now); break;
     case 'yesterday': {
-      const y = new Date(now.getTime() - DAY_MS);
-      from = startOfDay(y); to = endOfDay(y); break;
+      from = startOfBrDate(nowY, nowM, nowD - 1);
+      to = endOfBrDate(nowY, nowM, nowD - 1);
+      break;
     }
     case '7d':
-      to = endOfDay(now); from = startOfDay(new Date(now.getTime() - 6 * DAY_MS)); break;
+      from = startOfBrDate(nowY, nowM, nowD - 6);
+      to = endOfDayBRT(now);
+      break;
     case '15d':
-      to = endOfDay(now); from = startOfDay(new Date(now.getTime() - 14 * DAY_MS)); break;
+      from = startOfBrDate(nowY, nowM, nowD - 14);
+      to = endOfDayBRT(now);
+      break;
     case 'month':
-      from = startOfDay(new Date(now.getFullYear(), now.getMonth(), 1)); to = endOfDay(now); break;
+      from = startOfBrDate(nowY, nowM, 1);
+      to = endOfDayBRT(now);
+      break;
     case 'last_month': {
-      const firstThis = new Date(now.getFullYear(), now.getMonth(), 1);
-      const lastPrev = new Date(firstThis.getTime() - DAY_MS);
-      from = startOfDay(new Date(lastPrev.getFullYear(), lastPrev.getMonth(), 1));
-      to = endOfDay(lastPrev);
+      from = startOfBrDate(nowY, nowM - 1, 1);
+      // último dia do mês anterior = dia 0 do mês atual.
+      const lastDayPrevMonth = new Date(Date.UTC(nowY, nowM, 0)).getUTCDate();
+      to = endOfBrDate(nowY, nowM - 1, lastDayPrevMonth);
       break;
     }
-    case 'custom':
+    case 'custom': {
       if (!fromStr || !toStr) throw new Error('period=custom requer from e to');
-      from = startOfDay(new Date(`${fromStr}T00:00:00`));
-      to = endOfDay(new Date(`${toStr}T00:00:00`));
-      if (isNaN(from.getTime()) || isNaN(to.getTime()) || to < from) {
+      const fParts = fromStr.split('-').map(Number);
+      const tParts = toStr.split('-').map(Number);
+      if (fParts.length !== 3 || tParts.length !== 3 || fParts.some(n => !Number.isFinite(n)) || tParts.some(n => !Number.isFinite(n))) {
         throw new Error('from/to inválidos');
       }
+      from = startOfBrDate(fParts[0], fParts[1] - 1, fParts[2]);
+      to = endOfBrDate(tParts[0], tParts[1] - 1, tParts[2]);
+      if (to < from) throw new Error('from/to inválidos');
       break;
+    }
     default:
-      to = endOfDay(now); from = startOfDay(new Date(now.getTime() - 6 * DAY_MS));
+      from = startOfBrDate(nowY, nowM, nowD - 6);
+      to = endOfDayBRT(now);
   }
 
   return { from, to, label: PERIOD_LABELS[period] ?? '—' };
@@ -310,10 +356,11 @@ async function fetchPeriod(
         escrow.negative_escrow_total += Math.abs(a);
       }
 
-      // Série diária por DATE(escrow_release_time).
+      // Série diária por DATE(escrow_release_time) NO FUSO BRT. Um release
+      // às 02:00 UTC é ainda "ontem" no Brasil — o bucket precisa refletir isso.
       const rt = r.escrow_release_time as string | null;
       if (rt) {
-        const date = rt.substring(0, 10);
+        const date = brDateString(new Date(rt));
         const e = pedidosByDay.get(date) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
         e.gmv += b;
         e.liquido += a;
@@ -415,10 +462,11 @@ async function fetchPeriod(
     }
   }
 
-  // 4. Ads daily no período (única fonte de ads).
+  // 4. Ads daily no período (única fonte de ads). Coluna `date` é DATE
+  // (sem fuso) — comparamos usando a data BR dos limites do período.
   const ads = emptyAds();
-  const fromDate = fromIso.substring(0, 10);
-  const toDate = toIso.substring(0, 10);
+  const fromDate = brDateString(new Date(fromIso));
+  const toDate = brDateString(new Date(toIso));
   const { data: adsRows } = await supabase
     .from('shopee_ads_daily')
     .select('date, expense, broad_gmv')
@@ -693,14 +741,15 @@ export async function GET(request: NextRequest) {
       total: round2(o.total),
     }));
 
-  // Gráfico: receita por dia (preenche dias zerados).
+  // Gráfico: receita por dia (preenche dias zerados). Itera em passos de
+  // 1 dia BRT. Como `from` é 03:00 UTC (=00:00 BRT), somar 24h mantém o
+  // cursor em 00:00 BRT do dia seguinte.
   const receitaPorDia: Array<{
     date: string;
     gmv: number; liquido: number; ads: number; custos_plataforma: number;
   }> = [];
-  const cursor = new Date(from);
-  while (cursor.getTime() <= to.getTime()) {
-    const dStr = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`;
+  for (let t = from.getTime(); t <= to.getTime(); t += DAY_MS) {
+    const dStr = brDateString(new Date(t));
     const p = cur.pedidos_by_day.get(dStr) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
     const adsDay = cur.ads.by_date.get(dStr) ?? 0;
     receitaPorDia.push({
@@ -710,7 +759,6 @@ export async function GET(request: NextRequest) {
       ads: round2(adsDay),
       custos_plataforma: round2(p.comissao + p.taxa),
     });
-    cursor.setDate(cursor.getDate() + 1);
   }
 
   // Distribuição (% do GMV).
@@ -727,8 +775,8 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     period: {
-      from: from.toISOString().substring(0, 10),
-      to: to.toISOString().substring(0, 10),
+      from: brDateString(from),
+      to: brDateString(to),
       label,
     },
     shops: allShops.map(s => ({ shop_id: s.shop_id, name: s.shop_name })),
@@ -860,8 +908,8 @@ function emptyPayload(
 ) {
   return {
     period: {
-      from: from.toISOString().substring(0, 10),
-      to: to.toISOString().substring(0, 10),
+      from: brDateString(from),
+      to: brDateString(to),
       label,
     },
     shops: allShops.map(s => ({ shop_id: s.shop_id, name: s.shop_name })),
