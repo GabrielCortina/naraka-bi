@@ -2,15 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createServiceClient } from '@/lib/supabase-server';
 
-// Dashboard financeiro Shopee. Agrega KPIs, séries temporais e conciliação
-// em uma única chamada. Todo cálculo no backend para a UI só renderizar.
+// Dashboard financeiro Shopee (fase 3 — rebuild). Toda classificação de
+// transação da wallet vem da tabela shopee_transaction_mapping — se a
+// Shopee criar um tipo novo, basta inserir uma linha lá.
 //
-// Query params:
+// Query:
 //   ?period=today|yesterday|7d|15d|month|last_month|custom
-//   ?from=YYYY-MM-DD & to=YYYY-MM-DD   (obrigatórios quando period=custom)
+//   ?from=YYYY-MM-DD & to=YYYY-MM-DD (quando period=custom)
 //   ?shop_id=all|<id>
-//
-// Referência de cálculos: ver regras 1–12 na spec da fase 3.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -81,79 +80,101 @@ function computePeriod(
   return { from, to, label: PERIOD_LABELS[period] ?? '—' };
 }
 
-// Tipos da wallet já tratados em outras categorias — NÃO entram em "outros".
-const HANDLED_TYPES = new Set([
-  'ESCROW_VERIFIED_ADD',
-  'ESCROW_VERIFIED_MINUS',
-  'SPM_DEDUCT',
-  'PAID_ADS',
-  'PAID_ADS_REFUND',
-  'AFFILIATE_ADS_SELLER_FEE',
-  'AFFILIATE_ADS_SELLER_FEE_REFUND',
-  'AFFILIATE_FEE_DEDUCT',
-  'WITHDRAWAL_CREATED',
-  'WITHDRAWAL_COMPLETED',
-  'WITHDRAWAL_CANCELLED',
-  'ADJUSTMENT_FOR_RR_AFTER_ESCROW_VERIFIED',
-]);
+function num(v: unknown): number {
+  if (v == null) return 0;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
 
-function categorize(tt: string, desc: string): string {
-  const d = desc.toLowerCase();
-  if (tt.startsWith('FBS_')) return 'custos_fbs';
-  if (tt === 'FSF_COST_PASSING_DEDUCT') return 'custos_fsf';
-  if (tt.startsWith('PERCEPTION_') || tt.includes('TAX')) return 'custos_impostos';
-  if (d.includes('difal') || d.includes('imposto') || d.includes('tax')) return 'custos_impostos';
-  if (
-    d.includes('parcel was lost') ||
-    d.includes('item perdido') ||
-    d.includes('compensation') ||
-    d.includes('compensação')
-  ) return 'compensacao';
-  if (tt === 'ADJUSTMENT_ADD') return 'compensacao';
-  if (tt === 'ADJUSTMENT_MINUS') return 'custos_ajuste';
-  return 'outros';
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+function round1(n: number): number { return Math.round(n * 10) / 10; }
+function pctOf(part: number, whole: number): number {
+  return whole > 0 ? (part / whole) * 100 : 0;
+}
+
+// ---------- tipos internos ----------
+
+interface MappingRow {
+  transaction_type: string;
+  classificacao: string;
+  kpi_destino: string;
+  descricao_pt: string;
+  entra_no_custo_total: boolean;
+  duplica_com: string | null;
+  natureza: string;
 }
 
 interface EscrowAggr {
   count: number;
   buyer_total: number;
   escrow_amount: number;
+  order_discounted_price: number;
   commission_fee: number;
   service_fee: number;
+  seller_transaction_fee: number;
+  fbs_fee: number;
+  processing_fee: number; // não existe na tabela → fica 0 (placeholder)
   shopee_discount: number;
   voucher_from_shopee: number;
+  voucher_from_seller: number;
+  seller_discount: number;
   coins: number;
   credit_card_promotion: number;
   pix_discount: number;
-  seller_return_refund: number;
+  shopee_shipping_rebate: number;
+  reverse_shipping_fee_total: number; // SUM total (diagnóstico)
+  reverse_shipping_fee_positive: number; // SUM WHERE > 0 (custo real)
+  reverse_shipping_fee_count: number;
+  negative_escrow_count: number;
+  negative_escrow_total: number;
 }
 function emptyEscrow(): EscrowAggr {
   return {
-    count: 0, buyer_total: 0, escrow_amount: 0, commission_fee: 0, service_fee: 0,
-    shopee_discount: 0, voucher_from_shopee: 0, coins: 0, credit_card_promotion: 0,
-    pix_discount: 0, seller_return_refund: 0,
+    count: 0, buyer_total: 0, escrow_amount: 0, order_discounted_price: 0,
+    commission_fee: 0, service_fee: 0, seller_transaction_fee: 0,
+    fbs_fee: 0, processing_fee: 0,
+    shopee_discount: 0, voucher_from_shopee: 0, voucher_from_seller: 0,
+    seller_discount: 0, coins: 0, credit_card_promotion: 0, pix_discount: 0,
+    shopee_shipping_rebate: 0,
+    reverse_shipping_fee_total: 0, reverse_shipping_fee_positive: 0, reverse_shipping_fee_count: 0,
+    negative_escrow_count: 0, negative_escrow_total: 0,
   };
 }
 
 interface OutrosGroup {
   transaction_type: string;
   description: string;
+  classificacao: string;
   count: number;
   total: number;
-  categoria: string;
 }
 interface WalletAggr {
-  afiliados: number;
-  afiliados_refund: number;
-  devolucoes: number;
-  devolucoes_qtd: number;
-  saques: number;
-  outros_map: Map<string, OutrosGroup>;
+  afiliados_debito: number;
+  afiliados_credito: number;
+  devolucao_total: number;
+  devolucao_qtd: number;
+  difal_total: number;
+  difal_qtd: number;
+  pedidos_negativos_total: number;
+  pedidos_negativos_qtd: number;
+  fbs_debito: number;
+  fbs_credito: number;
+  outros_debito: number;
+  outros_credito: number;
+  saques_total: number;
+  saques_qtd: number;
+  outros_detail: Map<string, OutrosGroup>;
 }
 function emptyWallet(): WalletAggr {
   return {
-    afiliados: 0, afiliados_refund: 0, devolucoes: 0, devolucoes_qtd: 0,
-    saques: 0, outros_map: new Map<string, OutrosGroup>(),
+    afiliados_debito: 0, afiliados_credito: 0,
+    devolucao_total: 0, devolucao_qtd: 0,
+    difal_total: 0, difal_qtd: 0,
+    pedidos_negativos_total: 0, pedidos_negativos_qtd: 0,
+    fbs_debito: 0, fbs_credito: 0,
+    outros_debito: 0, outros_credito: 0,
+    saques_total: 0, saques_qtd: 0,
+    outros_detail: new Map<string, OutrosGroup>(),
   };
 }
 
@@ -162,21 +183,26 @@ interface AdsAggr {
   broad_gmv: number;
   by_date: Map<string, number>;
 }
-function emptyAds(): AdsAggr {
-  return { expense: 0, broad_gmv: 0, by_date: new Map<string, number>() };
-}
+function emptyAds(): AdsAggr { return { expense: 0, broad_gmv: 0, by_date: new Map() }; }
 
 interface PeriodData {
   escrow: EscrowAggr;
   wallet: WalletAggr;
   ads: AdsAggr;
-  pedidos_by_day: Map<string, { bruto: number; liquido: number }>;
+  pedidos_by_day: Map<string, { gmv: number; liquido: number; comissao: number; taxa: number }>;
+  total_pedidos: number; // COUNT na shopee_pedidos no período
 }
 
-function num(v: unknown): number {
-  if (v == null) return 0;
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
+async function loadMapping(supabase: SupabaseClient): Promise<Map<string, MappingRow>> {
+  const { data } = await supabase
+    .from('shopee_transaction_mapping')
+    .select('transaction_type, classificacao, kpi_destino, descricao_pt, entra_no_custo_total, duplica_com, natureza');
+
+  const map = new Map<string, MappingRow>();
+  for (const r of (data as MappingRow[] | null) ?? []) {
+    map.set(r.transaction_type, r);
+  }
+  return map;
 }
 
 async function fetchPeriod(
@@ -184,16 +210,16 @@ async function fetchPeriod(
   fromIso: string,
   toIso: string,
   shopIds: number[],
+  mapping: Map<string, MappingRow>,
 ): Promise<PeriodData> {
-  // 1. Pedidos no período (order_sn + create_time) — backbone dos joins.
-  const pedidosQ = supabase
+  // 1. Pedidos no período — base de joins para escrow + contagem total.
+  const { data: pedidos } = await supabase
     .from('shopee_pedidos')
     .select('order_sn, create_time')
     .gte('create_time', fromIso)
     .lte('create_time', toIso)
     .in('shop_id', shopIds)
     .range(0, 49999);
-  const { data: pedidos } = await pedidosQ;
 
   const snToDate = new Map<string, string>();
   const sns: string[] = [];
@@ -204,11 +230,12 @@ async function fetchPeriod(
     sns.push(sn);
     if (ct) snToDate.set(sn, ct.substring(0, 10));
   }
+  const totalPedidos = sns.length;
 
   const escrow = emptyEscrow();
-  const pedidosByDay = new Map<string, { bruto: number; liquido: number }>();
+  const pedidosByDay = new Map<string, { gmv: number; liquido: number; comissao: number; taxa: number }>();
 
-  // 2. Escrow para os SNs do período — em chunks para não estourar tamanho da IN-clause.
+  // 2. Escrow para SNs do período (em chunks).
   if (sns.length > 0) {
     const CHUNK = 500;
     for (let i = 0; i < sns.length; i += CHUNK) {
@@ -216,7 +243,7 @@ async function fetchPeriod(
       const { data: rows } = await supabase
         .from('shopee_escrow')
         .select(
-          'order_sn, buyer_total_amount, escrow_amount, commission_fee, service_fee, shopee_discount, voucher_from_shopee, coins, credit_card_promotion, pix_discount, seller_return_refund',
+          'order_sn, buyer_total_amount, escrow_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, fbs_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee',
         )
         .in('shop_id', shopIds)
         .in('order_sn', chunk)
@@ -226,73 +253,138 @@ async function fetchPeriod(
         escrow.count++;
         const b = num(r.buyer_total_amount);
         const a = num(r.escrow_amount);
+        const com = num(r.commission_fee);
+        const svc = num(r.service_fee);
+
         escrow.buyer_total += b;
         escrow.escrow_amount += a;
-        escrow.commission_fee += num(r.commission_fee);
-        escrow.service_fee += num(r.service_fee);
+        escrow.order_discounted_price += num(r.order_discounted_price);
+        escrow.commission_fee += com;
+        escrow.service_fee += svc;
+        escrow.seller_transaction_fee += num(r.seller_transaction_fee);
+        escrow.fbs_fee += num(r.fbs_fee);
         escrow.shopee_discount += num(r.shopee_discount);
         escrow.voucher_from_shopee += num(r.voucher_from_shopee);
+        escrow.voucher_from_seller += num(r.voucher_from_seller);
+        escrow.seller_discount += num(r.seller_discount);
         escrow.coins += num(r.coins);
         escrow.credit_card_promotion += num(r.credit_card_promotion);
         escrow.pix_discount += num(r.pix_discount);
-        escrow.seller_return_refund += num(r.seller_return_refund);
+        escrow.shopee_shipping_rebate += num(r.shopee_shipping_rebate);
+
+        const rsf = num(r.reverse_shipping_fee);
+        escrow.reverse_shipping_fee_total += rsf;
+        if (rsf > 0) {
+          escrow.reverse_shipping_fee_positive += rsf;
+          escrow.reverse_shipping_fee_count++;
+        }
+        if (a < 0) {
+          escrow.negative_escrow_count++;
+          escrow.negative_escrow_total += Math.abs(a);
+        }
 
         const date = snToDate.get(r.order_sn as string);
         if (date) {
-          const e = pedidosByDay.get(date) ?? { bruto: 0, liquido: 0 };
-          e.bruto += b;
+          const e = pedidosByDay.get(date) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
+          e.gmv += b;
           e.liquido += a;
+          e.comissao += com;
+          e.taxa += svc;
           pedidosByDay.set(date, e);
         }
       }
     }
   }
 
-  // 3. Wallet no período (filtra por create_time).
+  // 3. Wallet no período.
   const { data: walletRows } = await supabase
     .from('shopee_wallet')
-    .select('transaction_type, amount, description, money_flow')
+    .select('transaction_type, amount, description, create_time')
     .gte('create_time', fromIso)
     .lte('create_time', toIso)
     .in('shop_id', shopIds)
-    .range(0, 49999);
+    .range(0, 99999);
 
   const wallet = emptyWallet();
   for (const w of walletRows ?? []) {
-    const tt = (w.transaction_type as string) ?? '';
+    const tt = ((w.transaction_type as string) ?? '').trim();
     const amount = num(w.amount);
     const desc = ((w.description as string | null) ?? '').trim();
 
-    if (tt === 'AFFILIATE_ADS_SELLER_FEE' || tt === 'AFFILIATE_FEE_DEDUCT') {
-      wallet.afiliados += Math.abs(amount);
-    } else if (tt === 'AFFILIATE_ADS_SELLER_FEE_REFUND') {
-      wallet.afiliados_refund += Math.abs(amount);
-    } else if (tt === 'ADJUSTMENT_FOR_RR_AFTER_ESCROW_VERIFIED') {
-      wallet.devolucoes += Math.abs(amount);
-      wallet.devolucoes_qtd++;
-    } else if (
-      (tt === 'WITHDRAWAL_CREATED' || tt === 'WITHDRAWAL_COMPLETED') &&
-      amount < 0
-    ) {
-      wallet.saques += Math.abs(amount);
-    } else if (!HANDLED_TYPES.has(tt)) {
-      const key = `${tt}::${desc}`;
-      const existing = wallet.outros_map.get(key) ?? {
-        transaction_type: tt,
-        description: desc,
-        count: 0,
-        total: 0,
-        categoria: categorize(tt, desc),
-      };
-      existing.count++;
-      existing.total += amount;
-      wallet.outros_map.set(key, existing);
+    // Fallback: tipo desconhecido → tratar como 'outros'/custo_friccao.
+    const m: MappingRow = mapping.get(tt) ?? {
+      transaction_type: tt,
+      classificacao: 'custo_friccao',
+      kpi_destino: 'outros',
+      descricao_pt: desc || tt || '(sem descrição)',
+      entra_no_custo_total: true,
+      duplica_com: null,
+      natureza: amount < 0 ? 'debito' : 'credito',
+    };
+
+    // Tipos explicitamente marcados como "ignorar" (ex: ads duplicados) — pulamos.
+    if (m.classificacao === 'ignorar' || m.kpi_destino === 'ignorar') continue;
+    if (m.duplica_com && m.duplica_com !== 'shopee_escrow' && m.kpi_destino !== 'receita_escrow') {
+      // duplica_com aponta para outra tabela-fonte; shopee_escrow é o backbone
+      // de receita e não conflita. Demais fontes (ex: shopee_ads_daily) já
+      // foram tratadas via classificacao=ignorar acima.
+      continue;
+    }
+
+    const abs = Math.abs(amount);
+
+    switch (m.kpi_destino) {
+      case 'afiliados':
+        if (m.natureza === 'credito' || amount > 0) wallet.afiliados_credito += abs;
+        else wallet.afiliados_debito += abs;
+        break;
+      case 'devolucao':
+        wallet.devolucao_total += abs;
+        wallet.devolucao_qtd++;
+        break;
+      case 'difal':
+        wallet.difal_total += abs;
+        wallet.difal_qtd++;
+        break;
+      case 'pedidos_negativos':
+        wallet.pedidos_negativos_total += abs;
+        wallet.pedidos_negativos_qtd++;
+        break;
+      case 'fbs':
+        if (m.natureza === 'credito' || amount > 0) wallet.fbs_credito += abs;
+        else wallet.fbs_debito += abs;
+        break;
+      case 'saque':
+        // Só conta como saque quando SAIU dinheiro (débito).
+        if (amount < 0) {
+          wallet.saques_total += abs;
+          wallet.saques_qtd++;
+        }
+        break;
+      case 'outros': {
+        if (m.natureza === 'credito' || amount > 0) wallet.outros_credito += abs;
+        else wallet.outros_debito += abs;
+
+        const key = `${tt}::${desc}`;
+        const existing = wallet.outros_detail.get(key) ?? {
+          transaction_type: tt,
+          description: desc || m.descricao_pt,
+          classificacao: m.classificacao,
+          count: 0,
+          total: 0,
+        };
+        existing.count++;
+        existing.total += amount;
+        wallet.outros_detail.set(key, existing);
+        break;
+      }
+      default:
+        // receita_escrow / saque já tratados; demais caem aqui e são ignorados.
+        break;
     }
   }
-  // Subtrair refunds de afiliados (volta ao bolso do seller).
-  wallet.afiliados = Math.max(0, wallet.afiliados - wallet.afiliados_refund);
 
-  // 4. Ads daily no período.
+  // 4. Ads daily no período (única fonte de ads).
   const ads = emptyAds();
   const fromDate = fromIso.substring(0, 10);
   const toDate = toIso.substring(0, 10);
@@ -312,7 +404,13 @@ async function fetchPeriod(
     ads.by_date.set(d, (ads.by_date.get(d) ?? 0) + expense);
   }
 
-  return { escrow, wallet, ads, pedidos_by_day: pedidosByDay };
+  return {
+    escrow,
+    wallet,
+    ads,
+    pedidos_by_day: pedidosByDay,
+    total_pedidos: totalPedidos,
+  };
 }
 
 const CONCILIACAO_KEYS = [
@@ -321,9 +419,6 @@ const CONCILIACAO_KEYS = [
   'EM_DISPUTA', 'ATRASO_DE_REPASSE', 'PAGO_COM_DIVERGENCIA',
   'SEM_VINCULO_FINANCEIRO', 'ORFAO_SHOPEE', 'DADOS_INSUFICIENTES',
 ];
-
-function round2(n: number): number { return Math.round(n * 100) / 100; }
-function round1(n: number): number { return Math.round(n * 10) / 10; }
 
 export async function GET(request: NextRequest) {
   const supabase = createServiceClient();
@@ -344,12 +439,12 @@ export async function GET(request: NextRequest) {
   }
   const { from, to, label } = periodRange;
 
-  // Período anterior = mesma duração, deslocado para trás.
+  // Período anterior (mesma duração, deslocado para trás).
   const durationMs = to.getTime() - from.getTime() + 1;
   const prevTo = new Date(from.getTime() - 1);
   const prevFrom = new Date(prevTo.getTime() - durationMs + 1);
 
-  // Lojas ativas (para filtro e listagem).
+  // Lojas ativas.
   const { data: shopsData } = await supabase
     .from('shopee_tokens')
     .select('shop_id, shop_name')
@@ -369,46 +464,18 @@ export async function GET(request: NextRequest) {
   }
 
   if (shopIds.length === 0) {
-    return NextResponse.json({
-      period: {
-        from: from.toISOString().substring(0, 10),
-        to: to.toISOString().substring(0, 10),
-        label,
-      },
-      shops: [],
-      shop_filter: shopIdStr,
-      kpis: {
-        faturamento_bruto: 0, faturamento_bruto_variacao: 0,
-        valor_liquido: 0, valor_liquido_pct: 0,
-        comissao_media_pct: 0, comissao_media_valor: 0,
-        custo_total_shopee_pct: 0,
-        comissao_total: 0, comissao_pct: 0,
-        taxa_servico_total: 0, taxa_servico_pct: 0,
-        ads_total: 0, ads_roas: 0,
-        afiliados_total: 0, afiliados_pct: 0,
-        rebate_shopee: 0,
-        devolucoes_frete: 0, devolucoes_qtd: 0,
-        saques_total: 0, outros_custos: 0,
-      },
-      outros_custos_detalhe: [],
-      receita_por_dia: [],
-      breakdown_custos: {
-        liquido_pct: 0, comissao_pct: 0, taxa_pct: 0,
-        ads_pct: 0, afiliados_pct: 0, devolucoes_pct: 0, outros_pct: 0,
-      },
-      conciliacao: Object.fromEntries(CONCILIACAO_KEYS.map(k => [k, 0])),
-      ultimos_pedidos: [],
-    });
+    return NextResponse.json(emptyPayload(from, to, label, shopIdStr, allShops));
   }
 
-  // Busca os dois períodos em paralelo.
+  const mapping = await loadMapping(supabase);
+
   const [cur, prev] = await Promise.all([
-    fetchPeriod(supabase, from.toISOString(), to.toISOString(), shopIds),
-    fetchPeriod(supabase, prevFrom.toISOString(), prevTo.toISOString(), shopIds),
+    fetchPeriod(supabase, from.toISOString(), to.toISOString(), shopIds, mapping),
+    fetchPeriod(supabase, prevFrom.toISOString(), prevTo.toISOString(), shopIds, mapping),
   ]);
 
-  // Conciliação e últimos pedidos em paralelo.
-  const [conciliacaoRes, ultimosRes] = await Promise.all([
+  // Conciliação + últimos pedidos + saldo wallet em paralelo.
+  const [conciliacaoRes, ultimosRes, walletBalanceRes] = await Promise.all([
     supabase
       .from('shopee_conciliacao')
       .select('classificacao')
@@ -417,14 +484,20 @@ export async function GET(request: NextRequest) {
     supabase
       .from('shopee_escrow')
       .select(
-        'order_sn, buyer_total_amount, commission_fee, service_fee, escrow_amount, buyer_payment_method, is_released',
+        'order_sn, buyer_total_amount, commission_fee, service_fee, escrow_amount, buyer_payment_method, is_released, reverse_shipping_fee, order_ams_commission_fee',
       )
       .in('shop_id', shopIds)
       .order('synced_at', { ascending: false })
       .limit(20),
+    supabase
+      .from('shopee_wallet')
+      .select('current_balance')
+      .in('shop_id', shopIds)
+      .not('current_balance', 'is', null)
+      .order('create_time', { ascending: false })
+      .limit(1),
   ]);
 
-  // order_status para os últimos pedidos (via join manual por order_sn).
   const ultimosEscrows =
     (ultimosRes.data as Array<{
       order_sn: string;
@@ -434,7 +507,10 @@ export async function GET(request: NextRequest) {
       escrow_amount: number | null;
       buyer_payment_method: string | null;
       is_released: boolean | null;
+      reverse_shipping_fee: number | null;
+      order_ams_commission_fee: number | null;
     }> | null) ?? [];
+
   const ultimosStatusMap = new Map<string, string>();
   if (ultimosEscrows.length > 0) {
     const sns = ultimosEscrows.map(e => e.order_sn);
@@ -455,62 +531,118 @@ export async function GET(request: NextRequest) {
     if (c.classificacao in conciliacao) conciliacao[c.classificacao]++;
   }
 
-  // KPIs do período atual
-  const bruto = cur.escrow.buyer_total;
-  const liquido = cur.escrow.escrow_amount;
-  const liquidoPct = bruto > 0 ? (liquido / bruto) * 100 : 0;
-  const comissao = cur.escrow.commission_fee;
-  const comissaoPct = bruto > 0 ? (comissao / bruto) * 100 : 0;
-  const comissaoMediaValor = cur.escrow.count > 0 ? comissao / cur.escrow.count : 0;
-  const taxa = cur.escrow.service_fee;
-  const taxaPct = bruto > 0 ? (taxa / bruto) * 100 : 0;
-  const adsTotal = cur.ads.expense;
-  const adsPct = bruto > 0 ? (adsTotal / bruto) * 100 : 0;
-  const adsRoas = adsTotal > 0 ? cur.ads.broad_gmv / adsTotal : 0;
-  const afiliados = cur.wallet.afiliados;
-  const afiliadosPct = bruto > 0 ? (afiliados / bruto) * 100 : 0;
-  const devolucoes = cur.wallet.devolucoes;
-  const devolucoesPct = bruto > 0 ? (devolucoes / bruto) * 100 : 0;
+  const saldoWallet = num((walletBalanceRes.data as Array<{ current_balance: number }> | null)?.[0]?.current_balance);
 
-  const rebate =
+  // =================== KPIs ===================
+
+  const gmv = cur.escrow.buyer_total;
+  const receitaLiquida = cur.escrow.escrow_amount;
+  const ticketMedio = cur.escrow.count > 0 ? gmv / cur.escrow.count : 0;
+  // Preço efetivo: order_discounted_price / count de pedidos com escrow
+  // (quantidade de itens não está persistida — count de pedidos é o proxy).
+  const precoMedioEfetivo = cur.escrow.count > 0 ? cur.escrow.order_discounted_price / cur.escrow.count : 0;
+
+  // Take rate: comissão + taxa de serviço
+  const takeRateValor = cur.escrow.commission_fee + cur.escrow.service_fee;
+
+  // Custos plataforma
+  const plataformaOutros =
+    cur.escrow.seller_transaction_fee + cur.escrow.fbs_fee + cur.escrow.processing_fee;
+  const plataformaTotal = takeRateValor + plataformaOutros;
+
+  // Custos aquisição
+  const adsExpense = cur.ads.expense;
+  const adsRoas = adsExpense > 0 ? cur.ads.broad_gmv / adsExpense : 0;
+  const adsTacos = pctOf(adsExpense, gmv);
+  const afiliadosLiquido = Math.max(0, cur.wallet.afiliados_debito - cur.wallet.afiliados_credito);
+  const aquisicaoTotal = adsExpense + afiliadosLiquido;
+
+  // Custos fricção
+  const devolucoesTotalWallet = cur.wallet.devolucao_total;
+  const devolucoesFrete = cur.escrow.reverse_shipping_fee_positive;
+  const devolucoesReversaoReceita = Math.max(0, devolucoesTotalWallet - devolucoesFrete);
+  const difal = cur.wallet.difal_total;
+  const pedidosNegativos = cur.wallet.pedidos_negativos_total;
+  const fbsCustosLiquido = Math.max(0, cur.wallet.fbs_debito - cur.wallet.fbs_credito);
+  const outrosCustos = Math.max(0, cur.wallet.outros_debito - cur.wallet.outros_credito);
+
+  // FRICÇÃO no custo total entra com devolucoes_frete (não o total_wallet).
+  const friccaoTotal =
+    devolucoesFrete + difal + pedidosNegativos + fbsCustosLiquido + outrosCustos;
+
+  const custoTotal = plataformaTotal + aquisicaoTotal + friccaoTotal;
+
+  // Margem operacional: receita líquida menos TODOS os custos não-plataforma.
+  // (Comissão e taxa já estão debitados no escrow_amount — não subtrair de novo).
+  const margemValor = receitaLiquida
+    - adsExpense - afiliadosLiquido
+    - devolucoesFrete - difal - pedidosNegativos - fbsCustosLiquido - outrosCustos;
+
+  // Subsídio Shopee
+  const subsidioTotal =
     cur.escrow.shopee_discount +
     cur.escrow.voucher_from_shopee +
     cur.escrow.coins +
     cur.escrow.credit_card_promotion +
-    cur.escrow.pix_discount;
+    cur.escrow.pix_discount +
+    cur.escrow.shopee_shipping_rebate;
 
-  // "Outros custos": só o que SAIU (negativos). MONEY_IN aparece no detalhe mas não soma.
-  const outrosDetalhe: OutrosGroup[] = Array.from(cur.wallet.outros_map.values());
-  let outrosOut = 0;
-  for (const g of outrosDetalhe) {
-    if (g.total < 0) outrosOut += Math.abs(g.total);
-  }
-  outrosDetalhe.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-  const outrosPct = bruto > 0 ? (outrosOut / bruto) * 100 : 0;
+  // Cobertura financeira
+  const cobertura = pctOf(cur.escrow.count, cur.total_pedidos);
+  const pedidosSemEscrow = Math.max(0, cur.total_pedidos - cur.escrow.count);
 
-  const custoTotalShopee = comissao + taxa + adsTotal + afiliados + devolucoes + outrosOut;
-  const custoTotalShopeePct = bruto > 0 ? (custoTotalShopee / bruto) * 100 : 0;
+  // Variação GMV/receita líquida
+  const gmvVariacao =
+    prev.escrow.buyer_total > 0
+      ? ((gmv - prev.escrow.buyer_total) / prev.escrow.buyer_total) * 100
+      : gmv > 0 ? 100 : 0;
+  const receitaLiquidaVariacao =
+    prev.escrow.escrow_amount > 0
+      ? ((receitaLiquida - prev.escrow.escrow_amount) / prev.escrow.escrow_amount) * 100
+      : receitaLiquida > 0 ? 100 : 0;
 
-  // Variação vs período anterior
-  const prevBruto = prev.escrow.buyer_total;
-  const faturamentoVariacao =
-    prevBruto > 0 ? ((bruto - prevBruto) / prevBruto) * 100 : bruto > 0 ? 100 : 0;
+  // Outros custos detalhe (ordenado por |total|).
+  const outrosDetalhe = Array.from(cur.wallet.outros_detail.values())
+    .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+    .map(o => ({
+      transaction_type: o.transaction_type,
+      description: o.description,
+      classificacao: o.classificacao,
+      count: o.count,
+      total: round2(o.total),
+    }));
 
-  // Receita por dia — percorre todos os dias do período (inclui dias zerados)
-  const receitaPorDia: Array<{ date: string; bruto: number; liquido: number; ads: number }> = [];
+  // Gráfico: receita por dia (preenche dias zerados).
+  const receitaPorDia: Array<{
+    date: string;
+    gmv: number; liquido: number; ads: number; custos_plataforma: number;
+  }> = [];
   const cursor = new Date(from);
   while (cursor.getTime() <= to.getTime()) {
     const dStr = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`;
-    const p = cur.pedidos_by_day.get(dStr) ?? { bruto: 0, liquido: 0 };
-    const a = cur.ads.by_date.get(dStr) ?? 0;
+    const p = cur.pedidos_by_day.get(dStr) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0 };
+    const adsDay = cur.ads.by_date.get(dStr) ?? 0;
     receitaPorDia.push({
       date: dStr,
-      bruto: round2(p.bruto),
+      gmv: round2(p.gmv),
       liquido: round2(p.liquido),
-      ads: round2(a),
+      ads: round2(adsDay),
+      custos_plataforma: round2(p.comissao + p.taxa),
     });
     cursor.setDate(cursor.getDate() + 1);
   }
+
+  // Distribuição (% do GMV).
+  const liquidoAposCustos = gmv - custoTotal;
+  const distribuicao = {
+    liquido_pct: round1(pctOf(liquidoAposCustos, gmv)),
+    plataforma_pct: round1(pctOf(plataformaTotal, gmv)),
+    ads_pct: round1(pctOf(adsExpense, gmv)),
+    afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+    difal_pct: round1(pctOf(difal, gmv)),
+    devolucoes_frete_pct: round1(pctOf(devolucoesFrete, gmv)),
+    outros_pct: round1(pctOf(pedidosNegativos + fbsCustosLiquido + outrosCustos, gmv)),
+  };
 
   return NextResponse.json({
     period: {
@@ -521,50 +653,98 @@ export async function GET(request: NextRequest) {
     shops: allShops.map(s => ({ shop_id: s.shop_id, name: s.shop_name })),
     shop_filter: shopIdStr,
 
-    kpis: {
-      faturamento_bruto: round2(bruto),
-      faturamento_bruto_variacao: round1(faturamentoVariacao),
-      valor_liquido: round2(liquido),
-      valor_liquido_pct: round1(liquidoPct),
-      comissao_media_pct: round1(comissaoPct),
-      comissao_media_valor: round2(comissaoMediaValor),
-      custo_total_shopee_pct: round1(custoTotalShopeePct),
-
-      comissao_total: round2(comissao),
-      comissao_pct: round1(comissaoPct),
-      taxa_servico_total: round2(taxa),
-      taxa_servico_pct: round1(taxaPct),
-      ads_total: round2(adsTotal),
-      ads_roas: round2(adsRoas),
-      afiliados_total: round2(afiliados),
-      afiliados_pct: round1(afiliadosPct),
-
-      rebate_shopee: round2(rebate),
-      devolucoes_frete: round2(devolucoes),
-      devolucoes_qtd: cur.wallet.devolucoes_qtd,
-      saques_total: round2(cur.wallet.saques),
-      outros_custos: round2(outrosOut),
+    receita: {
+      gmv: round2(gmv),
+      gmv_variacao: round1(gmvVariacao),
+      receita_liquida: round2(receitaLiquida),
+      receita_liquida_pct: round1(pctOf(receitaLiquida, gmv)),
+      receita_liquida_variacao: round1(receitaLiquidaVariacao),
+      ticket_medio: round2(ticketMedio),
+      preco_medio_efetivo: round2(precoMedioEfetivo),
+      total_pedidos: cur.escrow.count,
+      total_pecas: 0, // quantidade de itens não está persistida
     },
 
-    outros_custos_detalhe: outrosDetalhe.map(o => ({
-      transaction_type: o.transaction_type,
-      description: o.description,
-      count: o.count,
-      total: round2(o.total),
-      categoria: o.categoria,
-    })),
+    take_rate: {
+      percentual: round1(pctOf(takeRateValor, gmv)),
+      valor: round2(takeRateValor),
+    },
+
+    custos: {
+      plataforma: {
+        total: round2(plataformaTotal),
+        pct_gmv: round1(pctOf(plataformaTotal, gmv)),
+        comissao: round2(cur.escrow.commission_fee),
+        comissao_pct: round1(pctOf(cur.escrow.commission_fee, gmv)),
+        taxa_servico: round2(cur.escrow.service_fee),
+        taxa_servico_pct: round1(pctOf(cur.escrow.service_fee, gmv)),
+        taxa_transacao: round2(cur.escrow.seller_transaction_fee),
+        fbs_fee: round2(cur.escrow.fbs_fee),
+        processing_fee: round2(cur.escrow.processing_fee),
+      },
+      aquisicao: {
+        total: round2(aquisicaoTotal),
+        pct_gmv: round1(pctOf(aquisicaoTotal, gmv)),
+        ads: round2(adsExpense),
+        ads_roas: round2(adsRoas),
+        ads_tacos: round1(adsTacos),
+        afiliados: round2(afiliadosLiquido),
+        afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+      },
+      friccao: {
+        total: round2(friccaoTotal),
+        pct_gmv: round1(pctOf(friccaoTotal, gmv)),
+        devolucoes: {
+          total_wallet: round2(devolucoesTotalWallet),
+          reversao_receita: round2(devolucoesReversaoReceita),
+          custo_frete: round2(devolucoesFrete),
+          qtd: Math.max(cur.wallet.devolucao_qtd, cur.escrow.reverse_shipping_fee_count),
+        },
+        difal: round2(difal),
+        difal_qtd: cur.wallet.difal_qtd,
+        pedidos_negativos: round2(pedidosNegativos),
+        pedidos_negativos_qtd: cur.wallet.pedidos_negativos_qtd,
+        fbs_custos: round2(fbsCustosLiquido),
+        outros: round2(outrosCustos),
+      },
+      total: round2(custoTotal),
+      total_pct_gmv: round1(pctOf(custoTotal, gmv)),
+    },
+
+    margem: {
+      valor: round2(margemValor),
+      pct_gmv: round1(pctOf(margemValor, gmv)),
+    },
+
+    subsidio_shopee: {
+      total: round2(subsidioTotal),
+      desconto_shopee: round2(cur.escrow.shopee_discount),
+      voucher_shopee: round2(cur.escrow.voucher_from_shopee),
+      coins: round2(cur.escrow.coins),
+      promo_cartao: round2(cur.escrow.credit_card_promotion),
+      pix_discount: round2(cur.escrow.pix_discount),
+      frete_subsidiado: round2(cur.escrow.shopee_shipping_rebate),
+      pct_gmv: round1(pctOf(subsidioTotal, gmv)),
+    },
+
+    informativo: {
+      saques: round2(cur.wallet.saques_total),
+      saques_qtd: cur.wallet.saques_qtd,
+      saldo_carteira: round2(saldoWallet),
+      cobertura_financeira: round1(cobertura),
+      pedidos_sem_escrow: pedidosSemEscrow,
+    },
+
+    cupons_seller: {
+      voucher_seller: round2(cur.escrow.voucher_from_seller),
+      seller_discount: round2(cur.escrow.seller_discount),
+    },
+
+    outros_custos_detalhe: outrosDetalhe,
 
     receita_por_dia: receitaPorDia,
 
-    breakdown_custos: {
-      liquido_pct: round1(liquidoPct),
-      comissao_pct: round1(comissaoPct),
-      taxa_pct: round1(taxaPct),
-      ads_pct: round1(adsPct),
-      afiliados_pct: round1(afiliadosPct),
-      devolucoes_pct: round1(devolucoesPct),
-      outros_pct: round1(outrosPct),
-    },
+    distribuicao,
 
     conciliacao,
 
@@ -577,6 +757,51 @@ export async function GET(request: NextRequest) {
       buyer_payment_method: e.buyer_payment_method,
       is_released: e.is_released ?? false,
       order_status: ultimosStatusMap.get(e.order_sn) ?? null,
+      reverse_shipping_fee: e.reverse_shipping_fee,
+      order_ams_commission_fee: e.order_ams_commission_fee,
     })),
   });
+}
+
+function emptyPayload(
+  from: Date,
+  to: Date,
+  label: string,
+  shopFilter: string,
+  allShops: Array<{ shop_id: number; shop_name: string | null }>,
+) {
+  return {
+    period: {
+      from: from.toISOString().substring(0, 10),
+      to: to.toISOString().substring(0, 10),
+      label,
+    },
+    shops: allShops.map(s => ({ shop_id: s.shop_id, name: s.shop_name })),
+    shop_filter: shopFilter,
+    receita: {
+      gmv: 0, gmv_variacao: 0, receita_liquida: 0, receita_liquida_pct: 0,
+      receita_liquida_variacao: 0, ticket_medio: 0, preco_medio_efetivo: 0,
+      total_pedidos: 0, total_pecas: 0,
+    },
+    take_rate: { percentual: 0, valor: 0 },
+    custos: {
+      plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, fbs_fee: 0, processing_fee: 0 },
+      aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0 },
+      friccao: {
+        total: 0, pct_gmv: 0,
+        devolucoes: { total_wallet: 0, reversao_receita: 0, custo_frete: 0, qtd: 0 },
+        difal: 0, difal_qtd: 0, pedidos_negativos: 0, pedidos_negativos_qtd: 0, fbs_custos: 0, outros: 0,
+      },
+      total: 0, total_pct_gmv: 0,
+    },
+    margem: { valor: 0, pct_gmv: 0 },
+    subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, frete_subsidiado: 0, pct_gmv: 0 },
+    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0 },
+    cupons_seller: { voucher_seller: 0, seller_discount: 0 },
+    outros_custos_detalhe: [],
+    receita_por_dia: [],
+    distribuicao: { liquido_pct: 0, plataforma_pct: 0, ads_pct: 0, afiliados_pct: 0, difal_pct: 0, devolucoes_frete_pct: 0, outros_pct: 0 },
+    conciliacao: Object.fromEntries(CONCILIACAO_KEYS.map(k => [k, 0])),
+    ultimos_pedidos: [],
+  };
 }

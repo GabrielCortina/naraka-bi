@@ -30,44 +30,58 @@ interface ApiResponse {
   period: { from: string; to: string; label: string };
   shops: Array<{ shop_id: number; name: string | null }>;
   shop_filter: string;
-  kpis: {
-    faturamento_bruto: number;
-    faturamento_bruto_variacao: number;
-    valor_liquido: number;
-    valor_liquido_pct: number;
-    comissao_media_pct: number;
-    comissao_media_valor: number;
-    custo_total_shopee_pct: number;
-    comissao_total: number;
-    comissao_pct: number;
-    taxa_servico_total: number;
-    taxa_servico_pct: number;
-    ads_total: number;
-    ads_roas: number;
-    afiliados_total: number;
-    afiliados_pct: number;
-    rebate_shopee: number;
-    devolucoes_frete: number;
-    devolucoes_qtd: number;
-    saques_total: number;
-    outros_custos: number;
+  receita: {
+    gmv: number;
+    gmv_variacao: number;
+    receita_liquida: number;
+    receita_liquida_pct: number;
+    receita_liquida_variacao: number;
+    ticket_medio: number;
+    preco_medio_efetivo: number;
+    total_pedidos: number;
+    total_pecas: number;
   };
+  take_rate: { percentual: number; valor: number };
+  custos: {
+    plataforma: {
+      total: number; pct_gmv: number;
+      comissao: number; comissao_pct: number;
+      taxa_servico: number; taxa_servico_pct: number;
+      taxa_transacao: number; fbs_fee: number; processing_fee: number;
+    };
+    aquisicao: {
+      total: number; pct_gmv: number;
+      ads: number; ads_roas: number; ads_tacos: number;
+      afiliados: number; afiliados_pct: number;
+    };
+    friccao: {
+      total: number; pct_gmv: number;
+      devolucoes: { total_wallet: number; reversao_receita: number; custo_frete: number; qtd: number };
+      difal: number; difal_qtd: number;
+      pedidos_negativos: number; pedidos_negativos_qtd: number;
+      fbs_custos: number; outros: number;
+    };
+    total: number; total_pct_gmv: number;
+  };
+  margem: { valor: number; pct_gmv: number };
+  subsidio_shopee: {
+    total: number; desconto_shopee: number; voucher_shopee: number;
+    coins: number; promo_cartao: number; pix_discount: number;
+    frete_subsidiado: number; pct_gmv: number;
+  };
+  informativo: {
+    saques: number; saques_qtd: number; saldo_carteira: number;
+    cobertura_financeira: number; pedidos_sem_escrow: number;
+  };
+  cupons_seller: { voucher_seller: number; seller_discount: number };
   outros_custos_detalhe: Array<{
-    transaction_type: string;
-    description: string;
-    count: number;
-    total: number;
-    categoria: string;
+    transaction_type: string; description: string; classificacao: string;
+    count: number; total: number;
   }>;
-  receita_por_dia: Array<{ date: string; bruto: number; liquido: number; ads: number }>;
-  breakdown_custos: {
-    liquido_pct: number;
-    comissao_pct: number;
-    taxa_pct: number;
-    ads_pct: number;
-    afiliados_pct: number;
-    devolucoes_pct: number;
-    outros_pct: number;
+  receita_por_dia: Array<{ date: string; gmv: number; liquido: number; ads: number; custos_plataforma: number }>;
+  distribuicao: {
+    liquido_pct: number; plataforma_pct: number; ads_pct: number;
+    afiliados_pct: number; difal_pct: number; devolucoes_frete_pct: number; outros_pct: number;
   };
   conciliacao: Record<string, number>;
   ultimos_pedidos: Array<{
@@ -79,18 +93,21 @@ interface ApiResponse {
     buyer_payment_method: string | null;
     is_released: boolean;
     order_status: string | null;
+    reverse_shipping_fee: number | null;
+    order_ams_commission_fee: number | null;
   }>;
 }
 
-// Paleta — cor de cada categoria, reutilizada em cards + donut
 const COLORS = {
   azul: '#378ADD',
   verde: '#1D9E75',
   vermelho: '#E24B4A',
+  vermelhoEscuro: '#A32D2D',
   amber: '#EF9F27',
-  roxo: '#8B5CF6',
-  cinza: '#9CA3AF',
-  vermelhoClaro: '#F59191',
+  roxo: '#7F77DD',
+  cinza: '#888780',
+  coral: '#D85A30',
+  rosa: '#D4537E',
 };
 
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -108,12 +125,18 @@ function fmtPct(n: number | null | undefined, decimals = 1): string {
   if (n == null) return '—';
   return `${n.toFixed(decimals)}%`;
 }
+function fmtInt(n: number): string {
+  return n.toLocaleString('pt-BR');
+}
 function fmtDateShort(iso: string): string {
   const [, m, d] = iso.split('-');
   return `${d}/${m}`;
 }
+function fmtDateBR(iso: string): string {
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y.substring(2)}`;
+}
 
-// Small delta badge — mesma linguagem do KpisHero do Dashboard
 function Delta({ variacao }: { variacao: number }) {
   const positivo = variacao >= 0;
   return (
@@ -128,32 +151,30 @@ function Delta({ variacao }: { variacao: number }) {
 }
 
 function MetricCard({
-  label, value, delta, sub, valueColor, subColor,
+  label, value, delta, sub, valueColor, highlight,
 }: {
   label: string;
   value: string;
   delta?: number;
-  sub?: string;
+  sub?: React.ReactNode;
   valueColor?: string;
-  subColor?: string;
+  highlight?: boolean;
 }) {
   return (
-    <div className="card p-4 rounded-lg">
+    <div
+      className={`card p-4 rounded-lg ${highlight ? 'border border-current/10' : ''}`}
+    >
       <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">{label}</p>
       <div className="flex items-center gap-2 mb-1">
         <span
-          className="text-lg font-medium"
+          className={`font-medium ${highlight ? 'text-xl' : 'text-lg'}`}
           style={valueColor ? { color: valueColor } : undefined}
         >
           {value}
         </span>
         {delta !== undefined && <Delta variacao={delta} />}
       </div>
-      {sub && (
-        <p className="text-[10px]" style={{ color: subColor ?? 'var(--txt3)' }}>
-          {sub}
-        </p>
-      )}
+      {sub && <div className="text-[10px] opacity-60">{sub}</div>}
     </div>
   );
 }
@@ -170,37 +191,43 @@ function Skeleton4() {
   );
 }
 
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-4">{children}</h2>
+  );
+}
+
 const CONCILIACAO_DISPLAY: Array<{ key: string; label: string; bg: string; color: string }> = [
   { key: 'PAGO_OK', label: 'Pago OK', bg: 'rgba(29,158,117,0.12)', color: '#1D9E75' },
   { key: 'AGUARDANDO_ENVIO', label: 'Aguardando envio', bg: 'rgba(55,138,221,0.12)', color: '#378ADD' },
-  { key: 'EM_TRANSITO', label: 'Em trânsito', bg: 'rgba(239,159,39,0.14)', color: '#EF9F27' },
+  { key: 'EM_TRANSITO', label: 'Em trânsito', bg: 'rgba(239,159,39,0.14)', color: '#B4760F' },
   { key: 'ENTREGUE_AGUARDANDO_CONFIRMACAO', label: 'Entregue (aguardando)', bg: 'rgba(55,138,221,0.12)', color: '#378ADD' },
   { key: 'AGUARDANDO_LIBERACAO', label: 'Aguardando liberação', bg: 'rgba(55,138,221,0.12)', color: '#378ADD' },
-  { key: 'PAGO_COM_DIVERGENCIA', label: 'Pago c/ divergência', bg: 'rgba(239,159,39,0.14)', color: '#EF9F27' },
+  { key: 'PAGO_COM_DIVERGENCIA', label: 'Pago c/ divergência', bg: 'rgba(234,179,8,0.14)', color: '#a16207' },
   { key: 'DEVOLVIDO', label: 'Devolvido', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
-  { key: 'REEMBOLSADO_PARCIAL', label: 'Reembolsado parcial', bg: 'rgba(239,159,39,0.14)', color: '#EF9F27' },
-  { key: 'EM_DISPUTA', label: 'Em disputa', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
+  { key: 'REEMBOLSADO_PARCIAL', label: 'Reembolsado parcial', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
+  { key: 'EM_DISPUTA', label: 'Em disputa', bg: 'rgba(234,179,8,0.14)', color: '#a16207' },
   { key: 'ATRASO_DE_REPASSE', label: 'Atraso de repasse', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
-  { key: 'CANCELADO', label: 'Cancelado', bg: 'rgba(156,163,175,0.14)', color: '#6b7280' },
-  { key: 'SEM_VINCULO_FINANCEIRO', label: 'Sem vínculo', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
-  { key: 'ORFAO_SHOPEE', label: 'Órfão Shopee', bg: 'rgba(226,75,74,0.12)', color: '#E24B4A' },
-  { key: 'DADOS_INSUFICIENTES', label: 'Dados insuficientes', bg: 'rgba(156,163,175,0.14)', color: '#6b7280' },
+  { key: 'CANCELADO', label: 'Cancelado', bg: 'rgba(156,163,175,0.14)', color: '#4b5563' },
+  { key: 'DADOS_INSUFICIENTES', label: 'Dados insuficientes', bg: 'rgba(156,163,175,0.14)', color: '#4b5563' },
+  { key: 'SEM_VINCULO_FINANCEIRO', label: 'Sem vínculo', bg: 'rgba(163,45,45,0.15)', color: '#A32D2D' },
+  { key: 'ORFAO_SHOPEE', label: 'Órfão Shopee', bg: 'rgba(163,45,45,0.15)', color: '#A32D2D' },
 ];
 
-const CATEGORIA_BADGES: Record<string, { bg: string; color: string; label: string }> = {
-  custos_fbs: { bg: 'rgba(239,159,39,0.14)', color: '#B4760F', label: 'FBS' },
-  custos_fsf: { bg: 'rgba(239,159,39,0.14)', color: '#B4760F', label: 'FSF' },
-  custos_impostos: { bg: 'rgba(226,75,74,0.12)', color: '#A32D2D', label: 'Imposto' },
-  compensacao: { bg: 'rgba(29,158,117,0.12)', color: '#16764f', label: 'Compensação' },
-  custos_ajuste: { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: 'Ajuste' },
-  outros: { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: 'Outro' },
+const CLASSIFICACAO_BADGES: Record<string, { bg: string; color: string; label: string }> = {
+  receita: { bg: 'rgba(29,158,117,0.12)', color: '#16764f', label: 'Receita' },
+  custo_plataforma: { bg: 'rgba(226,75,74,0.12)', color: '#A32D2D', label: 'Plataforma' },
+  custo_aquisicao: { bg: 'rgba(127,119,221,0.14)', color: '#4B44A1', label: 'Aquisição' },
+  custo_friccao: { bg: 'rgba(216,90,48,0.14)', color: '#8B3910', label: 'Fricção' },
+  informativo: { bg: 'rgba(55,138,221,0.12)', color: '#1F5FA5', label: 'Informativo' },
+  ignorar: { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: 'Ignorar' },
 };
 
 function paymentBadge(method: string | null): { bg: string; color: string; label: string } {
   const m = (method ?? '').toLowerCase();
   if (m.includes('pix')) return { bg: 'rgba(29,158,117,0.12)', color: '#1D9E75', label: 'Pix' };
-  if (m.includes('parcela') || m.includes('installment'))
-    return { bg: 'rgba(55,138,221,0.12)', color: '#378ADD', label: 'Parcelado' };
+  if (m.includes('parcela') || m.includes('installment') || m.includes('sparcel'))
+    return { bg: 'rgba(55,138,221,0.12)', color: '#378ADD', label: 'SParcelado' };
   if (m.includes('card') || m.includes('cart'))
     return { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: 'Cartão' };
   return { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: method ?? '—' };
@@ -241,13 +268,14 @@ export default function FinanceiroShopeePage() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // ============== CHART DATA ==============
   const barData = useMemo(() => {
     if (!data) return null;
     const labels = data.receita_por_dia.map(d => fmtDateShort(d.date));
     return {
       labels,
       datasets: [
-        { label: 'Bruto', data: data.receita_por_dia.map(d => d.bruto), backgroundColor: COLORS.azul, borderRadius: 3, barPercentage: 0.7 },
+        { label: 'GMV', data: data.receita_por_dia.map(d => d.gmv), backgroundColor: COLORS.azul, borderRadius: 3, barPercentage: 0.7 },
         { label: 'Líquido', data: data.receita_por_dia.map(d => d.liquido), backgroundColor: COLORS.verde, borderRadius: 3, barPercentage: 0.7 },
         { label: 'Ads', data: data.receita_por_dia.map(d => d.ads), backgroundColor: COLORS.vermelho, borderRadius: 3, barPercentage: 0.7 },
       ],
@@ -262,8 +290,7 @@ export default function FinanceiroShopeePage() {
       tooltip: {
         callbacks: {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          label: (ctx: any) =>
-            `${ctx.dataset?.label ?? ''}: ${fmtBRLCompact(ctx.parsed?.y ?? 0)}`,
+          label: (ctx: any) => `${ctx.dataset?.label ?? ''}: ${fmtBRLCompact(ctx.parsed?.y ?? 0)}`,
         },
       },
     },
@@ -281,12 +308,19 @@ export default function FinanceiroShopeePage() {
 
   const donutData = useMemo(() => {
     if (!data) return null;
-    const bc = data.breakdown_custos;
+    const d = data.distribuicao;
     return {
-      labels: ['Líquido', 'Comissão', 'Taxa serviço', 'Ads', 'Afiliados', 'Devoluções', 'Outros'],
+      labels: ['Líquido', 'Plataforma', 'Ads', 'Afiliados', 'DIFAL', 'Devoluções (frete)', 'Outros'],
       datasets: [{
-        data: [bc.liquido_pct, bc.comissao_pct, bc.taxa_pct, bc.ads_pct, bc.afiliados_pct, bc.devolucoes_pct, bc.outros_pct],
-        backgroundColor: [COLORS.verde, COLORS.vermelho, COLORS.amber, COLORS.azul, COLORS.roxo, COLORS.vermelhoClaro, COLORS.cinza],
+        data: [
+          Math.max(0, d.liquido_pct),
+          d.plataforma_pct, d.ads_pct, d.afiliados_pct,
+          d.difal_pct, d.devolucoes_frete_pct, d.outros_pct,
+        ],
+        backgroundColor: [
+          COLORS.verde, COLORS.vermelho, COLORS.azul, COLORS.roxo,
+          COLORS.coral, COLORS.rosa, COLORS.cinza,
+        ],
         borderWidth: 0,
       }],
     };
@@ -301,14 +335,30 @@ export default function FinanceiroShopeePage() {
       tooltip: {
         callbacks: {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          label: (ctx: any) =>
-            `${ctx.label ?? ''}: ${(ctx.parsed ?? 0).toFixed(1)}%`,
+          label: (ctx: any) => `${ctx.label ?? ''}: ${(ctx.parsed ?? 0).toFixed(1)}%`,
         },
       },
     },
   }), []);
 
-  const k = data?.kpis;
+  // ================== RENDER ==================
+  const r = data?.receita;
+  const tr = data?.take_rate;
+  const cp = data?.custos.plataforma;
+  const ca = data?.custos.aquisicao;
+  const cf = data?.custos.friccao;
+  const ct = data?.custos;
+  const mg = data?.margem;
+  const sb = data?.subsidio_shopee;
+  const info = data?.informativo;
+
+  const coberturaColor = info
+    ? info.cobertura_financeira >= 90
+      ? COLORS.verde
+      : info.cobertura_financeira >= 70
+        ? COLORS.amber
+        : COLORS.vermelho
+    : undefined;
 
   return (
     <div className="max-w-[1200px] mx-auto p-4 md:p-6">
@@ -319,7 +369,7 @@ export default function FinanceiroShopeePage() {
         </h1>
         <p className="text-xs mt-0.5 opacity-50">
           Atualizado às {lastUpdate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-          {data && ` · ${data.period.from} → ${data.period.to}`}
+          {data && ` · Período: ${fmtDateBR(data.period.from)} a ${fmtDateBR(data.period.to)}`}
         </p>
       </div>
 
@@ -376,100 +426,149 @@ export default function FinanceiroShopeePage() {
       </div>
 
       {error && (
-        <div className="card p-3 rounded-lg mb-4 text-xs" style={{ color: '#E24B4A' }}>
+        <div className="card p-3 rounded-lg mb-4 text-xs" style={{ color: COLORS.vermelho }}>
           Erro: {error}
         </div>
       )}
 
-      {/* Seção 1: RECEITA E MARGEM */}
-      <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-2">Receita e margem</h2>
-      {loading || !k ? <Skeleton4 /> : (
+      {/* ============ SEÇÃO 1: RECEITA ============ */}
+      <SectionLabel>Receita</SectionLabel>
+      {loading || !r ? <Skeleton4 /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <MetricCard
-            label="Faturamento bruto"
-            value={fmtBRL(k.faturamento_bruto)}
-            delta={k.faturamento_bruto_variacao}
-            sub={`vs anterior: ${fmtPct(k.faturamento_bruto_variacao)}`}
+            label="GMV (Faturamento bruto)"
+            value={fmtBRL(r.gmv)}
+            delta={r.gmv_variacao}
+            sub={`${fmtInt(r.total_pedidos)} pedidos com escrow`}
           />
           <MetricCard
-            label="Valor líquido (escrow)"
-            value={fmtBRL(k.valor_liquido)}
+            label="Receita líquida"
+            value={fmtBRL(r.receita_liquida)}
             valueColor={COLORS.verde}
-            sub={`${fmtPct(k.valor_liquido_pct)} do bruto`}
+            delta={r.receita_liquida_variacao}
+            sub={`${fmtPct(r.receita_liquida_pct)} do GMV`}
           />
           <MetricCard
-            label="Comissão média"
-            value={fmtPct(k.comissao_media_pct)}
-            valueColor={COLORS.vermelho}
-            sub={`${fmtBRL(k.comissao_media_valor)} por pedido`}
+            label="Ticket médio"
+            value={fmtBRL(r.ticket_medio)}
+            sub={`Preço efetivo: ${fmtBRL(r.preco_medio_efetivo)}`}
           />
           <MetricCard
-            label="Custo total Shopee"
-            value={fmtPct(k.custo_total_shopee_pct)}
-            valueColor={COLORS.vermelho}
-            sub="Comissão + taxa + ads + afiliados + devoluções"
+            label="Cobertura financeira"
+            value={fmtPct(info?.cobertura_financeira ?? 0)}
+            valueColor={coberturaColor}
+            sub={info && info.pedidos_sem_escrow > 0
+              ? `${fmtInt(info.pedidos_sem_escrow)} pedidos sem escrow`
+              : 'Todos os pedidos com escrow'}
           />
         </div>
       )}
 
-      {/* Seção 2: CUSTOS */}
-      <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-4">Custos</h2>
-      {loading || !k ? <Skeleton4 /> : (
+      {/* ============ SEÇÃO 2: CUSTOS PLATAFORMA ============ */}
+      <SectionLabel>Custos — Plataforma</SectionLabel>
+      {loading || !cp || !tr ? <Skeleton4 /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <MetricCard
-            label="Comissão Shopee"
-            value={fmtBRL(k.comissao_total)}
+            label="Take rate"
+            value={fmtPct(tr.percentual)}
             valueColor={COLORS.vermelho}
-            sub={`${fmtPct(k.comissao_pct)} do bruto`}
+            sub={`Shopee fica ${fmtBRL(tr.valor)}`}
+          />
+          <MetricCard
+            label="Comissão"
+            value={fmtBRL(cp.comissao)}
+            valueColor={COLORS.vermelho}
+            sub={`${fmtPct(cp.comissao_pct)} do GMV`}
           />
           <MetricCard
             label="Taxa de serviço"
-            value={fmtBRL(k.taxa_servico_total)}
+            value={fmtBRL(cp.taxa_servico)}
             valueColor={COLORS.vermelho}
-            sub={`${fmtPct(k.taxa_servico_pct)} do bruto`}
+            sub={`${fmtPct(cp.taxa_servico_pct)} do GMV`}
           />
+          {cp.taxa_transacao + cp.fbs_fee + cp.processing_fee > 0 ? (
+            <MetricCard
+              label="Outros plataforma"
+              value={fmtBRL(cp.taxa_transacao + cp.fbs_fee + cp.processing_fee)}
+              valueColor={COLORS.vermelho}
+              sub="FBS + transação + processing"
+            />
+          ) : (
+            <MetricCard
+              label="Total plataforma"
+              value={fmtBRL(cp.total)}
+              valueColor={COLORS.vermelho}
+              sub={`${fmtPct(cp.pct_gmv)} do GMV`}
+            />
+          )}
+        </div>
+      )}
+
+      {/* ============ SEÇÃO 3: CUSTOS AQUISIÇÃO ============ */}
+      <SectionLabel>Custos — Aquisição</SectionLabel>
+      {loading || !ca ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          {[1,2,3].map(i => (
+            <div key={i} className="card p-4 rounded-lg animate-pulse"><div className="h-12 bg-current/5 rounded" /></div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
           <MetricCard
             label="Gastos com Ads"
-            value={fmtBRL(k.ads_total)}
+            value={fmtBRL(ca.ads)}
             valueColor={COLORS.amber}
-            sub={`ROAS ${k.ads_roas.toFixed(2)}x`}
+            sub={ca.ads_roas > 0 ? `ROAS ${ca.ads_roas.toFixed(2)}x` : 'Sem retorno apurado'}
+          />
+          <MetricCard
+            label="TACOS"
+            value={fmtPct(ca.ads_tacos)}
+            valueColor={COLORS.amber}
+            sub="% do GMV em Ads"
           />
           <MetricCard
             label="Gastos com afiliados"
-            value={fmtBRL(k.afiliados_total)}
+            value={fmtBRL(ca.afiliados)}
             valueColor={COLORS.roxo}
-            sub={`${fmtPct(k.afiliados_pct)} do bruto`}
+            sub={`${fmtPct(ca.afiliados_pct)} do GMV`}
           />
         </div>
       )}
 
-      {/* Seção 3: INFORMATIVO */}
-      <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-4">Informativo</h2>
-      {loading || !k ? <Skeleton4 /> : (
+      {/* ============ SEÇÃO 4: CUSTOS FRICÇÃO ============ */}
+      <SectionLabel>Custos — Fricção operacional</SectionLabel>
+      {loading || !cf ? <Skeleton4 /> : (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-2">
             <MetricCard
-              label="Rebate Shopee"
-              value={fmtBRL(k.rebate_shopee)}
-              valueColor={COLORS.verde}
-              sub="Shopee bancou (não é custo)"
-              subColor={COLORS.verde}
-            />
-            <MetricCard
-              label="Devoluções (frete)"
-              value={fmtBRL(k.devolucoes_frete)}
+              label="Devoluções"
+              value={fmtBRL(cf.devolucoes.custo_frete)}
               valueColor={COLORS.vermelho}
-              sub={`${k.devolucoes_qtd} devoluções`}
+              sub={(
+                <>
+                  Frete: <strong>{fmtBRL(cf.devolucoes.custo_frete)}</strong>
+                  {' · '}Reversão: {fmtBRL(cf.devolucoes.reversao_receita)}
+                  {' · '}{fmtInt(cf.devolucoes.qtd)} devoluções
+                </>
+              )}
             />
             <MetricCard
-              label="Saques (retiradas)"
-              value={fmtBRL(k.saques_total)}
-              valueColor={COLORS.azul}
-              sub="Transferido para conta PJ"
+              label="DIFAL (ICMS)"
+              value={fmtBRL(cf.difal)}
+              valueColor={COLORS.vermelho}
+              sub={`${fmtInt(cf.difal_qtd)} cobranças`}
+            />
+            <MetricCard
+              label="Pedidos negativos"
+              value={fmtBRL(cf.pedidos_negativos)}
+              valueColor={COLORS.vermelho}
+              sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos com prejuízo`}
             />
             <div className="card p-4 rounded-lg">
               <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">Outros custos</p>
-              <span className="text-lg font-medium">{fmtBRL(k.outros_custos)}</span>
+              <span className="text-lg font-medium" style={{ color: COLORS.vermelho }}>
+                {fmtBRL(cf.outros + cf.fbs_custos)}
+              </span>
               <button
                 onClick={() => setOutrosOpen(v => !v)}
                 className="block mt-1 text-[10px] text-[#378ADD] hover:underline"
@@ -483,7 +582,7 @@ export default function FinanceiroShopeePage() {
             <div className="card p-4 rounded-lg mb-4">
               <h3 className="text-xs font-medium opacity-70 mb-3">Detalhamento de outros custos</h3>
               {data.outros_custos_detalhe.length === 0 ? (
-                <p className="text-xs opacity-40">Nenhum custo classificado como &quot;outros&quot; no período</p>
+                <p className="text-xs opacity-40">Nenhum custo classificado como &quot;outros&quot; no período.</p>
               ) : (
                 <>
                   <div className="overflow-x-auto">
@@ -492,14 +591,14 @@ export default function FinanceiroShopeePage() {
                         <tr className="text-left opacity-50">
                           <th className="pb-2">Tipo</th>
                           <th className="pb-2">Descrição</th>
-                          <th className="pb-2">Categoria</th>
+                          <th className="pb-2">Classificação</th>
                           <th className="pb-2 text-right">Qtd</th>
                           <th className="pb-2 text-right">Total</th>
                         </tr>
                       </thead>
                       <tbody>
                         {data.outros_custos_detalhe.map((o, i) => {
-                          const cat = CATEGORIA_BADGES[o.categoria] ?? CATEGORIA_BADGES.outros;
+                          const badge = CLASSIFICACAO_BADGES[o.classificacao] ?? CLASSIFICACAO_BADGES.ignorar;
                           return (
                             <tr key={`${o.transaction_type}-${i}`} className="border-t border-current/5">
                               <td className="py-1.5 font-mono text-[10px]">{o.transaction_type}</td>
@@ -509,12 +608,12 @@ export default function FinanceiroShopeePage() {
                               <td className="py-1.5">
                                 <span
                                   className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-                                  style={{ background: cat.bg, color: cat.color }}
+                                  style={{ background: badge.bg, color: badge.color }}
                                 >
-                                  {cat.label}
+                                  {badge.label}
                                 </span>
                               </td>
-                              <td className="py-1.5 text-right">{o.count}</td>
+                              <td className="py-1.5 text-right">{fmtInt(o.count)}</td>
                               <td
                                 className="py-1.5 text-right"
                                 style={{ color: o.total < 0 ? COLORS.vermelho : COLORS.verde }}
@@ -528,7 +627,7 @@ export default function FinanceiroShopeePage() {
                     </table>
                   </div>
                   <p className="text-[10px] opacity-40 mt-3">
-                    Conforme novos tipos aparecerem, serão listados aqui para mapeamento.
+                    Transações não classificadas aparecem aqui. Para mapear, adicione uma linha em <code>shopee_transaction_mapping</code>.
                   </p>
                 </>
               )}
@@ -537,16 +636,56 @@ export default function FinanceiroShopeePage() {
         </>
       )}
 
-      {/* Seção 4: GRÁFICOS (2 colunas) */}
+      {/* ============ SEÇÃO 5: RESULTADO ============ */}
+      <SectionLabel>Resultado do período</SectionLabel>
+      {loading || !ct || !mg || !sb || !info ? <Skeleton4 /> : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <MetricCard
+            highlight
+            label="Custo total Shopee"
+            value={fmtBRL(ct.total)}
+            valueColor={COLORS.vermelho}
+            sub={`${fmtPct(ct.total_pct_gmv)} do GMV`}
+          />
+          <MetricCard
+            highlight
+            label="Margem operacional"
+            value={fmtBRL(mg.valor)}
+            valueColor={mg.valor >= 0 ? COLORS.verde : COLORS.vermelho}
+            sub={`${fmtPct(mg.pct_gmv)} do GMV`}
+          />
+          <MetricCard
+            highlight
+            label="Subsídio Shopee"
+            value={fmtBRL(sb.total)}
+            valueColor={COLORS.verde}
+            sub={`${fmtPct(sb.pct_gmv)} do GMV — dependência`}
+          />
+          <MetricCard
+            highlight
+            label="Saques"
+            value={fmtBRL(info.saques)}
+            valueColor={COLORS.azul}
+            sub={`${fmtInt(info.saques_qtd)} transferências para conta PJ`}
+          />
+        </div>
+      )}
+
+      {/* ============ SEÇÃO 6: GRÁFICOS ============ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        {/* Receita por dia */}
         <div className="card p-4 rounded-lg">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-medium opacity-70">Receita por dia</h3>
             <div className="flex gap-3 text-[10px] opacity-70">
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm" style={{ background: COLORS.azul }} /> Bruto</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm" style={{ background: COLORS.verde }} /> Líquido</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm" style={{ background: COLORS.vermelho }} /> Ads</span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm" style={{ background: COLORS.azul }} /> GMV
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm" style={{ background: COLORS.verde }} /> Líquido
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm" style={{ background: COLORS.vermelho }} /> Ads
+              </span>
             </div>
           </div>
           <div style={{ height: 220 }}>
@@ -558,9 +697,8 @@ export default function FinanceiroShopeePage() {
           </div>
         </div>
 
-        {/* Para onde vai o dinheiro */}
         <div className="card p-4 rounded-lg">
-          <h3 className="text-xs font-medium opacity-70 mb-3">Para onde vai o dinheiro</h3>
+          <h3 className="text-xs font-medium opacity-70 mb-3">Distribuição do resultado do período</h3>
           <div style={{ height: 180 }}>
             {loading || !donutData ? (
               <div className="h-full bg-current/5 rounded animate-pulse" />
@@ -568,13 +706,13 @@ export default function FinanceiroShopeePage() {
               <Doughnut data={donutData} options={donutOptions} />
             )}
           </div>
-          {data && (
+          {data && donutData && (
             <div className="flex flex-wrap gap-2 mt-3 text-[10px]">
-              {donutData && donutData.labels.map((lbl, idx) => (
+              {donutData.labels.map((lbl, idx) => (
                 <span key={lbl} className="flex items-center gap-1 opacity-80">
                   <span
                     className="w-2 h-2 rounded-full"
-                    style={{ background: donutData.datasets[0].backgroundColor[idx] as string }}
+                    style={{ background: (donutData.datasets[0].backgroundColor as string[])[idx] }}
                   />
                   {lbl} {(donutData.datasets[0].data[idx] as number).toFixed(1)}%
                 </span>
@@ -584,110 +722,128 @@ export default function FinanceiroShopeePage() {
         </div>
       </div>
 
-      {/* Seção 5: STATUS DA CONCILIAÇÃO */}
-      <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-4">Status da conciliação</h2>
+      {/* ============ SEÇÃO 7: CONCILIAÇÃO ============ */}
+      <SectionLabel>Status da conciliação</SectionLabel>
       <div className="card p-4 rounded-lg mb-4">
         {loading || !data ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-            {[1,2,3,4].map(i => (
+            {[1, 2, 3, 4].map(i => (
               <div key={i} className="p-3 rounded animate-pulse bg-current/5" style={{ height: 60 }} />
             ))}
           </div>
-        ) : (
-          (() => {
-            const visible = CONCILIACAO_DISPLAY.filter(c => (data.conciliacao[c.key] ?? 0) > 0);
-            if (visible.length === 0) {
-              return <p className="text-xs opacity-40">Nenhum pedido conciliado ainda</p>;
-            }
-            return (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
-                {visible.map(c => (
-                  <div
-                    key={c.key}
-                    className="p-3 rounded-lg"
-                    style={{ background: c.bg }}
-                  >
-                    <p className="text-[10px] font-medium" style={{ color: c.color }}>{c.label}</p>
-                    <p className="text-lg font-semibold" style={{ color: c.color }}>
-                      {data.conciliacao[c.key].toLocaleString('pt-BR')}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            );
-          })()
-        )}
+        ) : (() => {
+          const visible = CONCILIACAO_DISPLAY.filter(c => (data.conciliacao[c.key] ?? 0) > 0);
+          if (visible.length === 0) {
+            return <p className="text-xs opacity-40">Nenhum pedido conciliado ainda.</p>;
+          }
+          return (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+              {visible.map(c => (
+                <div
+                  key={c.key}
+                  className="p-3 rounded-lg"
+                  style={{ background: c.bg }}
+                >
+                  <p className="text-[10px] font-medium" style={{ color: c.color }}>{c.label}</p>
+                  <p className="text-lg font-semibold" style={{ color: c.color }}>
+                    {fmtInt(data.conciliacao[c.key])}
+                  </p>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
-      {/* Seção 6: ÚLTIMOS PEDIDOS COM ESCROW */}
-      <h2 className="text-[9px] uppercase tracking-wider opacity-50 mb-2 mt-4">Últimos pedidos com escrow</h2>
+      {/* ============ SEÇÃO 8: ÚLTIMOS PEDIDOS ============ */}
+      <SectionLabel>Últimos pedidos com escrow</SectionLabel>
       <div className="card p-4 rounded-lg">
         {loading || !data ? (
           <div className="space-y-2">
-            {[1,2,3,4,5].map(i => (
+            {[1, 2, 3, 4, 5].map(i => (
               <div key={i} className="h-6 bg-current/5 rounded animate-pulse" />
             ))}
           </div>
         ) : data.ultimos_pedidos.length === 0 ? (
-          <p className="text-xs opacity-40">Nenhum pedido com escrow ainda</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left opacity-50">
-                  <th className="pb-2">Pedido</th>
-                  <th className="pb-2 text-right">Bruto</th>
-                  <th className="pb-2 text-right">Comissão</th>
-                  <th className="pb-2 text-right">Taxa</th>
-                  <th className="pb-2 text-right">Líquido</th>
-                  <th className="pb-2">Pgto</th>
-                  <th className="pb-2 text-right">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.ultimos_pedidos.map(p => {
-                  const pb = paymentBadge(p.buyer_payment_method);
-                  const liquidoCor = (p.escrow_amount ?? 0) >= 0 ? COLORS.verde : COLORS.vermelho;
-                  return (
-                    <tr key={p.order_sn} className="border-t border-current/5">
-                      <td className="py-1.5 font-mono text-[10px]">{p.order_sn}</td>
-                      <td className="py-1.5 text-right">{fmtBRL(p.buyer_total_amount)}</td>
-                      <td className="py-1.5 text-right" style={{ color: COLORS.vermelho }}>
-                        {fmtBRL(p.commission_fee)}
-                      </td>
-                      <td className="py-1.5 text-right" style={{ color: COLORS.vermelho }}>
-                        {fmtBRL(p.service_fee)}
-                      </td>
-                      <td className="py-1.5 text-right" style={{ color: liquidoCor }}>
-                        {fmtBRL(p.escrow_amount)}
-                      </td>
-                      <td className="py-1.5">
-                        <span
-                          className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-                          style={{ background: pb.bg, color: pb.color }}
-                        >
-                          {pb.label}
-                        </span>
-                      </td>
-                      <td className="py-1.5 text-right">
-                        <span
-                          className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-                          style={
-                            p.is_released
-                              ? { background: 'rgba(29,158,117,0.12)', color: COLORS.verde }
-                              : { background: 'rgba(239,159,39,0.14)', color: COLORS.amber }
-                          }
-                        >
-                          {p.is_released ? 'Liberado' : 'Pendente'}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+          <p className="text-xs opacity-40">Nenhum pedido com escrow ainda.</p>
+        ) : (() => {
+          const showAfiliado = data.ultimos_pedidos.some(p => (p.order_ams_commission_fee ?? 0) > 0);
+          const showFreteDev = data.ultimos_pedidos.some(p => (p.reverse_shipping_fee ?? 0) > 0);
+          return (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left opacity-50">
+                    <th className="pb-2">Pedido</th>
+                    <th className="pb-2 text-right">GMV</th>
+                    <th className="pb-2 text-right">Comissão</th>
+                    <th className="pb-2 text-right">Taxa</th>
+                    <th className="pb-2 text-right">Líquido</th>
+                    {showAfiliado && <th className="pb-2 text-right">Afiliado</th>}
+                    {showFreteDev && <th className="pb-2 text-right">Frete dev.</th>}
+                    <th className="pb-2">Pgto</th>
+                    <th className="pb-2 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.ultimos_pedidos.map(p => {
+                    const pb = paymentBadge(p.buyer_payment_method);
+                    const liquidoCor = (p.escrow_amount ?? 0) >= 0 ? COLORS.verde : COLORS.vermelho;
+                    return (
+                      <tr key={p.order_sn} className="border-t border-current/5">
+                        <td className="py-1.5 font-mono text-[10px]">{p.order_sn}</td>
+                        <td className="py-1.5 text-right">{fmtBRL(p.buyer_total_amount)}</td>
+                        <td className="py-1.5 text-right" style={{ color: COLORS.vermelho }}>
+                          {fmtBRL(p.commission_fee)}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ color: COLORS.vermelho }}>
+                          {fmtBRL(p.service_fee)}
+                        </td>
+                        <td className="py-1.5 text-right" style={{ color: liquidoCor }}>
+                          {fmtBRL(p.escrow_amount)}
+                        </td>
+                        {showAfiliado && (
+                          <td className="py-1.5 text-right" style={{ color: COLORS.roxo }}>
+                            {(p.order_ams_commission_fee ?? 0) > 0
+                              ? fmtBRL(p.order_ams_commission_fee)
+                              : '—'}
+                          </td>
+                        )}
+                        {showFreteDev && (
+                          <td className="py-1.5 text-right" style={{ color: COLORS.vermelho }}>
+                            {(p.reverse_shipping_fee ?? 0) > 0
+                              ? fmtBRL(p.reverse_shipping_fee)
+                              : '—'}
+                          </td>
+                        )}
+                        <td className="py-1.5">
+                          <span
+                            className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                            style={{ background: pb.bg, color: pb.color }}
+                          >
+                            {pb.label}
+                          </span>
+                        </td>
+                        <td className="py-1.5 text-right">
+                          <span
+                            className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                            style={
+                              p.is_released
+                                ? { background: 'rgba(29,158,117,0.12)', color: COLORS.verde }
+                                : { background: 'rgba(239,159,39,0.14)', color: COLORS.amber }
+                            }
+                          >
+                            {p.is_released ? 'Liberado' : 'Pendente'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
