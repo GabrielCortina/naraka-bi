@@ -62,11 +62,11 @@
     },
     {
       "path": "/api/shopee/sync/healing-wallet",
-      "schedule": "0 7 * * *"
+      "schedule": "0 4 * * *"
     },
     {
       "path": "/api/shopee/sync/reconcile-releases",
-      "schedule": "0 8 * * *"
+      "schedule": "0 5 * * *"
     }
   ]
 }
