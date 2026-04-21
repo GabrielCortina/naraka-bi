@@ -580,9 +580,16 @@ export async function GET(request: NextRequest) {
 
   // Conciliação + últimos pedidos liberados + saldo wallet + cobertura global + receita pendente em paralelo.
   // Conciliação é paginada (pode passar de 1000 linhas — PostgREST limita por default).
+  //
+  // Cobertura financeira:
+  //   - denominador = pedidos QUE DEVERIAM ter escrow (status COMPLETED, SHIPPED,
+  //     TO_CONFIRM_RECEIVE). Status como UNPAID/CANCELLED não geram escrow.
+  //   - numerador   = escrows com detail REAL (escrow_amount não-nulo e ≠ 0).
+  //     Stubs criados pelo fix-wallet-releases (escrow_amount NULL ou 0) não
+  //     contam — senão aparece > 100% quando há mais stubs do que pedidos.
   const [
     conciliacaoRows, ultimosRes, walletBalanceRes,
-    totalPedidosGlobalRes, totalEscrowGlobalRes,
+    pedidosEsperandoEscrowRes, escrowsComDetailRes,
   ] = await Promise.all([
     (async () => {
       const out: Array<{ classificacao: string }> = [];
@@ -621,16 +628,21 @@ export async function GET(request: NextRequest) {
     supabase
       .from('shopee_pedidos')
       .select('*', { count: 'exact', head: true })
-      .in('shop_id', shopIds),
+      .in('shop_id', shopIds)
+      .in('order_status', ['COMPLETED', 'SHIPPED', 'TO_CONFIRM_RECEIVE']),
     supabase
       .from('shopee_escrow')
       .select('*', { count: 'exact', head: true })
-      .in('shop_id', shopIds),
+      .in('shop_id', shopIds)
+      .not('escrow_amount', 'is', null)
+      .neq('escrow_amount', 0),
   ]);
 
-  // Receita pendente = SUM(escrow_amount) onde is_released=false. Paginamos
-  // projetando apenas a coluna para manter payload leve. PAGE=1000 (limite
-  // de PostgREST); asking por mais retorna 1000 e o loop aborta cedo.
+  // Receita pendente = soma dos valores a liberar com valor POSITIVO. Escrows
+  // com escrow_amount <= 0 (devoluções, cancelamentos, stubs) não são receita
+  // futura — ignoramos. Quando escrow_amount é NULL mas payout_amount > 0
+  // (stub criado pelo wallet com valor do release), usamos payout como proxy.
+  // Resultado final é clampado em ≥ 0 por segurança.
   let receitaPendente = 0;
   {
     let offset = 0;
@@ -638,19 +650,30 @@ export async function GET(request: NextRequest) {
     while (true) {
       const { data: rows } = await supabase
         .from('shopee_escrow')
-        .select('escrow_amount')
+        .select('escrow_amount, payout_amount')
         .in('shop_id', shopIds)
         .eq('is_released', false)
         .range(offset, offset + PAGE - 1);
       if (!rows || rows.length === 0) break;
-      for (const r of rows) receitaPendente += num(r.escrow_amount);
+      for (const r of rows) {
+        const ea = r.escrow_amount;
+        const pa = r.payout_amount;
+        if (ea != null) {
+          const eaNum = num(ea);
+          if (eaNum > 0) receitaPendente += eaNum;
+        } else {
+          const paNum = num(pa);
+          if (paNum > 0) receitaPendente += paNum;
+        }
+      }
       if (rows.length < PAGE) break;
       offset += PAGE;
     }
   }
+  receitaPendente = Math.max(0, receitaPendente);
 
-  const totalPedidosGlobal = totalPedidosGlobalRes.count ?? 0;
-  const totalEscrowGlobal = totalEscrowGlobalRes.count ?? 0;
+  const pedidosEsperandoEscrow = pedidosEsperandoEscrowRes.count ?? 0;
+  const escrowsComDetail = escrowsComDetailRes.count ?? 0;
 
   const ultimosEscrows =
     (ultimosRes.data as Array<{
@@ -769,9 +792,16 @@ export async function GET(request: NextRequest) {
     cur.escrow.credit_card_promotion +
     cur.escrow.pix_discount;
 
-  // Cobertura financeira — global (não filtra por período).
-  const cobertura = pctOf(totalEscrowGlobal, totalPedidosGlobal);
-  const pedidosSemEscrow = Math.max(0, totalPedidosGlobal - totalEscrowGlobal);
+  // Cobertura financeira — global (não filtra por período). Denominador só
+  // conta pedidos que deveriam ter escrow (COMPLETED/SHIPPED/TO_CONFIRM_RECEIVE);
+  // numerador só conta escrows com detail real. Limitamos em 100% porque
+  // stubs remanescentes podem inflar o numerador, mas a cobertura "útil"
+  // nunca deve passar de 100%. Se não há pedidos elegíveis, 100%.
+  const coberturaRaw = pedidosEsperandoEscrow > 0
+    ? pctOf(escrowsComDetail, pedidosEsperandoEscrow)
+    : 100;
+  const cobertura = Math.min(coberturaRaw, 100);
+  const pedidosSemEscrow = Math.max(0, pedidosEsperandoEscrow - escrowsComDetail);
 
   // Variação GMV/receita líquida
   const gmvVariacao =
