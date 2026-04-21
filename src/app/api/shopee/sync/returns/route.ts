@@ -9,6 +9,7 @@ import {
   tsToIso,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Sync incremental de returns. Uma loja + até MAX_PAGES páginas por execução.
 // Janela MAX 14 dias. Ref: SHOPEE_API_REFERENCE.md §3.3.
@@ -65,6 +66,8 @@ async function runOneShop(shop: ActiveShop) {
     };
   }
 
+  let auditId: number | null = null;
+
   try {
     const supabase = createServiceClient();
     const { data: ck } = await supabase
@@ -94,6 +97,13 @@ async function runOneShop(shop: ActiveShop) {
 
     const windowFromIso = new Date(windowFromSec * 1000).toISOString();
     const windowToIso = new Date(windowToSec * 1000).toISOString();
+
+    auditId = await startAudit({
+      shop_id: shop.shop_id,
+      job_name: JOB_NAME,
+      window_from: windowFromIso,
+      window_to: windowToIso,
+    });
 
     let totalReturns = 0;
     let pagesConsumed = 0;
@@ -199,6 +209,18 @@ async function runOneShop(shop: ActiveShop) {
       `[shopee-sync][returns] shop_id=${shop.shop_id} returns=${totalReturns} pages=${pagesConsumed} reason=${stoppedReason}`,
     );
 
+    await finishAudit(
+      auditId,
+      stoppedReason === 'timeout' || stoppedReason === 'page_limit' ? 'partial' : 'success',
+      {
+        pages_fetched: pagesConsumed,
+        rows_read: totalReturns,
+        rows_inserted: totalReturns,
+        metadata: { stopped_reason: stoppedReason, next_cursor: nextPageStr },
+      },
+      startedAt,
+    );
+
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed: totalReturns,
       duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: nextPageStr,
@@ -212,6 +234,7 @@ async function runOneShop(shop: ActiveShop) {
       last_error_message: msg,
       is_running: false,
     });
+    await finishAudit(auditId, 'error', { errors_count: 1, error_message: msg }, startedAt);
     throw err;
   }
 }

@@ -9,9 +9,17 @@ import {
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
 import { mapEscrowDetailToRow, type EscrowDetailResponse } from '@/lib/shopee/escrow-mapper';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
-// Worker da fila shopee_sync_queue. Processa até BATCH_SIZE items por
-// execução, checando timeout entre items. Actions suportadas:
+// Worker da fila shopee_sync_queue.
+// - Recupera tasks travadas (PROCESSING > 10min) via recover_stuck_tasks.
+// - Faz claim com SKIP LOCKED via claim_sync_tasks (fallback para
+//   query clássica se a RPC não existir).
+// - Classifica erros (rate_limit / server / client / auth) e aplica
+//   backoff apropriado; marca DEAD ao atingir max_attempts.
+// - Grava auditoria por execução (job_name='sync_worker').
+//
+// Actions suportadas:
 //   - fetch_escrow_detail  (entity_id = order_sn)
 //   - fetch_return_detail  (entity_id = return_sn)
 //   - fetch_order_detail   (entity_id = order_sn)
@@ -20,10 +28,16 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const maxDuration = 55;
 
+const JOB_NAME = 'sync_worker';
 const BATCH_SIZE = 15;
-const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
+const STUCK_TIMEOUT = '10 minutes';
+const STUCK_TIMEOUT_MS = 10 * 60 * 1000;
 const THROTTLE_MS = 1000;
 const MAX_ELAPSED_MS = 45 * 1000;
+const DEFAULT_MAX_ATTEMPTS = 10;
+const RATE_LIMIT_BACKOFF_MIN = 5;
+const CLIENT_ERROR_BACKOFF_MIN = 5;
+const AUTH_ERROR_BACKOFF_MIN = 30;
 
 interface QueueItem {
   id: number;
@@ -32,7 +46,7 @@ interface QueueItem {
   entity_id: string | null;
   action: string;
   attempt_count: number;
-  max_attempts: number;
+  max_attempts: number | null;
   metadata: Record<string, unknown> | null;
 }
 
@@ -81,35 +95,100 @@ interface OrderDetailItem {
   cod?: boolean;
 }
 
-async function unstickProcessing(): Promise<number> {
+type ErrorKind = 'rate_limit' | 'server' | 'client' | 'auth' | 'unknown';
+
+// Classifica erro da Shopee pelo padrão da mensagem lançada pelo client.ts.
+// O client embute "HTTP <status>" + json.error — usamos isso para decidir
+// política de retry sem depender de exceção estruturada.
+function classifyError(msg: string): ErrorKind {
+  const m = msg.toLowerCase();
+  if (
+    m.includes('http 429') ||
+    m.includes('rate_limit') ||
+    m.includes('rate limit') ||
+    m.includes('too_many') ||
+    m.includes('too many request')
+  ) return 'rate_limit';
+  if (
+    m.includes('error_auth') ||
+    m.includes('invalid access_token') ||
+    m.includes('invalid_access_token') ||
+    m.includes('reautorizar')
+  ) return 'auth';
+  if (/http 5\d\d/.test(m) || m.includes('error_server') || m.includes('error_inner') || m.includes('error_time_out')) {
+    return 'server';
+  }
+  if (/http 4\d\d/.test(m) || m.includes('error_param') || m.includes('error_permission') || m.includes('error_not_found')) {
+    return 'client';
+  }
+  return 'unknown';
+}
+
+// Recupera tasks travadas (PROCESSING > STUCK_TIMEOUT) para PENDING.
+// Tenta RPC; cai para UPDATE manual em caso de falha — mantém compat
+// se a função ainda não tiver sido criada na DB.
+async function recoverStuckTasks(): Promise<number> {
   const supabase = createServiceClient();
-  const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS).toISOString();
+  try {
+    const { data, error } = await supabase.rpc('recover_stuck_tasks', { p_timeout: STUCK_TIMEOUT });
+    if (!error && typeof data === 'number') return data;
+  } catch {
+    // segue pro fallback
+  }
+  const cutoff = new Date(Date.now() - STUCK_TIMEOUT_MS).toISOString();
   const { data } = await supabase
     .from('shopee_sync_queue')
-    .update({ status: 'PENDING' })
+    .update({ status: 'PENDING', locked_at: null, locked_by: null })
     .eq('status', 'PROCESSING')
-    .lt('updated_at', cutoff)
+    .lt('locked_at', cutoff)
     .select('id');
   return data?.length ?? 0;
 }
 
-async function claimItems(): Promise<QueueItem[]> {
+// Claim via RPC (FOR UPDATE SKIP LOCKED). Fallback: select + update
+// condicional. A RPC já seta locked_at/locked_by; no fallback setamos
+// manualmente.
+async function claimItems(workerId: string): Promise<QueueItem[]> {
   const supabase = createServiceClient();
-  const { data } = await supabase
+  try {
+    const { data, error } = await supabase.rpc('claim_sync_tasks', {
+      p_batch_size: BATCH_SIZE,
+      p_worker_id: workerId,
+    });
+    if (!error && Array.isArray(data)) {
+      return (data as QueueItem[]).map(d => ({
+        id: d.id,
+        shop_id: d.shop_id,
+        entity_type: d.entity_type,
+        entity_id: d.entity_id,
+        action: d.action,
+        attempt_count: d.attempt_count,
+        max_attempts: d.max_attempts,
+        metadata: d.metadata,
+      }));
+    }
+  } catch {
+    // fallback
+  }
+
+  const { data: candidates } = await supabase
     .from('shopee_sync_queue')
-    .select('id, shop_id, entity_type, entity_id, action, attempt_count, max_attempts, metadata')
+    .select('id')
     .eq('status', 'PENDING')
     .lte('next_retry_at', new Date().toISOString())
-    .order('priority', { ascending: true })
+    .order('priority', { ascending: false })
     .order('created_at', { ascending: true })
     .limit(BATCH_SIZE);
+  if (!candidates || candidates.length === 0) return [];
 
-  if (!data || data.length === 0) return [];
-
-  const ids = data.map(d => d.id);
+  const ids = candidates.map(c => c.id);
   const { data: claimed } = await supabase
     .from('shopee_sync_queue')
-    .update({ status: 'PROCESSING' })
+    .update({
+      status: 'PROCESSING',
+      locked_at: new Date().toISOString(),
+      locked_by: workerId,
+    })
     .in('id', ids)
     .eq('status', 'PENDING')
     .select('id, shop_id, entity_type, entity_id, action, attempt_count, max_attempts, metadata');
@@ -121,33 +200,70 @@ async function markDone(itemId: number): Promise<void> {
   const supabase = createServiceClient();
   await supabase
     .from('shopee_sync_queue')
-    .update({ status: 'DONE', completed_at: new Date().toISOString(), last_error: null })
+    .update({
+      status: 'DONE',
+      completed_at: new Date().toISOString(),
+      last_error: null,
+      locked_at: null,
+      locked_by: null,
+    })
     .eq('id', itemId);
 }
 
+// Marca falha aplicando política de retry por tipo de erro.
+// - rate_limit: backoff curto sem incrementar attempt (não conta tentativa).
+// - client:     incrementa attempt, backoff curto (5min).
+// - auth:       incrementa attempt, backoff longo (30min).
+// - server/unknown: incrementa attempt, backoff exponencial padrão.
+// Ao atingir max_attempts → DEAD com dead_reason='max_attempts_exceeded'.
 async function markFailed(item: QueueItem, error: string): Promise<'FAILED' | 'DEAD'> {
   const supabase = createServiceClient();
-  const nextAttempt = item.attempt_count + 1;
-  if (nextAttempt >= item.max_attempts) {
+  const kind = classifyError(error);
+
+  let nextAttempt: number;
+  let backoffMin: number;
+  if (kind === 'rate_limit') {
+    nextAttempt = item.attempt_count;
+    backoffMin = RATE_LIMIT_BACKOFF_MIN;
+  } else if (kind === 'client') {
+    nextAttempt = item.attempt_count + 1;
+    backoffMin = CLIENT_ERROR_BACKOFF_MIN;
+  } else if (kind === 'auth') {
+    nextAttempt = item.attempt_count + 1;
+    backoffMin = AUTH_ERROR_BACKOFF_MIN;
+  } else {
+    nextAttempt = item.attempt_count + 1;
+    backoffMin = calculateBackoffMinutes(nextAttempt);
+  }
+
+  const maxAttempts = item.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
+  const taggedError = `[${kind}] ${error}`.substring(0, 2000);
+
+  if (nextAttempt >= maxAttempts) {
     await supabase
       .from('shopee_sync_queue')
       .update({
         status: 'DEAD',
         attempt_count: nextAttempt,
-        last_error: error,
+        last_error: taggedError,
+        dead_reason: 'max_attempts_exceeded',
         completed_at: new Date().toISOString(),
+        locked_at: null,
+        locked_by: null,
       })
       .eq('id', item.id);
     return 'DEAD';
   }
-  const backoffMin = calculateBackoffMinutes(nextAttempt);
+
   await supabase
     .from('shopee_sync_queue')
     .update({
       status: 'PENDING',
       attempt_count: nextAttempt,
       next_retry_at: new Date(Date.now() + backoffMin * 60 * 1000).toISOString(),
-      last_error: error,
+      last_error: taggedError,
+      locked_at: null,
+      locked_by: null,
     })
     .eq('id', item.id);
   return 'FAILED';
@@ -266,7 +382,8 @@ async function handleFetchOrderDetail(item: QueueItem, shop: ActiveShop) {
 async function processItem(item: QueueItem): Promise<'ok' | 'fail' | 'dead'> {
   const shop = await getShopById(item.shop_id);
   if (!shop) {
-    await markFailed({ ...item, attempt_count: item.max_attempts - 1 }, 'Loja inativa');
+    const maxA = item.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
+    await markFailed({ ...item, attempt_count: maxA - 1 }, 'Loja inativa');
     return 'dead';
   }
 
@@ -300,21 +417,33 @@ async function processItem(item: QueueItem): Promise<'ok' | 'fail' | 'dead'> {
 export async function GET() {
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
+  const workerId = 'worker-' + Date.now().toString(36);
 
-  const unstuck = await unstickProcessing();
-  if (unstuck > 0) console.log(`[shopee-sync][worker] unstuck=${unstuck}`);
+  // Auditoria sem shop_id específico — worker atravessa lojas.
+  const auditId = await startAudit({ shop_id: 0, job_name: JOB_NAME });
 
-  const items = await claimItems();
+  const recoveredStuck = await recoverStuckTasks();
+  if (recoveredStuck > 0) console.log(`[shopee-sync][worker] recovered_stuck=${recoveredStuck}`);
+
+  const items = await claimItems(workerId);
   if (items.length === 0) {
-    return NextResponse.json({
-      job: 'worker',
-      processed: 0, succeeded: 0, failed: 0, dead: 0, unstuck,
+    const summary = {
+      job: JOB_NAME, worker_id: workerId,
+      processed: 0, succeeded: 0, failed: 0, dead: 0, recovered_stuck: recoveredStuck,
       duration_ms: elapsed(),
       stopped_reason: 'complete' as const,
-    });
+    };
+    await finishAudit(auditId, 'success', {
+      metadata: {
+        worker_id: workerId,
+        tasks_claimed: 0, tasks_succeeded: 0, tasks_failed: 0, tasks_dead: 0,
+        recovered_stuck: recoveredStuck,
+      },
+    }, startedAt);
+    return NextResponse.json(summary);
   }
 
-  console.log(`[shopee-sync][worker] claimed=${items.length}`);
+  console.log(`[shopee-sync][worker] worker_id=${workerId} claimed=${items.length}`);
 
   let succeeded = 0;
   let failed = 0;
@@ -337,11 +466,31 @@ export async function GET() {
   }
 
   const summary = {
-    job: 'worker',
-    processed, succeeded, failed, dead, unstuck,
+    job: JOB_NAME, worker_id: workerId,
+    processed, succeeded, failed, dead, recovered_stuck: recoveredStuck,
     duration_ms: elapsed(),
     stopped_reason: stoppedReason,
   };
   console.log('[shopee-sync][worker] concluído:', summary);
+
+  await finishAudit(
+    auditId,
+    stoppedReason === 'timeout' ? 'partial' : 'success',
+    {
+      rows_read: items.length,
+      errors_count: failed + dead,
+      metadata: {
+        worker_id: workerId,
+        tasks_claimed: items.length,
+        tasks_succeeded: succeeded,
+        tasks_failed: failed,
+        tasks_dead: dead,
+        recovered_stuck: recoveredStuck,
+        stopped_reason: stoppedReason,
+      },
+    },
+    startedAt,
+  );
+
   return NextResponse.json(summary);
 }

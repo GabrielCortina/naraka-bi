@@ -10,6 +10,7 @@ import {
   tsToIso,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Sync incremental de wallet. Uma loja + até MAX_PAGES páginas por execução.
 // Janela MAX 14 dias (limite Shopee ~15d, margem de segurança).
@@ -22,11 +23,13 @@ export const maxDuration = 55;
 const JOB_NAME = 'sync_wallet';
 const MAX_ELAPSED_MS = 45 * 1000;
 const THROTTLE_MS = 400;
-const WINDOW_OVERLAP_SEC = 5 * 60;
+// Overlap de 60min no checkpoint — resistência contra transações
+// gravadas tardiamente na wallet. UPSERT por (shop, transaction_id)
+// garante idempotência.
+const WINDOW_OVERLAP_SEC = 60 * 60;
 const BACKFILL_DAYS = 14;
 const WINDOW_MAX_DAYS = 14;
 const PAGE_SIZE = 100;
-const MAX_PAGES_PER_RUN = 10;
 
 const TYPE_CODE: Record<string, number> = {
   ESCROW_VERIFIED_ADD: 101, ESCROW_VERIFIED_MINUS: 102,
@@ -63,7 +66,7 @@ interface WalletTxn {
 interface WalletResp { more?: boolean; transaction_list?: WalletTxn[] }
 
 type StoppedReason =
-  | 'complete' | 'page_limit' | 'window_advanced'
+  | 'complete' | 'window_advanced'
   | 'timeout' | 'already_running' | 'no_shops';
 
 async function runOneShop(shop: ActiveShop) {
@@ -79,6 +82,8 @@ async function runOneShop(shop: ActiveShop) {
       next_cursor: null as string | null,
     };
   }
+
+  let auditId: number | null = null;
 
   try {
     const supabase = createServiceClient();
@@ -110,6 +115,13 @@ async function runOneShop(shop: ActiveShop) {
     const windowFromIso = new Date(windowFromSec * 1000).toISOString();
     const windowToIso = new Date(windowToSec * 1000).toISOString();
 
+    auditId = await startAudit({
+      shop_id: shop.shop_id,
+      job_name: JOB_NAME,
+      window_from: windowFromIso,
+      window_to: windowToIso,
+    });
+
     let totalTxns = 0;
     let releasedMarked = 0;
     let stubsCreated = 0;
@@ -118,7 +130,10 @@ async function runOneShop(shop: ActiveShop) {
     let moreAfter = false;
     let stoppedReason: StoppedReason = 'complete';
 
-    while (pagesConsumed < MAX_PAGES_PER_RUN) {
+    // Sem cap de páginas: pagina até more=false ou timeout.
+    // Se timeout com more=true, checkpoint guarda last_cursor = próxima página
+    // e a next run retoma na mesma janela.
+    while (true) {
       if (timeLeft() < 5000) { stoppedReason = 'timeout'; break; }
 
       const resp = await shopeeCallWithRefresh<WalletResp>(
@@ -245,15 +260,14 @@ async function runOneShop(shop: ActiveShop) {
       pageNo++;
     }
 
-    if (pagesConsumed === MAX_PAGES_PER_RUN && moreAfter && stoppedReason === 'complete') {
-      stoppedReason = 'page_limit';
-    }
-
-    const nextPageStr = moreAfter && (stoppedReason === 'page_limit' || stoppedReason === 'timeout')
-      ? String(pageNo + (stoppedReason === 'page_limit' ? 1 : 0))
+    // Se timeout com more=true, guarda a página atual para retomar
+    // na próxima run (mesma janela). Sem truncamento: next_cursor só
+    // existe quando timeout ocorreu mid-pagination.
+    const nextPageStr = moreAfter && stoppedReason === 'timeout'
+      ? String(pageNo)
       : null;
 
-    if (stoppedReason === 'page_limit' || stoppedReason === 'timeout') {
+    if (stoppedReason === 'timeout') {
       await updateCheckpoint(shop.shop_id, JOB_NAME, {
         last_window_from: windowFromIso,
         last_window_to: windowToIso,
@@ -288,6 +302,24 @@ async function runOneShop(shop: ActiveShop) {
       `[shopee-sync][wallet] shop_id=${shop.shop_id} txns=${totalTxns} released=${releasedMarked} stubs_created=${stubsCreated} stubs_enqueued=${stubsEnqueued} pages=${pagesConsumed} reason=${stoppedReason}`,
     );
 
+    await finishAudit(
+      auditId,
+      stoppedReason === 'timeout' ? 'partial' : 'success',
+      {
+        pages_fetched: pagesConsumed,
+        rows_read: totalTxns,
+        rows_inserted: totalTxns,
+        rows_updated: releasedMarked,
+        rows_enqueued: stubsEnqueued,
+        metadata: {
+          releases_marked: releasedMarked,
+          stubs_created: stubsCreated,
+          stopped_reason: stoppedReason,
+        },
+      },
+      startedAt,
+    );
+
     return {
       job: JOB_NAME, shop_id: shop.shop_id,
       processed: totalTxns,
@@ -305,6 +337,12 @@ async function runOneShop(shop: ActiveShop) {
       last_error_message: msg,
       is_running: false,
     });
+    await finishAudit(
+      auditId,
+      'error',
+      { errors_count: 1, error_message: msg },
+      startedAt,
+    );
     throw err;
   }
 }

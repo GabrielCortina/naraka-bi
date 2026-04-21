@@ -82,7 +82,7 @@ export async function shopeeApiCall<T = unknown>(
       request_id: json?.request_id,
     });
     throw new Error(
-      `Shopee ${path}: ${json?.error || res.statusText}${json?.message ? ' — ' + json.message : ''}`,
+      `Shopee ${path}: HTTP ${res.status} ${json?.error || res.statusText}${json?.message ? ' — ' + json.message : ''}`,
     );
   }
 

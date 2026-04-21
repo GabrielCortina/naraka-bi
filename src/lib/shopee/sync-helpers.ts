@@ -169,8 +169,17 @@ export async function updateCheckpoint(
     .eq('job_name', jobName);
 }
 
-// Enfileira uma ação para o worker. Deduplica por (shop, entity_type, entity_id, action)
-// entre itens PENDING/PROCESSING — evita engrossar a fila com a mesma tarefa.
+// Enfileira uma ação para o worker. Deduplica por dedupe_key
+// (`${action}:${shopId}:${entityId}`) entre itens PENDING/PROCESSING.
+//
+// Para cobrir registros antigos criados antes da migration 045
+// (que ainda não carregam dedupe_key), fallback pelo match legado
+// (shop, entity_type, entity_id, action). Esse segundo check pode ser
+// removido após a transição — quando não houver mais PENDING/PROCESSING
+// com dedupe_key NULL.
+//
+// Não usamos ON CONFLICT porque o índice idx_queue_dedupe da 045 é
+// parcial não-UNIQUE (decisão Etapa 1).
 export async function enqueueAction(
   shopId: number,
   entityType: string,
@@ -180,17 +189,27 @@ export async function enqueueAction(
   metadata?: Record<string, unknown>,
 ): Promise<boolean> {
   const supabase = createServiceClient();
+  const dedupeKey = `${action}:${shopId}:${entityId ?? ''}`;
 
-  let query = supabase
+  const { data: byKey } = await supabase
+    .from('shopee_sync_queue')
+    .select('id')
+    .eq('dedupe_key', dedupeKey)
+    .in('status', ['PENDING', 'PROCESSING'])
+    .maybeSingle();
+  if (byKey) return false;
+
+  let legacy = supabase
     .from('shopee_sync_queue')
     .select('id')
     .eq('shop_id', shopId)
     .eq('entity_type', entityType)
     .eq('action', action)
+    .is('dedupe_key', null)
     .in('status', ['PENDING', 'PROCESSING']);
-  query = entityId == null ? query.is('entity_id', null) : query.eq('entity_id', entityId);
-  const { data: existing } = await query.maybeSingle();
-  if (existing) return false;
+  legacy = entityId == null ? legacy.is('entity_id', null) : legacy.eq('entity_id', entityId);
+  const { data: byLegacy } = await legacy.maybeSingle();
+  if (byLegacy) return false;
 
   const { error } = await supabase.from('shopee_sync_queue').insert({
     shop_id: shopId,
@@ -199,6 +218,7 @@ export async function enqueueAction(
     action,
     priority,
     metadata: metadata ?? null,
+    dedupe_key: dedupeKey,
     status: 'PENDING',
     next_retry_at: new Date().toISOString(),
   });

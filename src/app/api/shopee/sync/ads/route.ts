@@ -8,6 +8,7 @@ import {
   updateCheckpoint,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Sync Ads daily (últimos 7 dias). Uma loja por execução — round-robin.
 // ⚠️ BR exige DD-MM-YYYY em start_date/end_date. Ref: SHOPEE_API_REFERENCE.md §3.7.
@@ -61,11 +62,19 @@ async function runOneShop(shop: ActiveShop) {
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
 
+  const nowSec = Math.floor(Date.now() / 1000);
+  const fromSec = nowSec - LOOKBACK_DAYS * 86400;
+  const auditId = await startAudit({
+    shop_id: shop.shop_id,
+    job_name: JOB_NAME,
+    window_from: new Date(fromSec * 1000).toISOString(),
+    window_to: new Date(nowSec * 1000).toISOString(),
+  });
+
   try {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const fromSec = nowSec - LOOKBACK_DAYS * 86400;
 
     if (elapsed() > MAX_ELAPSED_MS) {
+      await finishAudit(auditId, 'partial', { rows_read: 0 }, startedAt);
       return {
         job: JOB_NAME, shop_id: shop.shop_id, processed: 0,
         duration_ms: elapsed(), stopped_reason: 'timeout' as StoppedReason, next_cursor: null,
@@ -135,6 +144,12 @@ async function runOneShop(shop: ActiveShop) {
     if (ckErr) console.error('[shopee-sync][ads] checkpoint upsert:', ckErr.message);
 
     console.log(`[shopee-sync][ads] shop_id=${shop.shop_id} days=${rows.length}`);
+    await finishAudit(
+      auditId,
+      'success',
+      { rows_read: rows.length, rows_inserted: rows.length },
+      startedAt,
+    );
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed: rows.length,
       duration_ms: elapsed(), stopped_reason: 'complete' as StoppedReason, next_cursor: null,
@@ -147,6 +162,7 @@ async function runOneShop(shop: ActiveShop) {
       last_error_message: msg,
       is_running: false,
     });
+    await finishAudit(auditId, 'error', { errors_count: 1, error_message: msg }, startedAt);
     throw err;
   }
 }

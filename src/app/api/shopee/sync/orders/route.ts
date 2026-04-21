@@ -10,6 +10,7 @@ import {
   tsToIso,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Sync incremental de pedidos — UMA loja + UMA página de list + UM chunk de
 // detail por execução. Multi-execução via cron: cada run avança um "pedaço"
@@ -27,7 +28,9 @@ export const maxDuration = 55;
 const JOB_NAME = 'sync_orders';
 const MAX_ELAPSED_MS = 45 * 1000;
 const THROTTLE_MS = 300;
-const WINDOW_OVERLAP_SEC = 5 * 60;
+// Overlap de 60min no checkpoint — reduz risco de pedido perdido
+// quando o update_time chega com atraso. UPSERT garante idempotência.
+const WINDOW_OVERLAP_SEC = 60 * 60;
 const FIRST_RUN_DAYS = 3;
 const WINDOW_MAX_DAYS = 14;
 const LIST_PAGE_SIZE = 100;
@@ -92,6 +95,11 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
     };
   }
 
+  let auditId: number | null = null;
+  let inserted = 0;
+  let updated = 0;
+  let pagesFetched = 0;
+
   try {
     const supabase = createServiceClient();
     const { data: ck } = await supabase
@@ -124,6 +132,13 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
 
     const windowFromIso = new Date(windowFromSec * 1000).toISOString();
     const windowToIso = new Date(windowToSec * 1000).toISOString();
+
+    auditId = await startAudit({
+      shop_id: shop.shop_id,
+      job_name: JOB_NAME,
+      window_from: windowFromIso,
+      window_to: windowToIso,
+    });
 
     // Loop: até MAX_LIST_PAGES_PER_RUN páginas de list, cada uma com detail chunks.
     // Avança `cursor` apenas após TODOS os chunks de uma página concluírem — assim,
@@ -221,6 +236,8 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
 
         for (const item of items) {
           const prev = snToPrev[item.order_sn];
+          if (prev) updated++;
+          else inserted++;
           if (item.order_status === 'COMPLETED' && prev?.order_status !== 'COMPLETED') {
             const created = await enqueueAction(
               shop.shop_id, 'escrow', item.order_sn, 'fetch_escrow_detail', 3,
@@ -235,6 +252,7 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
       if (!allChunksDone) break;
 
       pagesConsumed++;
+      pagesFetched++;
       cursor = nextCursorApi ?? '';
       if (!more || !cursor) break;
     }
@@ -296,6 +314,20 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
       `[shopee-sync][orders] shop_id=${shop.shop_id} processed=${processed} enqueued=${enqueued} reason=${stoppedReason} elapsed=${elapsed()}ms`,
     );
 
+    await finishAudit(
+      auditId,
+      stoppedReason === 'timeout' || stoppedReason === 'page_limit' ? 'partial' : 'success',
+      {
+        pages_fetched: pagesFetched,
+        rows_read: processed,
+        rows_inserted: inserted,
+        rows_updated: updated,
+        rows_enqueued: enqueued,
+        metadata: { stopped_reason: stoppedReason, next_cursor: nextCursorOut },
+      },
+      startedAt,
+    );
+
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed, enqueued,
       duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: nextCursorOut,
@@ -309,6 +341,19 @@ async function runOneShop(shop: ActiveShop, forcedDays: number | null): Promise<
       last_error_message: msg,
       is_running: false,
     });
+    await finishAudit(
+      auditId,
+      'error',
+      {
+        pages_fetched: pagesFetched,
+        rows_read: 0,
+        rows_inserted: inserted,
+        rows_updated: updated,
+        errors_count: 1,
+        error_message: msg,
+      },
+      startedAt,
+    );
     throw err;
   }
 }

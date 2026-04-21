@@ -4,6 +4,7 @@ import {
   resolveTargetShop,
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Reconciliação Tiny × Shopee. Uma loja por execução — round-robin.
 // Processa pedidos dos últimos LOOKBACK_DAYS em lotes de CHUNK. Para assim
@@ -204,6 +205,15 @@ async function runOneShop(shop: ActiveShop) {
   const sinceIso = new Date(Date.now() - LOOKBACK_DAYS * 86400000).toISOString();
   const nowIso = new Date().toISOString();
 
+  const auditId = await startAudit({
+    shop_id: shop.shop_id,
+    job_name: JOB_NAME,
+    window_from: sinceIso,
+    window_to: nowIso,
+  });
+
+  try {
+
   const upsertCheckpoint = async (patch: Record<string, unknown>) => {
     const { error } = await supabase.from('shopee_sync_checkpoint').upsert(
       {
@@ -235,6 +245,7 @@ async function runOneShop(shop: ActiveShop) {
       last_error_at: null,
       last_error_message: null,
     });
+    await finishAudit(auditId, 'success', { rows_read: 0 }, startedAt);
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed: 0, changed: 0,
       duration_ms: elapsed(), stopped_reason: 'complete' as StoppedReason, next_cursor: null,
@@ -368,11 +379,28 @@ async function runOneShop(shop: ActiveShop) {
     byClass,
   );
 
+  await finishAudit(
+    auditId,
+    stoppedReason === 'timeout' ? 'partial' : 'success',
+    {
+      rows_read: processed,
+      rows_updated: logs.length,
+      metadata: { stopped_reason: stoppedReason, by_class: byClass },
+    },
+    startedAt,
+  );
+
   return {
     job: JOB_NAME, shop_id: shop.shop_id, processed, changed: logs.length,
     duration_ms: elapsed(), stopped_reason: stoppedReason, next_cursor: null,
     by_class: byClass,
   };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    console.error(`[shopee-sync][reconciliation] shop_id=${shop.shop_id} ERRO:`, msg);
+    await finishAudit(auditId, 'error', { errors_count: 1, error_message: msg }, startedAt);
+    throw err;
+  }
 }
 
 export async function GET(request: NextRequest) {

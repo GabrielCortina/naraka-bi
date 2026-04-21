@@ -11,6 +11,7 @@ import {
   type ActiveShop,
 } from '@/lib/shopee/sync-helpers';
 import { mapEscrowDetailToRow, type EscrowDetailResponse } from '@/lib/shopee/escrow-mapper';
+import { startAudit, finishAudit } from '@/lib/shopee/audit';
 
 // Sync incremental de escrow list (liberações). Uma loja + até MAX_PAGES
 // páginas (page_no) por execução. page_no persistido em last_cursor.
@@ -30,7 +31,8 @@ const JOB_NAME = 'sync_escrow_list';
 const MAX_ELAPSED_MS = 45 * 1000;
 const THROTTLE_MS = 400;
 const DETAIL_THROTTLE_MS = 500;
-const WINDOW_OVERLAP_SEC = 5 * 60;
+// Overlap de 60min no checkpoint — cobre atrasos de escrow_release_time.
+const WINDOW_OVERLAP_SEC = 60 * 60;
 const BACKFILL_DAYS = 30;
 const WINDOW_MAX_DAYS = 30;
 const PAGE_SIZE = 100;
@@ -159,6 +161,8 @@ async function runOneShop(shop: ActiveShop) {
     };
   }
 
+  let auditId: number | null = null;
+
   try {
     const supabase = createServiceClient();
     const { data: ck } = await supabase
@@ -188,6 +192,13 @@ async function runOneShop(shop: ActiveShop) {
 
     const windowFromIso = new Date(windowFromSec * 1000).toISOString();
     const windowToIso = new Date(windowToSec * 1000).toISOString();
+
+    auditId = await startAudit({
+      shop_id: shop.shop_id,
+      job_name: JOB_NAME,
+      window_from: windowFromIso,
+      window_to: windowToIso,
+    });
 
     let processed = 0;
     let detailsFetched = 0;
@@ -304,6 +315,23 @@ async function runOneShop(shop: ActiveShop) {
       `[shopee-sync][escrow-list] shop_id=${shop.shop_id} processed=${processed} details_fetched=${detailsFetched} updated=${updated} enqueued=${enqueued} pages=${pagesConsumed} reason=${stoppedReason}`,
     );
 
+    await finishAudit(
+      auditId,
+      stoppedReason === 'timeout' || stoppedReason === 'page_limit' ? 'partial' : 'success',
+      {
+        pages_fetched: pagesConsumed,
+        rows_read: processed,
+        rows_updated: updated,
+        rows_enqueued: enqueued,
+        metadata: {
+          details_fetched: detailsFetched,
+          stopped_reason: stoppedReason,
+          next_cursor: nextPageStr,
+        },
+      },
+      startedAt,
+    );
+
     return {
       job: JOB_NAME, shop_id: shop.shop_id, processed,
       details_fetched: detailsFetched, updated, enqueued,
@@ -318,6 +346,7 @@ async function runOneShop(shop: ActiveShop) {
       last_error_message: msg,
       is_running: false,
     });
+    await finishAudit(auditId, 'error', { errors_count: 1, error_message: msg }, startedAt);
     throw err;
   }
 }
