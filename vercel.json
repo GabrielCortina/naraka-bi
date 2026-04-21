@@ -55,6 +55,18 @@
     {
       "path": "/api/shopee/sync/backfill-escrow-detail?shop_id=869193731&limit=500",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/healing-orders",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/shopee/sync/healing-wallet",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/shopee/sync/reconcile-releases",
+      "schedule": "0 8 * * *"
     }
   ]
 }
