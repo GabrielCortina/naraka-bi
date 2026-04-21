@@ -46,7 +46,7 @@
     },
     {
       "path": "/api/shopee/sync/ads",
-      "schedule": "0 7 * * *"
+      "schedule": "0 */3 * * *"
     },
     {
       "path": "/api/shopee/sync/reconciliation",
