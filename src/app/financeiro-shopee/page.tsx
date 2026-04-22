@@ -669,34 +669,60 @@ export default function FinanceiroShopeePage() {
       )}
 
       {/* ============ COMPENSAÇÕES ============ */}
-      {!loading && data && data.compensacoes.total > 0 && (
-        <>
-          <SectionLabel>Compensações Shopee</SectionLabel>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-            <MetricCard
-              label="Compensações recebidas"
-              value={fmtBRL(data.compensacoes.total)}
-              valueColor={COLORS.verde}
-              sub={(
-                <>
-                  {fmtInt(data.compensacoes.qtd)} reembolsos — objetos perdidos e devoluções
-                  {data.compensacoes.detalhe.length > 0 && (
-                    <>
-                      {' · '}
-                      {data.compensacoes.detalhe.slice(0, 2).map((d, i) => (
-                        <span key={i}>
-                          {i > 0 && ' · '}
-                          {d.description}: {fmtBRL(d.total)}
-                        </span>
-                      ))}
-                    </>
-                  )}
-                </>
+      {!loading && data && data.compensacoes.total > 0 && (() => {
+        // Buckets por description. "perdido" tem prioridade — se casar ali,
+        // não cai em "compensation/return" mesmo que case também.
+        const isPerdido = (d: string) => /perdido/i.test(d);
+        const isDevolucao = (d: string) => /(compensation|return)/i.test(d);
+        const perdidos = data.compensacoes.detalhe.filter(d => isPerdido(d.description));
+        const devolucoes = data.compensacoes.detalhe.filter(
+          d => !isPerdido(d.description) && isDevolucao(d.description),
+        );
+        const outros = data.compensacoes.detalhe.filter(
+          d => !isPerdido(d.description) && !isDevolucao(d.description),
+        );
+        const agg = (items: typeof data.compensacoes.detalhe) => ({
+          total: items.reduce((s, i) => s + i.total, 0),
+          count: items.reduce((s, i) => s + i.count, 0),
+        });
+        const gPerdidos = agg(perdidos);
+        const gDevolucoes = agg(devolucoes);
+        const gOutros = agg(outros);
+
+        return (
+          <>
+            <SectionLabel>Compensações Shopee</SectionLabel>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <MetricCard
+                label="Total Compensações"
+                value={fmtBRL(data.compensacoes.total)}
+                valueColor={COLORS.verde}
+                sub={`${fmtInt(data.compensacoes.qtd)} reembolsos recebidos`}
+              />
+              <MetricCard
+                label="Objetos perdidos"
+                value={fmtBRL(gPerdidos.total)}
+                valueColor={COLORS.verde}
+                sub={`${fmtInt(gPerdidos.count)} reembolsos`}
+              />
+              <MetricCard
+                label="Devoluções compensadas"
+                value={fmtBRL(gDevolucoes.total)}
+                valueColor={COLORS.verde}
+                sub={`${fmtInt(gDevolucoes.count)} reembolsos`}
+              />
+              {gOutros.total > 0 && (
+                <MetricCard
+                  label="Outras compensações"
+                  value={fmtBRL(gOutros.total)}
+                  valueColor={COLORS.verde}
+                  sub="Outros tipos de reembolso"
+                />
               )}
-            />
-          </div>
-        </>
-      )}
+            </div>
+          </>
+        );
+      })()}
 
       {/* ============ SEÇÃO 5: RESULTADO ============ */}
       <SectionLabel>Resultado do período</SectionLabel>
