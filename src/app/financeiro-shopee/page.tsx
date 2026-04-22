@@ -282,7 +282,7 @@ export default function FinanceiroShopeePage() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [outrosOpen, setOutrosOpen] = useState(false);
   const [divergenciasOpen, setDivergenciasOpen] = useState(false);
-  const [detalhesTipo, setDetalhesTipo] = useState<'take_rate' | 'afiliados' | 'devolucoes' | null>(null);
+  const [detalhesTipo, setDetalhesTipo] = useState<'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio' | null>(null);
 
   const fetchData = useCallback(async () => {
     if (period === 'custom' && (!customFrom || !customTo)) return;
@@ -629,12 +629,14 @@ export default function FinanceiroShopeePage() {
               value={fmtBRL(cf.difal)}
               valueColor={COLORS.vermelho}
               sub={`${fmtInt(cf.difal_qtd)} cobranças`}
+              onClick={() => setDetalhesTipo('difal')}
             />
             <MetricCard
               label="FBS (Fulfillment)"
               value={fmtBRL(cf.fbs_custos)}
               valueColor={COLORS.vermelho}
               sub="Custos de armazenamento e manuseio"
+              onClick={() => setDetalhesTipo('fbs')}
             />
             <div className="card p-4 rounded-lg">
               <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">Outros custos</p>
@@ -786,6 +788,7 @@ export default function FinanceiroShopeePage() {
             value={fmtBRL(sb.total)}
             valueColor={COLORS.verde}
             sub={`${fmtPct(sb.pct_gmv)} do GMV — dependência`}
+            onClick={() => setDetalhesTipo('subsidio')}
           />
           <MetricCard
             highlight

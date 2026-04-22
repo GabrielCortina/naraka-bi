@@ -15,7 +15,21 @@ const PAGE_DB = 1000;                // limite PostgREST
 const MAX_LIMIT_PAGE = 200;          // por segurança
 const BR_OFFSET_HOURS = 3;
 
-type Tipo = 'take_rate' | 'afiliados' | 'devolucoes';
+type Tipo = 'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio';
+
+// Transaction types da wallet que representam cada custo. Se a Shopee
+// criar variantes novas, adicionar aqui e no mapping SQL.
+const DIFAL_TX_TYPES = ['ADJUSTMENT_CENTER_DEDUCT'];
+const FBS_TX_TYPES = ['FBS_FEE_CHARGE_MINUS', 'FBS_ADJUSTMENT_MINUS'];
+
+// Regex extraindo o order_sn na description das cobranças de DIFAL.
+// Formato visto em produção: "... referente ao pedido 260414QA1CJ7K5".
+const ORDER_SN_IN_DESCRIPTION = /referente ao pedido\s+(\S+)\s*$/i;
+function extractOrderSnFromDescription(description: string | null): string | null {
+  if (!description) return null;
+  const m = description.match(ORDER_SN_IN_DESCRIPTION);
+  return m?.[1] ?? null;
+}
 
 function startOfBrDate(y: number, m: number, day: number): Date {
   return new Date(Date.UTC(y, m, day, BR_OFFSET_HOURS, 0, 0, 0));
@@ -100,7 +114,65 @@ interface DerivedDevolucoes {
   escrow_release_time: string | null;
 }
 
-type Derived = DerivedTakeRate | DerivedAfiliados | DerivedDevolucoes;
+interface EscrowSubsidioRow {
+  order_sn: string;
+  order_selling_price: number | null;
+  coins: number | null;
+  voucher_from_shopee: number | null;
+  shopee_discount: number | null;
+  credit_card_promotion: number | null;
+  pix_discount: number | null;
+  escrow_release_time: string | null;
+}
+
+interface WalletRow {
+  id: number;
+  transaction_type: string | null;
+  amount: number | null;
+  description: string | null;
+  create_time: string | null;
+}
+
+interface DerivedDifal {
+  kind: 'difal';
+  id: number;
+  order_sn_extraido: string | null;
+  description: string;
+  amount: number;
+  create_time: string | null;
+  shipping_carrier: string | null;
+}
+
+interface DerivedFbs {
+  kind: 'fbs';
+  id: number;
+  transaction_type: string;
+  description: string;
+  amount: number;
+  create_time: string | null;
+}
+
+interface DerivedSubsidio {
+  kind: 'subsidio';
+  order_sn: string;
+  order_selling_price: number;
+  coins: number;
+  voucher_from_shopee: number;
+  shopee_discount: number;
+  credit_card_promotion: number;
+  pix_discount: number;
+  total_subsidio: number;
+  subsidio_pct: number;
+  escrow_release_time: string | null;
+}
+
+type Derived =
+  | DerivedTakeRate
+  | DerivedAfiliados
+  | DerivedDevolucoes
+  | DerivedDifal
+  | DerivedFbs
+  | DerivedSubsidio;
 
 // Campos válidos por tipo para o dropdown de ordenação. O front envia
 // o nome; aqui mapeamos para getters tipados.
@@ -108,12 +180,18 @@ const SORT_FIELDS: Record<Tipo, string[]> = {
   take_rate:  ['take_rate_pct', 'total_taxas', 'buyer_total_amount', 'commission_fee', 'service_fee'],
   afiliados:  ['order_ams_commission_fee', 'afiliado_pct', 'order_selling_price'],
   devolucoes: ['custo_total_devolucao', 'reverse_shipping_fee', 'frete_ida_seller', 'seller_return_refund', 'escrow_amount'],
+  difal:      ['amount', 'create_time'],
+  fbs:        ['amount', 'create_time'],
+  subsidio:   ['total_subsidio', 'subsidio_pct', 'coins', 'voucher_from_shopee', 'pix_discount'],
 };
 
 const DEFAULT_SORT: Record<Tipo, string> = {
   take_rate:  'take_rate_pct',
   afiliados:  'order_ams_commission_fee',
   devolucoes: 'custo_total_devolucao',
+  difal:      'amount',
+  fbs:        'amount',
+  subsidio:   'total_subsidio',
 };
 
 type SupabaseClient = ReturnType<typeof createServiceClient>;
@@ -123,7 +201,7 @@ type SupabaseClient = ReturnType<typeof createServiceClient>;
 // agregação em memória.
 async function fetchEscrows(
   supabase: SupabaseClient,
-  tipo: Tipo,
+  tipo: 'take_rate' | 'afiliados' | 'devolucoes',
   shopIds: number[],
   fromIso: string,
   toIso: string,
@@ -151,6 +229,66 @@ async function fetchEscrows(
     const { data, error } = await q.range(offset, offset + PAGE_DB - 1);
     if (error) throw new Error(error.message);
     const page = (data as EscrowRow[] | null) ?? [];
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < PAGE_DB) break;
+    offset += PAGE_DB;
+  }
+  return rows;
+}
+
+// Busca escrows com algum tipo de subsídio Shopee > 0 no período.
+// Paginação idêntica ao fetchEscrows. SELECT é menor (só os campos
+// de subsídio) — subsidio não usa commission/service/etc.
+async function fetchEscrowsSubsidio(
+  supabase: SupabaseClient,
+  shopIds: number[],
+  fromIso: string,
+  toIso: string,
+): Promise<EscrowSubsidioRow[]> {
+  const rows: EscrowSubsidioRow[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('shopee_escrow')
+      .select('order_sn, order_selling_price, coins, voucher_from_shopee, shopee_discount, credit_card_promotion, pix_discount, escrow_release_time')
+      .in('shop_id', shopIds)
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .gte('escrow_release_time', fromIso)
+      .lte('escrow_release_time', toIso)
+      .or('coins.gt.0,voucher_from_shopee.gt.0,shopee_discount.gt.0,credit_card_promotion.gt.0,pix_discount.gt.0')
+      .range(offset, offset + PAGE_DB - 1);
+    if (error) throw new Error(error.message);
+    const page = (data as EscrowSubsidioRow[] | null) ?? [];
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < PAGE_DB) break;
+    offset += PAGE_DB;
+  }
+  return rows;
+}
+
+async function fetchWallet(
+  supabase: SupabaseClient,
+  shopIds: number[],
+  fromIso: string,
+  toIso: string,
+  txTypes: string[],
+): Promise<WalletRow[]> {
+  const rows: WalletRow[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('shopee_wallet')
+      .select('id, transaction_type, amount, description, create_time')
+      .in('shop_id', shopIds)
+      .in('transaction_type', txTypes)
+      .gte('create_time', fromIso)
+      .lte('create_time', toIso)
+      .range(offset, offset + PAGE_DB - 1);
+    if (error) throw new Error(error.message);
+    const page = (data as WalletRow[] | null) ?? [];
     if (page.length === 0) break;
     rows.push(...page);
     if (page.length < PAGE_DB) break;
@@ -221,6 +359,54 @@ function deriveDevolucoes(r: EscrowRow): DerivedDevolucoes {
   };
 }
 
+function deriveSubsidio(r: EscrowSubsidioRow): DerivedSubsidio {
+  const osp = num(r.order_selling_price);
+  const coins = num(r.coins);
+  const vfs = num(r.voucher_from_shopee);
+  const sd = num(r.shopee_discount);
+  const ccp = num(r.credit_card_promotion);
+  const pix = num(r.pix_discount);
+  const total = coins + vfs + sd + ccp + pix;
+  return {
+    kind: 'subsidio',
+    order_sn: r.order_sn,
+    order_selling_price: round2(osp),
+    coins: round2(coins),
+    voucher_from_shopee: round2(vfs),
+    shopee_discount: round2(sd),
+    credit_card_promotion: round2(ccp),
+    pix_discount: round2(pix),
+    total_subsidio: round2(total),
+    subsidio_pct: round2(pctOf(total, osp)),
+    escrow_release_time: r.escrow_release_time,
+  };
+}
+
+function deriveDifal(r: WalletRow, carriers: Map<string, string>): DerivedDifal {
+  const desc = r.description ?? '';
+  const osn = extractOrderSnFromDescription(desc);
+  return {
+    kind: 'difal',
+    id: r.id,
+    order_sn_extraido: osn,
+    description: desc,
+    amount: round2(Math.abs(num(r.amount))),
+    create_time: r.create_time,
+    shipping_carrier: osn ? carriers.get(osn) ?? null : null,
+  };
+}
+
+function deriveFbs(r: WalletRow): DerivedFbs {
+  return {
+    kind: 'fbs',
+    id: r.id,
+    transaction_type: r.transaction_type ?? '',
+    description: r.description ?? '',
+    amount: round2(Math.abs(num(r.amount))),
+    create_time: r.create_time,
+  };
+}
+
 function sortKey(d: Derived, field: string): number {
   switch (d.kind) {
     case 'take_rate':
@@ -242,7 +428,26 @@ function sortKey(d: Derived, field: string): number {
       if (field === 'seller_return_refund')  return d.seller_return_refund;
       if (field === 'escrow_amount')         return d.escrow_amount;
       return d.custo_total_devolucao;
+    case 'difal':
+    case 'fbs':
+      if (field === 'create_time') return d.create_time ? new Date(d.create_time).getTime() : 0;
+      return d.amount;
+    case 'subsidio':
+      if (field === 'total_subsidio')      return d.total_subsidio;
+      if (field === 'subsidio_pct')        return d.subsidio_pct;
+      if (field === 'coins')               return d.coins;
+      if (field === 'voucher_from_shopee') return d.voucher_from_shopee;
+      if (field === 'pix_discount')        return d.pix_discount;
+      return d.total_subsidio;
   }
+}
+
+// Campo usado no filtro de busca — varia por tipo porque difal/fbs
+// não têm order_sn na raiz (difal o extrai da description, fbs não tem).
+function searchText(d: Derived): string {
+  if (d.kind === 'difal') return `${d.order_sn_extraido ?? ''} ${d.description}`.toLowerCase();
+  if (d.kind === 'fbs')   return d.description.toLowerCase();
+  return d.order_sn.toLowerCase();
 }
 
 export async function GET(request: NextRequest) {
@@ -250,7 +455,10 @@ export async function GET(request: NextRequest) {
     const sp = request.nextUrl.searchParams;
 
     const tipoStr = sp.get('tipo') ?? '';
-    if (tipoStr !== 'take_rate' && tipoStr !== 'afiliados' && tipoStr !== 'devolucoes') {
+    if (
+      tipoStr !== 'take_rate' && tipoStr !== 'afiliados' && tipoStr !== 'devolucoes' &&
+      tipoStr !== 'difal' && tipoStr !== 'fbs' && tipoStr !== 'subsidio'
+    ) {
       return NextResponse.json({ error: 'tipo inválido' }, { status: 400 });
     }
     const tipo: Tipo = tipoStr;
@@ -306,16 +514,16 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const rows = await fetchEscrows(
-      supabase, tipo, shopIds,
-      fromDate.toISOString(), toDate.toISOString(),
-    );
-
-    // Deriva linhas.
+    // Deriva linhas. Cada ramo faz seu próprio fetch (origens diferem
+    // entre escrow e wallet).
     let derived: Derived[];
     let resumo: Record<string, unknown>;
 
+    const fromIso = fromDate.toISOString();
+    const toIso = toDate.toISOString();
+
     if (tipo === 'take_rate') {
+      const rows = await fetchEscrows(supabase, tipo, shopIds, fromIso, toIso);
       const list = rows.map(deriveTakeRate);
       derived = list;
       const totalCom = list.reduce((s, r) => s + r.commission_fee, 0);
@@ -350,6 +558,7 @@ export async function GET(request: NextRequest) {
         por_metodo_pagamento: porMetodoArr,
       };
     } else if (tipo === 'afiliados') {
+      const rows = await fetchEscrows(supabase, tipo, shopIds, fromIso, toIso);
       const list = rows.map(deriveAfiliados);
       derived = list;
       // Conta pedidos SEM afiliado no mesmo período (or: null + eq 0).
@@ -359,8 +568,8 @@ export async function GET(request: NextRequest) {
         .in('shop_id', shopIds)
         .eq('is_released', true)
         .not('escrow_release_time', 'is', null)
-        .gte('escrow_release_time', fromDate.toISOString())
-        .lte('escrow_release_time', toDate.toISOString())
+        .gte('escrow_release_time', fromIso)
+        .lte('escrow_release_time', toIso)
         .or('order_ams_commission_fee.is.null,order_ams_commission_fee.eq.0');
       const comCount = list.length;
       const semAfiliado = semCount ?? 0;
@@ -372,7 +581,8 @@ export async function GET(request: NextRequest) {
         total_gasto_afiliados: round2(totalGasto),
         media_comissao_afiliado: comCount > 0 ? round2(totalGasto / comCount) : 0,
       };
-    } else {
+    } else if (tipo === 'devolucoes') {
+      const rows = await fetchEscrows(supabase, tipo, shopIds, fromIso, toIso);
       const list = rows.map(deriveDevolucoes);
       derived = list;
       const totalReverso = list.reduce((s, r) => s + r.reverse_shipping_fee, 0);
@@ -387,13 +597,67 @@ export async function GET(request: NextRequest) {
         total_reembolsado: round2(totalReemb),
         pedidos_negativos: negativos,
       };
+    } else if (tipo === 'difal') {
+      const rows = await fetchWallet(supabase, shopIds, fromIso, toIso, DIFAL_TX_TYPES);
+      // Cruza com shopee_pedidos para trazer shipping_carrier (opcional —
+      // se falhar por qualquer motivo, segue sem).
+      const osns = Array.from(
+        new Set(rows.map(r => extractOrderSnFromDescription(r.description)).filter((x): x is string => !!x)),
+      );
+      const carriers = new Map<string, string>();
+      if (osns.length > 0) {
+        try {
+          const { data } = await supabase
+            .from('shopee_pedidos')
+            .select('order_sn, shipping_carrier')
+            .in('shop_id', shopIds)
+            .in('order_sn', osns);
+          for (const p of (data as Array<{ order_sn: string; shipping_carrier: string | null }> | null) ?? []) {
+            if (p.shipping_carrier) carriers.set(p.order_sn, p.shipping_carrier);
+          }
+        } catch {
+          // ignorar — shipping_carrier é informativo.
+        }
+      }
+      const list = rows.map(r => deriveDifal(r, carriers));
+      derived = list;
+      const totalValor = list.reduce((s, r) => s + r.amount, 0);
+      resumo = {
+        total_cobrancas: list.length,
+        total_valor: round2(totalValor),
+        media_por_cobranca: list.length > 0 ? round2(totalValor / list.length) : 0,
+      };
+    } else if (tipo === 'fbs') {
+      const rows = await fetchWallet(supabase, shopIds, fromIso, toIso, FBS_TX_TYPES);
+      const list = rows.map(deriveFbs);
+      derived = list;
+      const totalValor = list.reduce((s, r) => s + r.amount, 0);
+      resumo = {
+        total_cobrancas: list.length,
+        total_valor: round2(totalValor),
+        media_por_cobranca: list.length > 0 ? round2(totalValor / list.length) : 0,
+      };
+    } else {
+      // subsidio
+      const rows = await fetchEscrowsSubsidio(supabase, shopIds, fromIso, toIso);
+      const list = rows.map(deriveSubsidio);
+      derived = list;
+      resumo = {
+        total_pedidos_com_subsidio: list.length,
+        total_subsidio: round2(list.reduce((s, r) => s + r.total_subsidio, 0)),
+        total_coins: round2(list.reduce((s, r) => s + r.coins, 0)),
+        total_voucher_shopee: round2(list.reduce((s, r) => s + r.voucher_from_shopee, 0)),
+        total_pix_discount: round2(list.reduce((s, r) => s + r.pix_discount, 0)),
+        total_shopee_discount: round2(list.reduce((s, r) => s + r.shopee_discount, 0)),
+        total_credit_card_promo: round2(list.reduce((s, r) => s + r.credit_card_promotion, 0)),
+      };
     }
 
-    // Filtro por busca (order_sn). Não afeta o resumo — o usuário quer
-    // ver o total do período, e a busca é só para localizar 1 pedido.
+    // Filtro por busca. Não afeta o resumo — o usuário quer ver o total
+    // do período, e a busca é só para localizar 1 pedido.
     let filtrado: Derived[] = derived;
     if (busca) {
-      filtrado = filtrado.filter(r => r.order_sn.toLowerCase().includes(busca));
+      filtrado = filtrado.filter(r => searchText(r).includes(busca));
     }
 
     // Ordenação.

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-type Tipo = 'take_rate' | 'afiliados' | 'devolucoes';
+type Tipo = 'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio';
 
 interface Props {
   open: boolean;
@@ -50,7 +50,37 @@ interface DevolucoesRow {
   escrow_release_time: string | null;
 }
 
-type PedidoRow = TakeRateRow | AfiliadosRow | DevolucoesRow;
+interface DifalRow {
+  id: number;
+  order_sn_extraido: string | null;
+  description: string;
+  amount: number;
+  create_time: string | null;
+  shipping_carrier: string | null;
+}
+
+interface FbsRow {
+  id: number;
+  transaction_type: string;
+  description: string;
+  amount: number;
+  create_time: string | null;
+}
+
+interface SubsidioRow {
+  order_sn: string;
+  order_selling_price: number;
+  coins: number;
+  voucher_from_shopee: number;
+  shopee_discount: number;
+  credit_card_promotion: number;
+  pix_discount: number;
+  total_subsidio: number;
+  subsidio_pct: number;
+  escrow_release_time: string | null;
+}
+
+type PedidoRow = TakeRateRow | AfiliadosRow | DevolucoesRow | DifalRow | FbsRow | SubsidioRow;
 
 interface TakeRateResumo {
   total_pedidos: number;
@@ -74,10 +104,26 @@ interface DevolucoesResumo {
   total_reembolsado: number;
   pedidos_negativos: number;
 }
+interface WalletResumo {
+  total_cobrancas: number;
+  total_valor: number;
+  media_por_cobranca: number;
+}
+interface SubsidioResumo {
+  total_pedidos_com_subsidio: number;
+  total_subsidio: number;
+  total_coins: number;
+  total_voucher_shopee: number;
+  total_pix_discount: number;
+  total_shopee_discount: number;
+  total_credit_card_promo: number;
+}
 
 interface ApiResponse {
   tipo: Tipo;
-  resumo: Partial<TakeRateResumo & AfiliadosResumo & DevolucoesResumo>;
+  resumo: Partial<
+    TakeRateResumo & AfiliadosResumo & DevolucoesResumo & WalletResumo & SubsidioResumo
+  >;
   pedidos: PedidoRow[];
   pagination: { page: number; limit: number; total: number; total_pages: number };
 }
@@ -102,12 +148,30 @@ const SORT_OPTIONS: Record<Tipo, Array<{ value: string; label: string }>> = {
     { value: 'seller_return_refund',  label: 'Reembolso' },
     { value: 'escrow_amount',         label: 'Renda do pedido' },
   ],
+  difal: [
+    { value: 'amount',      label: 'Valor' },
+    { value: 'create_time', label: 'Data' },
+  ],
+  fbs: [
+    { value: 'amount',      label: 'Valor' },
+    { value: 'create_time', label: 'Data' },
+  ],
+  subsidio: [
+    { value: 'total_subsidio',      label: 'Total subsídio' },
+    { value: 'subsidio_pct',        label: '% do pedido' },
+    { value: 'coins',               label: 'Coins' },
+    { value: 'voucher_from_shopee', label: 'Voucher Shopee' },
+    { value: 'pix_discount',        label: 'Pix discount' },
+  ],
 };
 
 const TITULO: Record<Tipo, string> = {
   take_rate:  'Detalhamento: Take Rate',
   afiliados:  'Detalhamento: Afiliados',
   devolucoes: 'Detalhamento: Devoluções',
+  difal:      'Detalhamento: DIFAL (ICMS)',
+  fbs:        'Detalhamento: FBS (Fulfillment)',
+  subsidio:   'Detalhamento: Subsídio Shopee',
 };
 
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -120,6 +184,11 @@ function fmtPct(n: number | null | undefined, decimals = 1): string {
   return `${n.toFixed(decimals)}%`;
 }
 function fmtInt(n: number): string { return n.toLocaleString('pt-BR'); }
+function fmtData(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
 
 function takeRateBadge(pct: number): { bg: string; color: string } {
   if (pct < 25) return { bg: 'rgba(29,158,117,0.12)', color: '#1D9E75' };
@@ -270,6 +339,9 @@ export function DetalhesModal({ open, onClose, tipo, from, to, shopFilter }: Pro
               {tipo === 'take_rate' && <TakeRateTable rows={data.pedidos as TakeRateRow[]} />}
               {tipo === 'afiliados' && <AfiliadosTable rows={data.pedidos as AfiliadosRow[]} />}
               {tipo === 'devolucoes' && <DevolucoesTable rows={data.pedidos as DevolucoesRow[]} />}
+              {tipo === 'difal' && <DifalTable rows={data.pedidos as DifalRow[]} />}
+              {tipo === 'fbs' && <FbsTable rows={data.pedidos as FbsRow[]} />}
+              {tipo === 'subsidio' && <SubsidioTable rows={data.pedidos as SubsidioRow[]} />}
             </div>
           )}
         </div>
@@ -333,7 +405,9 @@ function ResumoBlock({
   tipo, resumo,
 }: {
   tipo: Tipo;
-  resumo: Partial<TakeRateResumo & AfiliadosResumo & DevolucoesResumo>;
+  resumo: Partial<
+    TakeRateResumo & AfiliadosResumo & DevolucoesResumo & WalletResumo & SubsidioResumo
+  >;
 }) {
   if (tipo === 'take_rate') {
     const mediaColor = (resumo.media_take_rate ?? 0) < 25
@@ -397,14 +471,35 @@ function ResumoBlock({
       </div>
     );
   }
-  // devolucoes
+  if (tipo === 'devolucoes') {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
+        <MiniCard label="Total devoluções" value={fmtInt(resumo.total_devolucoes ?? 0)} />
+        <MiniCard label="Frete reverso" value={fmtBRL(resumo.total_frete_reverso ?? 0)} valueColor="#A32D2D" />
+        <MiniCard label="Frete ida (seller)" value={fmtBRL(resumo.total_frete_ida_seller ?? 0)} valueColor="#A32D2D" />
+        <MiniCard label="Custo total" value={fmtBRL(resumo.custo_total ?? 0)} valueColor="#A32D2D" />
+        <MiniCard label="Total reembolsado" value={fmtBRL(resumo.total_reembolsado ?? 0)} />
+      </div>
+    );
+  }
+  if (tipo === 'difal' || tipo === 'fbs') {
+    const totalLabel = tipo === 'difal' ? 'Total DIFAL' : 'Total FBS';
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+        <MiniCard label="Cobranças" value={fmtInt(resumo.total_cobrancas ?? 0)} />
+        <MiniCard label={totalLabel} value={fmtBRL(resumo.total_valor ?? 0)} valueColor="#A32D2D" />
+        <MiniCard label="Média por cobrança" value={fmtBRL(resumo.media_por_cobranca ?? 0)} />
+      </div>
+    );
+  }
+  // subsidio
   return (
     <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
-      <MiniCard label="Total devoluções" value={fmtInt(resumo.total_devolucoes ?? 0)} />
-      <MiniCard label="Frete reverso" value={fmtBRL(resumo.total_frete_reverso ?? 0)} valueColor="#A32D2D" />
-      <MiniCard label="Frete ida (seller)" value={fmtBRL(resumo.total_frete_ida_seller ?? 0)} valueColor="#A32D2D" />
-      <MiniCard label="Custo total" value={fmtBRL(resumo.custo_total ?? 0)} valueColor="#A32D2D" />
-      <MiniCard label="Total reembolsado" value={fmtBRL(resumo.total_reembolsado ?? 0)} />
+      <MiniCard label="Pedidos com subsídio" value={fmtInt(resumo.total_pedidos_com_subsidio ?? 0)} />
+      <MiniCard label="Total subsídio" value={fmtBRL(resumo.total_subsidio ?? 0)} valueColor="#1D9E75" />
+      <MiniCard label="Total coins" value={fmtBRL(resumo.total_coins ?? 0)} />
+      <MiniCard label="Total voucher Shopee" value={fmtBRL(resumo.total_voucher_shopee ?? 0)} />
+      <MiniCard label="Total pix discount" value={fmtBRL(resumo.total_pix_discount ?? 0)} />
     </div>
   );
 }
@@ -503,6 +598,131 @@ function AfiliadosTable({ rows }: { rows: AfiliadosRow[] }) {
               <td className="py-2 pr-3 text-right" style={{ color: '#A32D2D' }}>{fmtBRL(r.service_fee)}</td>
               <td className="py-2 text-right" style={{ color: r.escrow_amount >= 0 ? '#1D9E75' : '#E24B4A' }}>
                 {fmtBRL(r.escrow_amount)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function DifalTable({ rows }: { rows: DifalRow[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Pedido</th>
+          <th className="pb-2 pr-3 font-medium">Descrição</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor</th>
+          <th className="pb-2 font-medium text-right">Data</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.id} className="border-t border-current/5">
+            <td className="py-2 pr-3 font-mono text-[10px] whitespace-nowrap">
+              {r.order_sn_extraido ?? <span className="opacity-40">—</span>}
+            </td>
+            <td className="py-2 pr-3 max-w-[340px] truncate" title={r.description}>
+              {r.description || '—'}
+              {r.shipping_carrier && (
+                <span className="ml-2 text-[9px] opacity-50">({r.shipping_carrier})</span>
+              )}
+            </td>
+            <td className="py-2 pr-3 text-right font-medium" style={{ color: '#A32D2D' }}>
+              {fmtBRL(r.amount)}
+            </td>
+            <td className="py-2 text-right whitespace-nowrap opacity-70">
+              {fmtData(r.create_time)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function FbsTable({ rows }: { rows: FbsRow[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Tipo</th>
+          <th className="pb-2 pr-3 font-medium">Descrição</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor</th>
+          <th className="pb-2 font-medium text-right">Data</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.id} className="border-t border-current/5">
+            <td className="py-2 pr-3">
+              <span
+                className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded whitespace-nowrap"
+                style={{ background: 'rgba(226,75,74,0.12)', color: '#A32D2D' }}
+              >
+                {r.transaction_type}
+              </span>
+            </td>
+            <td className="py-2 pr-3 max-w-[420px] truncate" title={r.description}>
+              {r.description || '—'}
+            </td>
+            <td className="py-2 pr-3 text-right font-medium" style={{ color: '#A32D2D' }}>
+              {fmtBRL(r.amount)}
+            </td>
+            <td className="py-2 text-right whitespace-nowrap opacity-70">
+              {fmtData(r.create_time)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function SubsidioTable({ rows }: { rows: SubsidioRow[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Pedido</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor produto</th>
+          <th className="pb-2 pr-3 font-medium text-right">Coins</th>
+          <th className="pb-2 pr-3 font-medium text-right">Voucher Shopee</th>
+          <th className="pb-2 pr-3 font-medium text-right">Pix discount</th>
+          <th className="pb-2 pr-3 font-medium text-right">Total subsídio</th>
+          <th className="pb-2 font-medium text-right">% do pedido</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => {
+          const pctBadge = r.subsidio_pct > 0
+            ? { bg: 'rgba(29,158,117,0.12)', color: '#1D9E75' }
+            : { bg: 'rgba(156,163,175,0.14)', color: '#4b5563' };
+          return (
+            <tr key={r.order_sn} className="border-t border-current/5">
+              <td className="py-2 pr-3 font-mono text-[10px]">{r.order_sn}</td>
+              <td className="py-2 pr-3 text-right">{fmtBRL(r.order_selling_price)}</td>
+              <td className="py-2 pr-3 text-right" style={{ color: r.coins > 0 ? '#1D9E75' : undefined, opacity: r.coins > 0 ? 1 : 0.4 }}>
+                {fmtBRL(r.coins)}
+              </td>
+              <td className="py-2 pr-3 text-right" style={{ color: r.voucher_from_shopee > 0 ? '#1D9E75' : undefined, opacity: r.voucher_from_shopee > 0 ? 1 : 0.4 }}>
+                {fmtBRL(r.voucher_from_shopee)}
+              </td>
+              <td className="py-2 pr-3 text-right" style={{ color: r.pix_discount > 0 ? '#1D9E75' : undefined, opacity: r.pix_discount > 0 ? 1 : 0.4 }}>
+                {fmtBRL(r.pix_discount)}
+              </td>
+              <td className="py-2 pr-3 text-right font-medium" style={{ color: '#1D9E75' }}>
+                {fmtBRL(r.total_subsidio)}
+              </td>
+              <td className="py-2 text-right">
+                <span
+                  className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                  style={{ background: pctBadge.bg, color: pctBadge.color }}
+                >
+                  {fmtPct(r.subsidio_pct)}
+                </span>
               </td>
             </tr>
           );
