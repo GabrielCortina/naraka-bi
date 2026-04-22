@@ -757,6 +757,63 @@ export async function GET(request: NextRequest) {
   const pedidosEsperandoEscrow = pedidosEsperandoEscrowRes.count ?? 0;
   const escrowsComDetail = escrowsComDetailRes.count ?? 0;
 
+  // Média de dias entre pagamento do buyer (shopee_pedidos.pay_time) e
+  // liberação do escrow (shopee_escrow.escrow_release_time). Cruza as
+  // duas tabelas em memória porque o PostgREST não expõe JOIN com AVG
+  // direto. Percorre só os escrows liberados no período do filtro.
+  let mediaDiasPagamento = 0;
+  {
+    const DIAS_PAG_PAGE = 1000;
+    const escrows: Array<{ shop_id: number; order_sn: string; escrow_release_time: string }> = [];
+    let off = 0;
+    while (true) {
+      const { data } = await supabase
+        .from('shopee_escrow')
+        .select('shop_id, order_sn, escrow_release_time')
+        .in('shop_id', shopIds)
+        .eq('is_released', true)
+        .not('escrow_release_time', 'is', null)
+        .gte('escrow_release_time', from.toISOString())
+        .lte('escrow_release_time', to.toISOString())
+        .range(off, off + DIAS_PAG_PAGE - 1);
+      if (!data || data.length === 0) break;
+      escrows.push(...(data as typeof escrows));
+      if (data.length < DIAS_PAG_PAGE) break;
+      off += DIAS_PAG_PAGE;
+    }
+
+    if (escrows.length > 0) {
+      // Cruzamento em lotes — .in() não escala para dezenas de milhares.
+      const CHUNK = 500;
+      const payByKey = new Map<string, string>();
+      for (let i = 0; i < escrows.length; i += CHUNK) {
+        const chunk = escrows.slice(i, i + CHUNK);
+        const sns = Array.from(new Set(chunk.map(e => e.order_sn)));
+        const { data } = await supabase
+          .from('shopee_pedidos')
+          .select('shop_id, order_sn, pay_time')
+          .in('shop_id', shopIds)
+          .in('order_sn', sns)
+          .not('pay_time', 'is', null);
+        for (const p of (data as Array<{ shop_id: number; order_sn: string; pay_time: string }> | null) ?? []) {
+          payByKey.set(`${p.shop_id}::${p.order_sn}`, p.pay_time);
+        }
+      }
+
+      let soma = 0;
+      let n = 0;
+      for (const e of escrows) {
+        const pay = payByKey.get(`${e.shop_id}::${e.order_sn}`);
+        if (!pay) continue;
+        const diffMs = new Date(e.escrow_release_time).getTime() - new Date(pay).getTime();
+        if (diffMs < 0) continue; // sanity: escrow jamais libera antes do pagamento
+        soma += diffMs / 86400000;
+        n++;
+      }
+      mediaDiasPagamento = n > 0 ? round1(soma / n) : 0;
+    }
+  }
+
   const ultimosEscrows =
     (ultimosRes.data as Array<{
       order_sn: string;
@@ -1057,6 +1114,7 @@ export async function GET(request: NextRequest) {
       cobertura_financeira: round1(cobertura),
       pedidos_sem_escrow: pedidosSemEscrow,
       receita_pendente: round2(receitaPendente),
+      media_dias_pagamento: mediaDiasPagamento,
       // Cobertura do detail no período: quantos escrows já têm campos finos
       // (commission, service_fee, etc.). Os percentuais (take rate, comissão %)
       // são calculados sobre esta amostra.
@@ -1130,7 +1188,7 @@ function emptyPayload(
     margem: { valor: 0, pct_gmv: 0 },
     subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, pct_gmv: 0 },
     compensacoes: { total: 0, qtd: 0, detalhe: [] },
-    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0, detail_coverage: 0, escrows_com_detail: 0, escrows_sem_detail: 0 },
+    informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0, media_dias_pagamento: 0, detail_coverage: 0, escrows_com_detail: 0, escrows_sem_detail: 0 },
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],
     receita_por_dia: [],

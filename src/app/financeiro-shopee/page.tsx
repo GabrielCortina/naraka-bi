@@ -89,6 +89,7 @@ interface ApiResponse {
     saques: number; saques_qtd: number; saldo_carteira: number;
     cobertura_financeira: number; pedidos_sem_escrow: number;
     receita_pendente: number;
+    media_dias_pagamento: number;
     detail_coverage: number;
     escrows_com_detail: number;
     escrows_sem_detail: number;
@@ -811,7 +812,7 @@ export default function FinanceiroShopeePage() {
       {!loading && info && cf && (
         <>
           <SectionLabel>Informativo (global)</SectionLabel>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <MetricCard
               label="Receita pendente"
               value={fmtBRL(info.receita_pendente)}
@@ -830,6 +831,12 @@ export default function FinanceiroShopeePage() {
               valueColor={COLORS.cinza}
               sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos · custo já contabilizado em devoluções`}
               onClick={() => setDetalhesTipo('pedidos_negativos')}
+            />
+            <MetricCard
+              label="Média para pagamento"
+              value={`${info.media_dias_pagamento.toFixed(1)} dias`}
+              valueColor={COLORS.azul}
+              sub="Tempo médio entre pagamento do cliente e liberação do escrow"
             />
           </div>
         </>
