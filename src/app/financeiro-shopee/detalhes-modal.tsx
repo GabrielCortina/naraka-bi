@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-type Tipo = 'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio';
+type Tipo =
+  | 'take_rate' | 'afiliados' | 'devolucoes'
+  | 'difal' | 'fbs' | 'subsidio'
+  | 'cupons_seller' | 'compensacoes' | 'pedidos_negativos';
 
 interface Props {
   open: boolean;
@@ -80,7 +83,45 @@ interface SubsidioRow {
   escrow_release_time: string | null;
 }
 
-type PedidoRow = TakeRateRow | AfiliadosRow | DevolucoesRow | DifalRow | FbsRow | SubsidioRow;
+interface CuponsSellerRow {
+  order_sn: string;
+  order_selling_price: number;
+  voucher_from_seller: number;
+  cupom_pct: number;
+  cupom_codigo: string | null;
+  escrow_amount: number;
+  escrow_release_time: string | null;
+}
+
+interface CompensacaoRow {
+  id: number;
+  transaction_type: string;
+  order_sn: string | null;
+  description: string;
+  amount: number;
+  create_time: string | null;
+  tipo_compensacao: 'Objeto perdido' | 'Devolução compensada' | 'Outro';
+}
+
+interface PedidoNegativoRow {
+  order_sn: string;
+  buyer_total_amount: number;
+  order_selling_price: number;
+  escrow_amount: number;
+  commission_fee: number;
+  service_fee: number;
+  reverse_shipping_fee: number;
+  actual_shipping_fee: number;
+  shopee_shipping_rebate: number;
+  seller_return_refund: number;
+  prejuizo: number;
+  escrow_release_time: string | null;
+}
+
+type PedidoRow =
+  | TakeRateRow | AfiliadosRow | DevolucoesRow
+  | DifalRow | FbsRow | SubsidioRow
+  | CuponsSellerRow | CompensacaoRow | PedidoNegativoRow;
 
 interface TakeRateResumo {
   total_pedidos: number;
@@ -118,11 +159,34 @@ interface SubsidioResumo {
   total_shopee_discount: number;
   total_credit_card_promo: number;
 }
+interface CuponsSellerResumo {
+  total_pedidos_com_cupom: number;
+  total_gasto_cupons: number;
+  media_por_cupom: number;
+  cupom_pct_medio: number;
+  por_codigo_cupom?: Array<{ codigo: string; count: number; total: number }>;
+}
+interface CompensacoesResumo {
+  total_compensacoes: number;
+  total_valor: number;
+  total_objetos_perdidos: number;
+  total_devolucoes_compensadas: number;
+  total_outros: number;
+}
+interface PedidosNegativosResumo {
+  total_pedidos_negativos: number;
+  total_prejuizo: number;
+  media_prejuizo: number;
+  maior_prejuizo: number;
+  total_frete_reverso: number;
+  total_reembolsos: number;
+}
 
 interface ApiResponse {
   tipo: Tipo;
   resumo: Partial<
     TakeRateResumo & AfiliadosResumo & DevolucoesResumo & WalletResumo & SubsidioResumo
+    & CuponsSellerResumo & CompensacoesResumo & PedidosNegativosResumo
   >;
   pedidos: PedidoRow[];
   pagination: { page: number; limit: number; total: number; total_pages: number };
@@ -163,6 +227,21 @@ const SORT_OPTIONS: Record<Tipo, Array<{ value: string; label: string }>> = {
     { value: 'voucher_from_shopee', label: 'Voucher Shopee' },
     { value: 'pix_discount',        label: 'Pix discount' },
   ],
+  cupons_seller: [
+    { value: 'voucher_from_seller', label: 'Valor do cupom' },
+    { value: 'cupom_pct',           label: '% do pedido' },
+    { value: 'order_selling_price', label: 'Valor do produto' },
+  ],
+  compensacoes: [
+    { value: 'amount',      label: 'Valor' },
+    { value: 'create_time', label: 'Data' },
+  ],
+  pedidos_negativos: [
+    { value: 'prejuizo',             label: 'Prejuízo' },
+    { value: 'escrow_amount',        label: 'Renda do pedido' },
+    { value: 'buyer_total_amount',   label: 'Valor pago' },
+    { value: 'reverse_shipping_fee', label: 'Frete reverso' },
+  ],
 };
 
 const TITULO: Record<Tipo, string> = {
@@ -172,6 +251,9 @@ const TITULO: Record<Tipo, string> = {
   difal:      'Detalhamento: DIFAL (ICMS)',
   fbs:        'Detalhamento: FBS (Fulfillment)',
   subsidio:   'Detalhamento: Subsídio Shopee',
+  cupons_seller:     'Detalhamento: Cupons do seller',
+  compensacoes:      'Detalhamento: Compensações',
+  pedidos_negativos: 'Detalhamento: Pedidos negativos',
 };
 
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -342,6 +424,9 @@ export function DetalhesModal({ open, onClose, tipo, from, to, shopFilter }: Pro
               {tipo === 'difal' && <DifalTable rows={data.pedidos as DifalRow[]} />}
               {tipo === 'fbs' && <FbsTable rows={data.pedidos as FbsRow[]} />}
               {tipo === 'subsidio' && <SubsidioTable rows={data.pedidos as SubsidioRow[]} />}
+              {tipo === 'cupons_seller' && <CuponsSellerTable rows={data.pedidos as CuponsSellerRow[]} />}
+              {tipo === 'compensacoes' && <CompensacoesTable rows={data.pedidos as CompensacaoRow[]} />}
+              {tipo === 'pedidos_negativos' && <PedidosNegativosTable rows={data.pedidos as PedidoNegativoRow[]} />}
             </div>
           )}
         </div>
@@ -407,6 +492,7 @@ function ResumoBlock({
   tipo: Tipo;
   resumo: Partial<
     TakeRateResumo & AfiliadosResumo & DevolucoesResumo & WalletResumo & SubsidioResumo
+    & CuponsSellerResumo & CompensacoesResumo & PedidosNegativosResumo
   >;
 }) {
   if (tipo === 'take_rate') {
@@ -489,6 +575,68 @@ function ResumoBlock({
         <MiniCard label="Cobranças" value={fmtInt(resumo.total_cobrancas ?? 0)} />
         <MiniCard label={totalLabel} value={fmtBRL(resumo.total_valor ?? 0)} valueColor="#A32D2D" />
         <MiniCard label="Média por cobrança" value={fmtBRL(resumo.media_por_cobranca ?? 0)} />
+      </div>
+    );
+  }
+  if (tipo === 'cupons_seller') {
+    return (
+      <div className="mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+          <MiniCard label="Pedidos com cupom" value={fmtInt(resumo.total_pedidos_com_cupom ?? 0)} />
+          <MiniCard label="Total gasto" value={fmtBRL(resumo.total_gasto_cupons ?? 0)} valueColor="#EF9F27" />
+          <MiniCard label="Média por cupom" value={fmtBRL(resumo.media_por_cupom ?? 0)} />
+          <MiniCard label="% médio" value={fmtPct(resumo.cupom_pct_medio ?? 0)} />
+        </div>
+        {resumo.por_codigo_cupom && resumo.por_codigo_cupom.length > 0 && (
+          <div className="rounded-lg p-3" style={{ background: 'rgba(128,128,128,0.06)' }}>
+            <p className="text-[9px] uppercase tracking-wider opacity-50 mb-2">Gasto por código de cupom</p>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left opacity-50">
+                  <th className="pb-1 font-medium">Código</th>
+                  <th className="pb-1 font-medium text-right">Pedidos</th>
+                  <th className="pb-1 font-medium text-right">Total gasto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {resumo.por_codigo_cupom.map(c => (
+                  <tr key={c.codigo} className="border-t border-current/5">
+                    <td className="py-1.5">
+                      <span
+                        className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded"
+                        style={{ background: 'rgba(239,159,39,0.14)', color: '#8B5F0A' }}
+                      >
+                        {c.codigo}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-right">{fmtInt(c.count)}</td>
+                    <td className="py-1.5 text-right" style={{ color: '#EF9F27' }}>{fmtBRL(c.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (tipo === 'compensacoes') {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <MiniCard label="Total compensações" value={fmtInt(resumo.total_compensacoes ?? 0)} />
+        <MiniCard label="Total recebido" value={fmtBRL(resumo.total_valor ?? 0)} valueColor="#1D9E75" />
+        <MiniCard label="Objetos perdidos" value={fmtBRL(resumo.total_objetos_perdidos ?? 0)} />
+        <MiniCard label="Devoluções compensadas" value={fmtBRL(resumo.total_devolucoes_compensadas ?? 0)} />
+      </div>
+    );
+  }
+  if (tipo === 'pedidos_negativos') {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <MiniCard label="Pedidos negativos" value={fmtInt(resumo.total_pedidos_negativos ?? 0)} />
+        <MiniCard label="Prejuízo total" value={fmtBRL(resumo.total_prejuizo ?? 0)} valueColor="#A32D2D" />
+        <MiniCard label="Média por pedido" value={fmtBRL(resumo.media_prejuizo ?? 0)} />
+        <MiniCard label="Maior prejuízo" value={fmtBRL(resumo.maior_prejuizo ?? 0)} valueColor="#A32D2D" />
       </div>
     );
   }
@@ -723,6 +871,163 @@ function SubsidioTable({ rows }: { rows: SubsidioRow[] }) {
                 >
                   {fmtPct(r.subsidio_pct)}
                 </span>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function CuponsSellerTable({ rows }: { rows: CuponsSellerRow[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Pedido</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor produto</th>
+          <th className="pb-2 pr-3 font-medium">Cupom</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor cupom</th>
+          <th className="pb-2 pr-3 font-medium text-right">% do pedido</th>
+          <th className="pb-2 font-medium text-right">Receita líquida</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => {
+          const pctBadge = r.cupom_pct <= 5
+            ? { bg: 'rgba(239,159,39,0.14)', color: '#8B5F0A' }
+            : r.cupom_pct <= 15
+              ? { bg: 'rgba(239,159,39,0.24)', color: '#8B5F0A' }
+              : { bg: 'rgba(226,75,74,0.12)', color: '#A32D2D' };
+          return (
+            <tr key={r.order_sn} className="border-t border-current/5">
+              <td className="py-2 pr-3 font-mono text-[10px]">{r.order_sn}</td>
+              <td className="py-2 pr-3 text-right">{fmtBRL(r.order_selling_price)}</td>
+              <td className="py-2 pr-3">
+                {r.cupom_codigo ? (
+                  <span
+                    className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded"
+                    style={{ background: 'rgba(239,159,39,0.14)', color: '#8B5F0A' }}
+                  >
+                    {r.cupom_codigo}
+                  </span>
+                ) : (
+                  <span className="opacity-40">—</span>
+                )}
+              </td>
+              <td className="py-2 pr-3 text-right font-medium" style={{ color: '#EF9F27' }}>
+                {fmtBRL(r.voucher_from_seller)}
+              </td>
+              <td className="py-2 pr-3 text-right">
+                <span
+                  className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                  style={{ background: pctBadge.bg, color: pctBadge.color }}
+                >
+                  {fmtPct(r.cupom_pct)}
+                </span>
+              </td>
+              <td className="py-2 text-right" style={{ color: r.escrow_amount >= 0 ? '#1D9E75' : '#E24B4A' }}>
+                {fmtBRL(r.escrow_amount)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function CompensacoesTable({ rows }: { rows: CompensacaoRow[] }) {
+  const tipoBadge: Record<CompensacaoRow['tipo_compensacao'], { bg: string; color: string }> = {
+    'Objeto perdido':         { bg: 'rgba(239,159,39,0.14)',  color: '#8B5F0A' },
+    'Devolução compensada':   { bg: 'rgba(55,138,221,0.12)',  color: '#1F5FA5' },
+    'Outro':                  { bg: 'rgba(156,163,175,0.14)', color: '#4b5563' },
+  };
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Pedido</th>
+          <th className="pb-2 pr-3 font-medium">Tipo</th>
+          <th className="pb-2 pr-3 font-medium">Descrição</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor</th>
+          <th className="pb-2 font-medium text-right">Data</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => {
+          const tb = tipoBadge[r.tipo_compensacao];
+          return (
+            <tr key={r.id} className="border-t border-current/5">
+              <td className="py-2 pr-3 font-mono text-[10px] whitespace-nowrap">
+                {r.order_sn ?? <span className="opacity-40">—</span>}
+              </td>
+              <td className="py-2 pr-3">
+                <span
+                  className="text-[10px] font-medium px-1.5 py-0.5 rounded whitespace-nowrap"
+                  style={{ background: tb.bg, color: tb.color }}
+                >
+                  {r.tipo_compensacao}
+                </span>
+              </td>
+              <td className="py-2 pr-3 max-w-[340px] truncate" title={r.description}>
+                {r.description || '—'}
+              </td>
+              <td className="py-2 pr-3 text-right font-medium" style={{ color: '#1D9E75' }}>
+                {fmtBRL(r.amount)}
+              </td>
+              <td className="py-2 text-right whitespace-nowrap opacity-70">
+                {fmtData(r.create_time)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function PedidosNegativosTable({ rows }: { rows: PedidoNegativoRow[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left opacity-50 border-b border-current/10">
+          <th className="pb-2 pr-3 font-medium">Pedido</th>
+          <th className="pb-2 pr-3 font-medium text-right">Valor produto</th>
+          <th className="pb-2 pr-3 font-medium text-right">Frete reverso</th>
+          <th className="pb-2 pr-3 font-medium text-right">Frete ida</th>
+          <th className="pb-2 pr-3 font-medium text-right">Reembolso</th>
+          <th className="pb-2 pr-3 font-medium text-right">Renda do pedido</th>
+          <th className="pb-2 font-medium text-right">Prejuízo</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => {
+          // Frete ida do seller quando a Shopee não ressarciu — mesma regra
+          // do card de devoluções no dashboard.
+          const freteIda = r.shopee_shipping_rebate === 0 && r.actual_shipping_fee > 0
+            ? r.actual_shipping_fee
+            : 0;
+          const reembolsoAbs = Math.abs(r.seller_return_refund);
+          return (
+            <tr key={r.order_sn} className="border-t border-current/5">
+              <td className="py-2 pr-3 font-mono text-[10px]">{r.order_sn}</td>
+              <td className="py-2 pr-3 text-right">{fmtBRL(r.order_selling_price)}</td>
+              <td className="py-2 pr-3 text-right" style={{ color: r.reverse_shipping_fee > 0 ? '#A32D2D' : undefined, opacity: r.reverse_shipping_fee > 0 ? 1 : 0.4 }}>
+                {fmtBRL(r.reverse_shipping_fee)}
+              </td>
+              <td className="py-2 pr-3 text-right" style={{ color: freteIda > 0 ? '#A32D2D' : undefined, opacity: freteIda > 0 ? 1 : 0.4 }}>
+                {fmtBRL(freteIda)}
+              </td>
+              <td className="py-2 pr-3 text-right" style={{ color: reembolsoAbs > 0 ? '#A32D2D' : undefined, opacity: reembolsoAbs > 0 ? 1 : 0.4 }}>
+                {fmtBRL(reembolsoAbs)}
+              </td>
+              <td className="py-2 pr-3 text-right" style={{ color: '#E24B4A' }}>
+                {fmtBRL(r.escrow_amount)}
+              </td>
+              <td className="py-2 text-right font-semibold" style={{ color: '#A32D2D' }}>
+                {fmtBRL(r.prejuizo)}
               </td>
             </tr>
           );

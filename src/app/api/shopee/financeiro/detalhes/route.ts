@@ -15,7 +15,10 @@ const PAGE_DB = 1000;                // limite PostgREST
 const MAX_LIMIT_PAGE = 200;          // por segurança
 const BR_OFFSET_HOURS = 3;
 
-type Tipo = 'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio';
+type Tipo =
+  | 'take_rate' | 'afiliados' | 'devolucoes'
+  | 'difal' | 'fbs' | 'subsidio'
+  | 'cupons_seller' | 'compensacoes' | 'pedidos_negativos';
 
 // Transaction types da wallet que representam cada custo. Se a Shopee
 // criar variantes novas, adicionar aqui e no mapping SQL.
@@ -128,9 +131,33 @@ interface EscrowSubsidioRow {
 interface WalletRow {
   id: number;
   transaction_type: string | null;
+  order_sn: string | null;
   amount: number | null;
   description: string | null;
   create_time: string | null;
+}
+
+interface EscrowCuponsRow {
+  order_sn: string;
+  order_selling_price: number | null;
+  voucher_from_seller: number | null;
+  escrow_amount: number | null;
+  escrow_release_time: string | null;
+  raw_json: unknown;
+}
+
+interface EscrowNegativoRow {
+  order_sn: string;
+  buyer_total_amount: number | null;
+  order_selling_price: number | null;
+  escrow_amount: number | null;
+  commission_fee: number | null;
+  service_fee: number | null;
+  reverse_shipping_fee: number | null;
+  actual_shipping_fee: number | null;
+  shopee_shipping_rebate: number | null;
+  seller_return_refund: number | null;
+  escrow_release_time: string | null;
 }
 
 interface DerivedDifal {
@@ -166,13 +193,54 @@ interface DerivedSubsidio {
   escrow_release_time: string | null;
 }
 
+interface DerivedCupons {
+  kind: 'cupons_seller';
+  order_sn: string;
+  order_selling_price: number;
+  voucher_from_seller: number;
+  cupom_pct: number;
+  cupom_codigo: string | null;
+  escrow_amount: number;
+  escrow_release_time: string | null;
+}
+
+interface DerivedCompensacao {
+  kind: 'compensacoes';
+  id: number;
+  transaction_type: string;
+  order_sn: string | null;
+  description: string;
+  amount: number;
+  create_time: string | null;
+  tipo_compensacao: 'Objeto perdido' | 'Devolução compensada' | 'Outro';
+}
+
+interface DerivedPedidoNegativo {
+  kind: 'pedidos_negativos';
+  order_sn: string;
+  buyer_total_amount: number;
+  order_selling_price: number;
+  escrow_amount: number;
+  commission_fee: number;
+  service_fee: number;
+  reverse_shipping_fee: number;
+  actual_shipping_fee: number;
+  shopee_shipping_rebate: number;
+  seller_return_refund: number;
+  prejuizo: number;
+  escrow_release_time: string | null;
+}
+
 type Derived =
   | DerivedTakeRate
   | DerivedAfiliados
   | DerivedDevolucoes
   | DerivedDifal
   | DerivedFbs
-  | DerivedSubsidio;
+  | DerivedSubsidio
+  | DerivedCupons
+  | DerivedCompensacao
+  | DerivedPedidoNegativo;
 
 // Campos válidos por tipo para o dropdown de ordenação. O front envia
 // o nome; aqui mapeamos para getters tipados.
@@ -183,6 +251,9 @@ const SORT_FIELDS: Record<Tipo, string[]> = {
   difal:      ['amount', 'create_time'],
   fbs:        ['amount', 'create_time'],
   subsidio:   ['total_subsidio', 'subsidio_pct', 'coins', 'voucher_from_shopee', 'pix_discount'],
+  cupons_seller:     ['voucher_from_seller', 'cupom_pct', 'order_selling_price'],
+  compensacoes:      ['amount', 'create_time'],
+  pedidos_negativos: ['escrow_amount', 'prejuizo', 'buyer_total_amount', 'reverse_shipping_fee'],
 };
 
 const DEFAULT_SORT: Record<Tipo, string> = {
@@ -192,6 +263,12 @@ const DEFAULT_SORT: Record<Tipo, string> = {
   difal:      'amount',
   fbs:        'amount',
   subsidio:   'total_subsidio',
+  // pedidos_negativos: prejuizo DESC = maior prejuízo primeiro (intuitivo).
+  // Ordenar por escrow_amount direto exigiria direção ASC para o mesmo
+  // resultado, o que quebra o padrão "desc = maiores primeiro" do UI.
+  cupons_seller:     'voucher_from_seller',
+  compensacoes:      'amount',
+  pedidos_negativos: 'prejuizo',
 };
 
 type SupabaseClient = ReturnType<typeof createServiceClient>;
@@ -281,7 +358,7 @@ async function fetchWallet(
   while (true) {
     const { data, error } = await supabase
       .from('shopee_wallet')
-      .select('id, transaction_type, amount, description, create_time')
+      .select('id, transaction_type, order_sn, amount, description, create_time')
       .in('shop_id', shopIds)
       .in('transaction_type', txTypes)
       .gte('create_time', fromIso)
@@ -295,6 +372,153 @@ async function fetchWallet(
     offset += PAGE_DB;
   }
   return rows;
+}
+
+// Compensações chegam em 3 formas na wallet; buscamos o superset e
+// classificamos em memória (mesma regra do /api/shopee/financeiro):
+//   - RETURN_COMPENSATION_SERVICE_ADD
+//   - transaction_type vazio com description contendo "objeto perdido"
+//     ou "reembolso"
+//   - ADJUSTMENT_ADD com description contendo "compensation"/"perdido"/
+//     "danificado"/"extraviado"
+// Apenas créditos (amount > 0).
+async function fetchCompensacoes(
+  supabase: SupabaseClient,
+  shopIds: number[],
+  fromIso: string,
+  toIso: string,
+): Promise<WalletRow[]> {
+  const rows: WalletRow[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('shopee_wallet')
+      .select('id, transaction_type, order_sn, amount, description, create_time')
+      .in('shop_id', shopIds)
+      .in('transaction_type', ['RETURN_COMPENSATION_SERVICE_ADD', '', 'ADJUSTMENT_ADD'])
+      .gt('amount', 0)
+      .gte('create_time', fromIso)
+      .lte('create_time', toIso)
+      .range(offset, offset + PAGE_DB - 1);
+    if (error) throw new Error(error.message);
+    const page = (data as WalletRow[] | null) ?? [];
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < PAGE_DB) break;
+    offset += PAGE_DB;
+  }
+  return rows;
+}
+
+async function fetchEscrowsCupons(
+  supabase: SupabaseClient,
+  shopIds: number[],
+  fromIso: string,
+  toIso: string,
+): Promise<EscrowCuponsRow[]> {
+  const rows: EscrowCuponsRow[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('shopee_escrow')
+      .select('order_sn, order_selling_price, voucher_from_seller, escrow_amount, escrow_release_time, raw_json')
+      .in('shop_id', shopIds)
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .gte('escrow_release_time', fromIso)
+      .lte('escrow_release_time', toIso)
+      .gt('voucher_from_seller', 0)
+      .range(offset, offset + PAGE_DB - 1);
+    if (error) throw new Error(error.message);
+    const page = (data as EscrowCuponsRow[] | null) ?? [];
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < PAGE_DB) break;
+    offset += PAGE_DB;
+  }
+  return rows;
+}
+
+async function fetchEscrowsNegativos(
+  supabase: SupabaseClient,
+  shopIds: number[],
+  fromIso: string,
+  toIso: string,
+): Promise<EscrowNegativoRow[]> {
+  const rows: EscrowNegativoRow[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('shopee_escrow')
+      .select('order_sn, buyer_total_amount, order_selling_price, escrow_amount, commission_fee, service_fee, reverse_shipping_fee, actual_shipping_fee, shopee_shipping_rebate, seller_return_refund, escrow_release_time')
+      .in('shop_id', shopIds)
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .gte('escrow_release_time', fromIso)
+      .lte('escrow_release_time', toIso)
+      .lt('escrow_amount', 0)
+      .range(offset, offset + PAGE_DB - 1);
+    if (error) throw new Error(error.message);
+    const page = (data as EscrowNegativoRow[] | null) ?? [];
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < PAGE_DB) break;
+    offset += PAGE_DB;
+  }
+  return rows;
+}
+
+// Extrai seller_voucher_code do raw_json do escrow. O Shopee entrega o
+// campo como array de strings em order_income/order_item_list — como o
+// schema varia entre versões, fazemos busca recursiva pela chave.
+function extractSellerVoucherCode(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const visited = new Set<object>();
+  const queue: unknown[] = [raw];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (!cur || typeof cur !== 'object' || visited.has(cur as object)) continue;
+    visited.add(cur as object);
+    if (Array.isArray(cur)) {
+      for (const item of cur) queue.push(item);
+      continue;
+    }
+    for (const [k, v] of Object.entries(cur as Record<string, unknown>)) {
+      if (k === 'seller_voucher_code' && Array.isArray(v)) {
+        const codes = v.filter((x): x is string => typeof x === 'string' && x.length > 0);
+        if (codes.length > 0) return codes.join(', ');
+      } else if (v && typeof v === 'object') {
+        queue.push(v);
+      }
+    }
+  }
+  return null;
+}
+
+// Classifica uma linha da wallet como compensação. Retorna null se não
+// for uma compensação válida; caso contrário, o tipo para a UI.
+function classifyCompensacao(r: WalletRow): 'Objeto perdido' | 'Devolução compensada' | 'Outro' | null {
+  const tt = r.transaction_type ?? '';
+  const desc = (r.description ?? '').toLowerCase();
+  const amount = num(r.amount);
+  if (amount <= 0) return null;
+
+  let keep = false;
+  if (tt === 'RETURN_COMPENSATION_SERVICE_ADD') {
+    keep = true;
+  } else if (tt === '' && (desc.includes('objeto perdido') || desc.includes('reembolso'))) {
+    keep = true;
+  } else if (tt === 'ADJUSTMENT_ADD' && (
+    desc.includes('compensation') || desc.includes('perdido') ||
+    desc.includes('danificado') || desc.includes('extraviado')
+  )) {
+    keep = true;
+  }
+  if (!keep) return null;
+
+  if (desc.includes('perdido')) return 'Objeto perdido';
+  if (desc.includes('compensation') || desc.includes('return')) return 'Devolução compensada';
+  return 'Outro';
 }
 
 function deriveTakeRate(r: EscrowRow): DerivedTakeRate {
@@ -407,6 +631,53 @@ function deriveFbs(r: WalletRow): DerivedFbs {
   };
 }
 
+function deriveCupons(r: EscrowCuponsRow): DerivedCupons {
+  const osp = num(r.order_selling_price);
+  const vfs = num(r.voucher_from_seller);
+  return {
+    kind: 'cupons_seller',
+    order_sn: r.order_sn,
+    order_selling_price: round2(osp),
+    voucher_from_seller: round2(vfs),
+    cupom_pct: round2(pctOf(vfs, osp)),
+    cupom_codigo: extractSellerVoucherCode(r.raw_json),
+    escrow_amount: round2(num(r.escrow_amount)),
+    escrow_release_time: r.escrow_release_time,
+  };
+}
+
+function deriveCompensacao(r: WalletRow, tipo: 'Objeto perdido' | 'Devolução compensada' | 'Outro'): DerivedCompensacao {
+  return {
+    kind: 'compensacoes',
+    id: r.id,
+    transaction_type: r.transaction_type ?? '',
+    order_sn: r.order_sn,
+    description: r.description ?? '',
+    amount: round2(num(r.amount)),
+    create_time: r.create_time,
+    tipo_compensacao: tipo,
+  };
+}
+
+function derivePedidoNegativo(r: EscrowNegativoRow): DerivedPedidoNegativo {
+  const esc = num(r.escrow_amount);
+  return {
+    kind: 'pedidos_negativos',
+    order_sn: r.order_sn,
+    buyer_total_amount: round2(num(r.buyer_total_amount)),
+    order_selling_price: round2(num(r.order_selling_price)),
+    escrow_amount: round2(esc),
+    commission_fee: round2(num(r.commission_fee)),
+    service_fee: round2(num(r.service_fee)),
+    reverse_shipping_fee: round2(num(r.reverse_shipping_fee)),
+    actual_shipping_fee: round2(num(r.actual_shipping_fee)),
+    shopee_shipping_rebate: round2(num(r.shopee_shipping_rebate)),
+    seller_return_refund: round2(num(r.seller_return_refund)),
+    prejuizo: round2(Math.abs(esc)),
+    escrow_release_time: r.escrow_release_time,
+  };
+}
+
 function sortKey(d: Derived, field: string): number {
   switch (d.kind) {
     case 'take_rate':
@@ -439,14 +710,34 @@ function sortKey(d: Derived, field: string): number {
       if (field === 'voucher_from_shopee') return d.voucher_from_shopee;
       if (field === 'pix_discount')        return d.pix_discount;
       return d.total_subsidio;
+    case 'cupons_seller':
+      if (field === 'voucher_from_seller') return d.voucher_from_seller;
+      if (field === 'cupom_pct')           return d.cupom_pct;
+      if (field === 'order_selling_price') return d.order_selling_price;
+      return d.voucher_from_seller;
+    case 'compensacoes':
+      if (field === 'create_time') return d.create_time ? new Date(d.create_time).getTime() : 0;
+      return d.amount;
+    case 'pedidos_negativos':
+      if (field === 'escrow_amount')        return d.escrow_amount;
+      if (field === 'prejuizo')             return d.prejuizo;
+      if (field === 'buyer_total_amount')   return d.buyer_total_amount;
+      if (field === 'reverse_shipping_fee') return d.reverse_shipping_fee;
+      return d.prejuizo;
   }
 }
 
-// Campo usado no filtro de busca — varia por tipo porque difal/fbs
-// não têm order_sn na raiz (difal o extrai da description, fbs não tem).
+// Campo usado no filtro de busca — varia por tipo porque alguns não
+// têm order_sn na raiz (difal o extrai da description, fbs não tem).
 function searchText(d: Derived): string {
   if (d.kind === 'difal') return `${d.order_sn_extraido ?? ''} ${d.description}`.toLowerCase();
   if (d.kind === 'fbs')   return d.description.toLowerCase();
+  if (d.kind === 'cupons_seller') {
+    return `${d.order_sn} ${d.cupom_codigo ?? ''}`.toLowerCase();
+  }
+  if (d.kind === 'compensacoes') {
+    return `${d.order_sn ?? ''} ${d.description}`.toLowerCase();
+  }
   return d.order_sn.toLowerCase();
 }
 
@@ -455,13 +746,15 @@ export async function GET(request: NextRequest) {
     const sp = request.nextUrl.searchParams;
 
     const tipoStr = sp.get('tipo') ?? '';
-    if (
-      tipoStr !== 'take_rate' && tipoStr !== 'afiliados' && tipoStr !== 'devolucoes' &&
-      tipoStr !== 'difal' && tipoStr !== 'fbs' && tipoStr !== 'subsidio'
-    ) {
+    const TIPOS_VALIDOS: Tipo[] = [
+      'take_rate', 'afiliados', 'devolucoes',
+      'difal', 'fbs', 'subsidio',
+      'cupons_seller', 'compensacoes', 'pedidos_negativos',
+    ];
+    if (!(TIPOS_VALIDOS as string[]).includes(tipoStr)) {
       return NextResponse.json({ error: 'tipo inválido' }, { status: 400 });
     }
-    const tipo: Tipo = tipoStr;
+    const tipo: Tipo = tipoStr as Tipo;
 
     const fromStr = sp.get('from');
     const toStr = sp.get('to');
@@ -637,8 +930,7 @@ export async function GET(request: NextRequest) {
         total_valor: round2(totalValor),
         media_por_cobranca: list.length > 0 ? round2(totalValor / list.length) : 0,
       };
-    } else {
-      // subsidio
+    } else if (tipo === 'subsidio') {
       const rows = await fetchEscrowsSubsidio(supabase, shopIds, fromIso, toIso);
       const list = rows.map(deriveSubsidio);
       derived = list;
@@ -650,6 +942,66 @@ export async function GET(request: NextRequest) {
         total_pix_discount: round2(list.reduce((s, r) => s + r.pix_discount, 0)),
         total_shopee_discount: round2(list.reduce((s, r) => s + r.shopee_discount, 0)),
         total_credit_card_promo: round2(list.reduce((s, r) => s + r.credit_card_promotion, 0)),
+      };
+    } else if (tipo === 'cupons_seller') {
+      const rows = await fetchEscrowsCupons(supabase, shopIds, fromIso, toIso);
+      const list = rows.map(deriveCupons);
+      derived = list;
+      const totalGasto = list.reduce((s, r) => s + r.voucher_from_seller, 0);
+      const comPct = list.filter(r => r.cupom_pct > 0);
+      const cupomPctMedio = comPct.length > 0
+        ? comPct.reduce((s, r) => s + r.cupom_pct, 0) / comPct.length
+        : 0;
+      // GROUP BY cupom_codigo — só inclui pedidos com código extraído.
+      const porCodigo = new Map<string, { count: number; total: number }>();
+      for (const r of list) {
+        if (!r.cupom_codigo) continue;
+        const g = porCodigo.get(r.cupom_codigo) ?? { count: 0, total: 0 };
+        g.count++;
+        g.total += r.voucher_from_seller;
+        porCodigo.set(r.cupom_codigo, g);
+      }
+      const porCodigoArr = Array.from(porCodigo.entries())
+        .map(([codigo, g]) => ({ codigo, count: g.count, total: round2(g.total) }))
+        .sort((a, b) => b.total - a.total);
+      resumo = {
+        total_pedidos_com_cupom: list.length,
+        total_gasto_cupons: round2(totalGasto),
+        media_por_cupom: list.length > 0 ? round2(totalGasto / list.length) : 0,
+        cupom_pct_medio: round2(cupomPctMedio),
+        por_codigo_cupom: porCodigoArr.length > 0 ? porCodigoArr : undefined,
+      };
+    } else if (tipo === 'compensacoes') {
+      const rows = await fetchCompensacoes(supabase, shopIds, fromIso, toIso);
+      const list: DerivedCompensacao[] = [];
+      for (const r of rows) {
+        const tipoCp = classifyCompensacao(r);
+        if (tipoCp) list.push(deriveCompensacao(r, tipoCp));
+      }
+      derived = list;
+      const sumByTipo = (t: string) =>
+        list.filter(r => r.tipo_compensacao === t).reduce((s, r) => s + r.amount, 0);
+      resumo = {
+        total_compensacoes: list.length,
+        total_valor: round2(list.reduce((s, r) => s + r.amount, 0)),
+        total_objetos_perdidos: round2(sumByTipo('Objeto perdido')),
+        total_devolucoes_compensadas: round2(sumByTipo('Devolução compensada')),
+        total_outros: round2(sumByTipo('Outro')),
+      };
+    } else {
+      // pedidos_negativos
+      const rows = await fetchEscrowsNegativos(supabase, shopIds, fromIso, toIso);
+      const list = rows.map(derivePedidoNegativo);
+      derived = list;
+      const prejuizos = list.map(r => r.prejuizo);
+      const totalPrej = prejuizos.reduce((s, v) => s + v, 0);
+      resumo = {
+        total_pedidos_negativos: list.length,
+        total_prejuizo: round2(totalPrej),
+        media_prejuizo: list.length > 0 ? round2(totalPrej / list.length) : 0,
+        maior_prejuizo: prejuizos.length > 0 ? round2(Math.max(...prejuizos)) : 0,
+        total_frete_reverso: round2(list.reduce((s, r) => s + r.reverse_shipping_fee, 0)),
+        total_reembolsos: round2(list.reduce((s, r) => s + Math.abs(r.seller_return_refund), 0)),
       };
     }
 

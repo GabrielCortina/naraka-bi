@@ -282,7 +282,12 @@ export default function FinanceiroShopeePage() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [outrosOpen, setOutrosOpen] = useState(false);
   const [divergenciasOpen, setDivergenciasOpen] = useState(false);
-  const [detalhesTipo, setDetalhesTipo] = useState<'take_rate' | 'afiliados' | 'devolucoes' | 'difal' | 'fbs' | 'subsidio' | null>(null);
+  const [detalhesTipo, setDetalhesTipo] = useState<
+    | 'take_rate' | 'afiliados' | 'devolucoes'
+    | 'difal' | 'fbs' | 'subsidio'
+    | 'cupons_seller' | 'compensacoes' | 'pedidos_negativos'
+    | null
+  >(null);
 
   const fetchData = useCallback(async () => {
     if (period === 'custom' && (!customFrom || !customTo)) return;
@@ -602,6 +607,7 @@ export default function FinanceiroShopeePage() {
             value={fmtBRL(ca.cupons_seller)}
             valueColor={COLORS.roxo}
             sub={`${fmtPct(ca.cupons_seller_pct)} do GMV`}
+            onClick={() => setDetalhesTipo('cupons_seller')}
           />
         </div>
       )}
@@ -740,6 +746,7 @@ export default function FinanceiroShopeePage() {
                 value={fmtBRL(data.compensacoes.total)}
                 valueColor={COLORS.verde}
                 sub={`${fmtInt(data.compensacoes.qtd)} reembolsos recebidos`}
+                onClick={() => setDetalhesTipo('compensacoes')}
               />
               <MetricCard
                 label="Objetos perdidos"
@@ -822,6 +829,7 @@ export default function FinanceiroShopeePage() {
               value={fmtBRL(cf.pedidos_negativos)}
               valueColor={COLORS.cinza}
               sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos · custo já contabilizado em devoluções`}
+              onClick={() => setDetalhesTipo('pedidos_negativos')}
             />
           </div>
         </>
