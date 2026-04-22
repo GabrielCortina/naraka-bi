@@ -54,6 +54,7 @@ interface ApiResponse {
       total: number; pct_gmv: number;
       ads: number; ads_roas: number; ads_tacos: number;
       afiliados: number; afiliados_pct: number;
+      cupons_seller: number; cupons_seller_pct: number;
     };
     friccao: {
       total: number; pct_gmv: number;
@@ -98,7 +99,8 @@ interface ApiResponse {
   receita_por_dia: Array<{ date: string; gmv: number; liquido: number; ads: number; custos_plataforma: number }>;
   distribuicao: {
     liquido_pct: number; plataforma_pct: number; ads_pct: number;
-    afiliados_pct: number; difal_pct: number; devolucoes_frete_pct: number; outros_pct: number;
+    afiliados_pct: number; cupons_seller_pct: number;
+    difal_pct: number; devolucoes_frete_pct: number; outros_pct: number;
   };
   conciliacao: Record<string, number>;
   ultimos_pedidos: Array<{
@@ -327,16 +329,16 @@ export default function FinanceiroShopeePage() {
     if (!data) return null;
     const d = data.distribuicao;
     return {
-      labels: ['Líquido', 'Plataforma', 'Ads', 'Afiliados', 'DIFAL', 'Devoluções (frete)', 'Outros'],
+      labels: ['Líquido', 'Plataforma', 'Ads', 'Afiliados', 'Cupons do seller', 'DIFAL', 'Devoluções (frete)', 'Outros'],
       datasets: [{
         data: [
           Math.max(0, d.liquido_pct),
-          d.plataforma_pct, d.ads_pct, d.afiliados_pct,
+          d.plataforma_pct, d.ads_pct, d.afiliados_pct, d.cupons_seller_pct,
           d.difal_pct, d.devolucoes_frete_pct, d.outros_pct,
         ],
         backgroundColor: [
           COLORS.verde, COLORS.vermelho, COLORS.azul, COLORS.roxo,
-          COLORS.coral, COLORS.rosa, COLORS.cinza,
+          '#B8A6F0', COLORS.coral, COLORS.rosa, COLORS.cinza,
         ],
         borderWidth: 0,
       }],
@@ -547,13 +549,13 @@ export default function FinanceiroShopeePage() {
       {/* ============ SEÇÃO 3: CUSTOS AQUISIÇÃO ============ */}
       <SectionLabel>Custos — Aquisição</SectionLabel>
       {loading || !ca ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-          {[1,2,3].map(i => (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {[1,2,3,4].map(i => (
             <div key={i} className="card p-4 rounded-lg animate-pulse"><div className="h-12 bg-current/5 rounded" /></div>
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <MetricCard
             label="Gastos com Ads"
             value={fmtBRL(ca.ads)}
@@ -567,10 +569,16 @@ export default function FinanceiroShopeePage() {
             sub="% do GMV em Ads"
           />
           <MetricCard
-            label="Gastos com afiliados"
+            label="Gastos com Afiliados"
             value={fmtBRL(ca.afiliados)}
             valueColor={COLORS.roxo}
             sub={`${fmtPct(ca.afiliados_pct)} do GMV`}
+          />
+          <MetricCard
+            label="Cupons do seller"
+            value={fmtBRL(ca.cupons_seller)}
+            valueColor={COLORS.roxo}
+            sub={`${fmtPct(ca.cupons_seller_pct)} do GMV`}
           />
         </div>
       )}

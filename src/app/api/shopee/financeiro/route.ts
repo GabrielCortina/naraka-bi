@@ -840,7 +840,11 @@ export async function GET(request: NextRequest) {
   const afiliadosWallet = Math.max(0, cur.wallet.afiliados_debito - cur.wallet.afiliados_credito);
   const afiliadosEscrow = cur.escrow.order_ams_commission_fee;
   const afiliadosLiquido = Math.max(afiliadosWallet, afiliadosEscrow);
-  const aquisicaoTotal = adsExpense + afiliadosLiquido;
+  // Cupons do seller: desconto bancado pelo próprio seller (voucher_from_seller
+  // no escrow_detail). Já está deduzido do escrow_amount, mas conceitualmente
+  // é marketing de aquisição — entra no custo total para dar visibilidade.
+  const cuponsSeller = cur.escrow.voucher_from_seller;
+  const aquisicaoTotal = adsExpense + afiliadosLiquido + cuponsSeller;
 
   // Custos fricção
   const devolucoesTotalWallet = cur.wallet.devolucao_total;
@@ -941,6 +945,7 @@ export async function GET(request: NextRequest) {
     plataforma_pct: round1(pctOf(plataformaTotal, gmv)),
     ads_pct: round1(pctOf(adsExpense, gmv)),
     afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+    cupons_seller_pct: round1(pctOf(cuponsSeller, gmv)),
     difal_pct: round1(pctOf(difal, gmv)),
     devolucoes_frete_pct: round1(pctOf(devolucoesCustoTotal, gmv)),
     outros_pct: round1(pctOf(fbsCustosLiquido + outrosCustos, gmv)),
@@ -992,6 +997,8 @@ export async function GET(request: NextRequest) {
         ads_tacos: round1(adsTacos),
         afiliados: round2(afiliadosLiquido),
         afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+        cupons_seller: round2(cuponsSeller),
+        cupons_seller_pct: round1(pctOf(cuponsSeller, gmv)),
       },
       friccao: {
         total: round2(friccaoTotal),
@@ -1109,7 +1116,7 @@ function emptyPayload(
     take_rate: { percentual: 0, valor: 0 },
     custos: {
       plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, fbs_fee: 0, processing_fee: 0 },
-      aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0 },
+      aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0, cupons_seller: 0, cupons_seller_pct: 0 },
       friccao: {
         total: 0, pct_gmv: 0,
         devolucoes: {
@@ -1127,7 +1134,7 @@ function emptyPayload(
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],
     receita_por_dia: [],
-    distribuicao: { liquido_pct: 0, plataforma_pct: 0, ads_pct: 0, afiliados_pct: 0, difal_pct: 0, devolucoes_frete_pct: 0, outros_pct: 0 },
+    distribuicao: { liquido_pct: 0, plataforma_pct: 0, ads_pct: 0, afiliados_pct: 0, cupons_seller_pct: 0, difal_pct: 0, devolucoes_frete_pct: 0, outros_pct: 0 },
     conciliacao: Object.fromEntries(CONCILIACAO_KEYS.map(k => [k, 0])),
     ultimos_pedidos: [],
   };
