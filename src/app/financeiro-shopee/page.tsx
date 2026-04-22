@@ -711,14 +711,12 @@ export default function FinanceiroShopeePage() {
                 valueColor={COLORS.verde}
                 sub={`${fmtInt(gDevolucoes.count)} reembolsos`}
               />
-              {gOutros.total > 0 && (
-                <MetricCard
-                  label="Outras compensações"
-                  value={fmtBRL(gOutros.total)}
-                  valueColor={COLORS.verde}
-                  sub="Outros tipos de reembolso"
-                />
-              )}
+              <MetricCard
+                label="Outras compensações"
+                value={fmtBRL(gOutros.total)}
+                valueColor={COLORS.verde}
+                sub="Outros tipos de reembolso"
+              />
             </div>
           </>
         );
