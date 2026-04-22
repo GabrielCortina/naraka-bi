@@ -34,6 +34,8 @@ interface ShopeePedidoRow {
 interface ShopeeEscrowRow {
   order_sn: string;
   buyer_total_amount: number | null;
+  order_selling_price: number | null;
+  voucher_from_seller: number | null;
   escrow_amount: number | null;
   commission_fee: number | null;
   service_fee: number | null;
@@ -43,6 +45,23 @@ interface ShopeeEscrowRow {
   escrow_release_time: string | null;
   payout_amount: number | null;
   is_released: boolean | null;
+}
+
+// Valor bruto Shopee para comparação com o Tiny.
+// Preferência: order_selling_price - voucher_from_seller (preço do produto menos
+// cupons do seller) — é o que o Tiny registra. buyer_total_amount inflava a
+// comparação porque inclui frete + taxa de cartão do buyer, gerando falsos
+// PAGO_COM_DIVERGENCIA em ~208 pedidos.
+// Fallback: buyer_total_amount, para escrows sem detail sincronizado.
+// null quando os dois estão zerados/ausentes → caller marca DADOS_INSUFICIENTES.
+function computeValorBrutoShopee(escrow: ShopeeEscrowRow | null): number | null {
+  if (!escrow) return null;
+  const osp = escrow.order_selling_price ?? 0;
+  const vfs = escrow.voucher_from_seller ?? 0;
+  if (osp > 0) return Math.round((osp - vfs) * 100) / 100;
+  const bta = escrow.buyer_total_amount ?? 0;
+  if (bta > 0) return Math.round(bta * 100) / 100;
+  return null;
 }
 
 interface ShopeeReturnRow {
@@ -106,8 +125,11 @@ function classify(
 
   if (status === 'COMPLETED') {
     if (escrow?.is_released) {
+      const shopeeValor = computeValorBrutoShopee(escrow);
+      if (shopeeValor == null) {
+        return { classificacao: 'DADOS_INSUFICIENTES', severidade: 'info' };
+      }
       const tinyValor = tiny.valor_total_pedido ?? 0;
-      const shopeeValor = escrow.buyer_total_amount ?? 0;
       if (shopeeValor > 0) {
         const diff = Math.abs(tinyValor - shopeeValor);
         const pct = (diff / shopeeValor) * 100;
@@ -141,16 +163,17 @@ function buildRow(
   cls: Classification,
   now: string,
 ) {
-  const valorBrutoShopee = escrow?.buyer_total_amount ?? null;
+  const valorBrutoShopee = computeValorBrutoShopee(escrow);
   const valorLiquidoShopee = escrow?.escrow_amount ?? null;
   const valorBrutoTiny = tiny?.valor_total_pedido ?? null;
 
   let divergenciaValor: number | null = null;
   let divergenciaPercentual: number | null = null;
-  if (valorBrutoTiny != null && valorBrutoShopee != null && valorBrutoShopee > 0) {
+  if (valorBrutoTiny != null && valorBrutoShopee != null) {
     divergenciaValor = Math.round((valorBrutoTiny - valorBrutoShopee) * 100) / 100;
-    divergenciaPercentual =
-      Math.round((divergenciaValor / valorBrutoShopee) * 10000) / 100;
+    divergenciaPercentual = valorBrutoShopee > 0
+      ? Math.round((divergenciaValor / valorBrutoShopee) * 10000) / 100
+      : 0;
   }
 
   const valorFreteLiquido =
@@ -259,7 +282,7 @@ async function runOneShop(shop: ActiveShop) {
     supabase
       .from('shopee_escrow')
       .select(
-        'order_sn, buyer_total_amount, escrow_amount, commission_fee, service_fee, actual_shipping_fee, shopee_shipping_rebate, seller_return_refund, escrow_release_time, payout_amount, is_released',
+        'order_sn, buyer_total_amount, order_selling_price, voucher_from_seller, escrow_amount, commission_fee, service_fee, actual_shipping_fee, shopee_shipping_rebate, seller_return_refund, escrow_release_time, payout_amount, is_released',
       )
       .eq('shop_id', shop.shop_id)
       .in('order_sn', orderSns),
