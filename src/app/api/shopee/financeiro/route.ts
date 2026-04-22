@@ -191,6 +191,10 @@ interface EscrowAggr {
   reverse_shipping_fee_total: number;
   reverse_shipping_fee_positive: number;
   reverse_shipping_fee_count: number;
+  // Frete de ida pago pelo seller em pedidos devolvidos — acumula
+  // actual_shipping_fee quando reverse_shipping_fee > 0 E
+  // shopee_shipping_rebate = 0 (Shopee não ressarciu).
+  frete_ida_devolvido: number;
   negative_escrow_count: number;
   negative_escrow_total: number;
 }
@@ -207,6 +211,7 @@ function emptyEscrow(): EscrowAggr {
     seller_discount: 0, coins: 0, credit_card_promotion: 0, pix_discount: 0,
     shopee_shipping_rebate: 0,
     reverse_shipping_fee_total: 0, reverse_shipping_fee_positive: 0, reverse_shipping_fee_count: 0,
+    frete_ida_devolvido: 0,
     negative_escrow_count: 0, negative_escrow_total: 0,
   };
 }
@@ -298,7 +303,7 @@ async function fetchPeriod(
     const { data: rows } = await supabase
       .from('shopee_escrow')
       .select(
-        'buyer_total_amount, escrow_amount, payout_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, credit_card_transaction_fee, fbs_fee, order_ams_commission_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, escrow_release_time',
+        'buyer_total_amount, escrow_amount, payout_amount, order_discounted_price, commission_fee, service_fee, seller_transaction_fee, credit_card_transaction_fee, fbs_fee, order_ams_commission_fee, shopee_discount, voucher_from_shopee, voucher_from_seller, seller_discount, coins, credit_card_promotion, pix_discount, shopee_shipping_rebate, reverse_shipping_fee, actual_shipping_fee, escrow_release_time',
       )
       .in('shop_id', shopIds)
       .eq('is_released', true)
@@ -359,6 +364,14 @@ async function fetchPeriod(
         if (rsf > 0) {
           escrow.reverse_shipping_fee_positive += rsf;
           escrow.reverse_shipping_fee_count++;
+
+          // Frete de ida só entra como custo se a Shopee NÃO ressarciu o seller.
+          // shopee_shipping_rebate > 0 = Shopee pagou parte/todo frete → não é custo do seller.
+          const rebate = num(r.shopee_shipping_rebate);
+          const asf = num(r.actual_shipping_fee);
+          if (rebate === 0 && asf > 0) {
+            escrow.frete_ida_devolvido += asf;
+          }
         }
       }
 
@@ -762,24 +775,32 @@ export async function GET(request: NextRequest) {
 
   // Custos fricção
   const devolucoesTotalWallet = cur.wallet.devolucao_total;
-  const devolucoesFrete = cur.escrow.reverse_shipping_fee_positive;
-  const devolucoesReversaoReceita = Math.max(0, devolucoesTotalWallet - devolucoesFrete);
+  const freteReverso = cur.escrow.reverse_shipping_fee_positive;
+  const freteIdaSeller = cur.escrow.frete_ida_devolvido;
+  // Custo real de devolução = frete reverso (volta até o seller) +
+  // frete de ida que o seller bancou em pedidos devolvidos sem rebate.
+  const devolucoesCustoTotal = freteReverso + freteIdaSeller;
+  const devolucoesReversaoReceita = Math.max(0, devolucoesTotalWallet - freteReverso);
   const difal = cur.wallet.difal_total;
+  // pedidos_negativos fica INFORMATIVO — o custo real já está em
+  // devolucoesCustoTotal (frete reverso + ida). Somar aqui seria double count.
   const pedidosNegativos = cur.wallet.pedidos_negativos_total;
   const fbsCustosLiquido = Math.max(0, cur.wallet.fbs_debito - cur.wallet.fbs_credito);
   const outrosCustos = Math.max(0, cur.wallet.outros_debito - cur.wallet.outros_credito);
 
-  // FRICÇÃO no custo total entra com devolucoes_frete (não o total_wallet).
+  // FRICÇÃO usa o custo total de devoluções (reverso + ida) e NÃO inclui
+  // pedidos_negativos (já contabilizado no custo real das devoluções).
   const friccaoTotal =
-    devolucoesFrete + difal + pedidosNegativos + fbsCustosLiquido + outrosCustos;
+    devolucoesCustoTotal + difal + fbsCustosLiquido + outrosCustos;
 
   const custoTotal = plataformaTotal + aquisicaoTotal + friccaoTotal;
 
   // Margem operacional: receita líquida menos TODOS os custos não-plataforma.
   // (Comissão e taxa já estão debitados no escrow_amount — não subtrair de novo).
+  // pedidos_negativos fica fora pelo mesmo motivo do friccaoTotal.
   const margemValor = receitaLiquida
     - adsExpense - afiliadosLiquido
-    - devolucoesFrete - difal - pedidosNegativos - fbsCustosLiquido - outrosCustos;
+    - devolucoesCustoTotal - difal - fbsCustosLiquido - outrosCustos;
 
   // Subsídio Shopee — o que a Shopee BANCOU do bolso dela (desconto, voucher,
   // coins, promo cartão, pix discount). NÃO inclui shopee_shipping_rebate:
@@ -852,8 +873,8 @@ export async function GET(request: NextRequest) {
     ads_pct: round1(pctOf(adsExpense, gmv)),
     afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
     difal_pct: round1(pctOf(difal, gmv)),
-    devolucoes_frete_pct: round1(pctOf(devolucoesFrete, gmv)),
-    outros_pct: round1(pctOf(pedidosNegativos + fbsCustosLiquido + outrosCustos, gmv)),
+    devolucoes_frete_pct: round1(pctOf(devolucoesCustoTotal, gmv)),
+    outros_pct: round1(pctOf(fbsCustosLiquido + outrosCustos, gmv)),
   };
 
   return NextResponse.json({
@@ -908,13 +929,16 @@ export async function GET(request: NextRequest) {
         total: round2(friccaoTotal),
         pct_gmv: round1(pctOf(friccaoTotal, gmv)),
         devolucoes: {
+          custo_total: round2(devolucoesCustoTotal),
+          frete_reverso: round2(freteReverso),
+          frete_ida_seller: round2(freteIdaSeller),
           total_wallet: round2(devolucoesTotalWallet),
           reversao_receita: round2(devolucoesReversaoReceita),
-          custo_frete: round2(devolucoesFrete),
           qtd: Math.max(cur.wallet.devolucao_qtd, cur.escrow.reverse_shipping_fee_count),
         },
         difal: round2(difal),
         difal_qtd: cur.wallet.difal_qtd,
+        // Informativo: custo real já contabilizado em devolucoes.custo_total.
         pedidos_negativos: round2(pedidosNegativos),
         pedidos_negativos_qtd: cur.wallet.pedidos_negativos_qtd,
         fbs_custos: round2(fbsCustosLiquido),
@@ -1008,7 +1032,10 @@ function emptyPayload(
       aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0 },
       friccao: {
         total: 0, pct_gmv: 0,
-        devolucoes: { total_wallet: 0, reversao_receita: 0, custo_frete: 0, qtd: 0 },
+        devolucoes: {
+          custo_total: 0, frete_reverso: 0, frete_ida_seller: 0,
+          total_wallet: 0, reversao_receita: 0, qtd: 0,
+        },
         difal: 0, difal_qtd: 0, pedidos_negativos: 0, pedidos_negativos_qtd: 0, fbs_custos: 0, outros: 0,
       },
       total: 0, total_pct_gmv: 0,

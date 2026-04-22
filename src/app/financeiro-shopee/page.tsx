@@ -57,7 +57,14 @@ interface ApiResponse {
     };
     friccao: {
       total: number; pct_gmv: number;
-      devolucoes: { total_wallet: number; reversao_receita: number; custo_frete: number; qtd: number };
+      devolucoes: {
+        custo_total: number;
+        frete_reverso: number;
+        frete_ida_seller: number;
+        total_wallet: number;
+        reversao_receita: number;
+        qtd: number;
+      };
       difal: number; difal_qtd: number;
       pedidos_negativos: number; pedidos_negativos_qtd: number;
       fbs_custos: number; outros: number;
@@ -562,12 +569,12 @@ export default function FinanceiroShopeePage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-2">
             <MetricCard
               label="Devoluções"
-              value={fmtBRL(cf.devolucoes.custo_frete)}
+              value={fmtBRL(cf.devolucoes.custo_total)}
               valueColor={COLORS.vermelho}
               sub={(
                 <>
-                  Frete: <strong>{fmtBRL(cf.devolucoes.custo_frete)}</strong>
-                  {' · '}Reversão: {fmtBRL(cf.devolucoes.reversao_receita)}
+                  Frete reverso: <strong>{fmtBRL(cf.devolucoes.frete_reverso)}</strong>
+                  {' · '}Frete ida: <strong>{fmtBRL(cf.devolucoes.frete_ida_seller)}</strong>
                   {' · '}{fmtInt(cf.devolucoes.qtd)} devoluções
                 </>
               )}
@@ -581,8 +588,8 @@ export default function FinanceiroShopeePage() {
             <MetricCard
               label="Pedidos negativos"
               value={fmtBRL(cf.pedidos_negativos)}
-              valueColor={COLORS.vermelho}
-              sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos com prejuízo`}
+              valueColor={COLORS.cinza}
+              sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos · Informativo — custo já contabilizado em devoluções`}
             />
             <div className="card p-4 rounded-lg">
               <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">Outros custos</p>
