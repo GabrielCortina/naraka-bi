@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bar, Doughnut } from 'react-chartjs-2';
 import { DivergenciasModal } from './divergencias-modal';
+import { DetalhesModal } from './detalhes-modal';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -171,7 +172,7 @@ function Delta({ variacao }: { variacao: number }) {
 }
 
 function MetricCard({
-  label, value, delta, sub, valueColor, highlight,
+  label, value, delta, sub, valueColor, highlight, onClick,
 }: {
   label: string;
   value: string;
@@ -179,12 +180,14 @@ function MetricCard({
   sub?: React.ReactNode;
   valueColor?: string;
   highlight?: boolean;
+  onClick?: () => void;
 }) {
-  return (
-    <div
-      className={`card p-4 rounded-lg ${highlight ? 'border border-current/10' : ''}`}
-    >
-      <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">{label}</p>
+  const inner = (
+    <>
+      <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">
+        {label}
+        {onClick && <span className="ml-1 opacity-60">↗</span>}
+      </p>
       <div className="flex items-center gap-2 mb-1">
         <span
           className={`font-medium ${highlight ? 'text-xl' : 'text-lg'}`}
@@ -195,6 +198,21 @@ function MetricCard({
         {delta !== undefined && <Delta variacao={delta} />}
       </div>
       {sub && <div className="text-[10px] opacity-60">{sub}</div>}
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        onClick={onClick}
+        className={`card p-4 rounded-lg text-left hover:opacity-80 transition-opacity cursor-pointer ${highlight ? 'border border-current/10' : ''}`}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className={`card p-4 rounded-lg ${highlight ? 'border border-current/10' : ''}`}>
+      {inner}
     </div>
   );
 }
@@ -264,6 +282,7 @@ export default function FinanceiroShopeePage() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [outrosOpen, setOutrosOpen] = useState(false);
   const [divergenciasOpen, setDivergenciasOpen] = useState(false);
+  const [detalhesTipo, setDetalhesTipo] = useState<'take_rate' | 'afiliados' | 'devolucoes' | null>(null);
 
   const fetchData = useCallback(async () => {
     if (period === 'custom' && (!customFrom || !customTo)) return;
@@ -509,6 +528,7 @@ export default function FinanceiroShopeePage() {
             value={fmtPct(tr.percentual)}
             valueColor={COLORS.vermelho}
             sub={`Shopee fica ${fmtBRL(tr.valor)}`}
+            onClick={() => setDetalhesTipo('take_rate')}
           />
           <MetricCard
             label="Comissão"
@@ -575,6 +595,7 @@ export default function FinanceiroShopeePage() {
             value={fmtBRL(ca.afiliados)}
             valueColor={COLORS.roxo}
             sub={`${fmtPct(ca.afiliados_pct)} do GMV`}
+            onClick={() => setDetalhesTipo('afiliados')}
           />
           <MetricCard
             label="Cupons do seller"
@@ -601,6 +622,7 @@ export default function FinanceiroShopeePage() {
                   {' · '}{fmtInt(cf.devolucoes.qtd)} devoluções
                 </>
               )}
+              onClick={() => setDetalhesTipo('devolucoes')}
             />
             <MetricCard
               label="DIFAL (ICMS)"
@@ -998,6 +1020,15 @@ export default function FinanceiroShopeePage() {
         onClose={() => setDivergenciasOpen(false)}
         shopFilter={shopFilter}
         onChanged={fetchData}
+      />
+
+      <DetalhesModal
+        open={detalhesTipo !== null}
+        onClose={() => setDetalhesTipo(null)}
+        tipo={detalhesTipo}
+        from={data?.period.from ?? ''}
+        to={data?.period.to ?? ''}
+        shopFilter={shopFilter}
       />
     </div>
   );
