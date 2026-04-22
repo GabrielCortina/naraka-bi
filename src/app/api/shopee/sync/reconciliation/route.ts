@@ -19,7 +19,11 @@ const JOB_NAME = 'sync_reconciliation';
 const MAX_ELAPSED_MS = 45 * 1000;
 const LOOKBACK_DAYS = 60;
 const SLA_DAYS = 15;
-const DIVERGENCE_TOLERANCE_PCT = 1.0;
+// Tolerância sobe para 2% para cobrir a promoção "Leve mais por menos"
+// (Any 2 enjoy 1% off): o Tiny registra com o desconto aplicado, mas
+// order_selling_price vem sem — 2% dá folga para o 1% do leve+ mais
+// arredondamentos.
+const DIVERGENCE_TOLERANCE_PCT = 2.0;
 const PROCESS_LIMIT = 5000;
 const UPSERT_CHUNK = 500;
 
@@ -48,17 +52,17 @@ interface ShopeeEscrowRow {
 }
 
 // Valor bruto Shopee para comparação com o Tiny.
-// Preferência: order_selling_price - voucher_from_seller (preço do produto menos
-// cupons do seller) — é o que o Tiny registra. buyer_total_amount inflava a
-// comparação porque inclui frete + taxa de cartão do buyer, gerando falsos
-// PAGO_COM_DIVERGENCIA em ~208 pedidos.
+// Usa order_selling_price puro — o Tiny registra o valor dos produtos
+// SEM descontar cupom do seller, então subtrair voucher_from_seller aqui
+// criava falso PAGO_COM_DIVERGENCIA exatamente no valor do cupom.
+// buyer_total_amount não serve como primário porque inclui frete +
+// taxa de cartão do buyer, inflando a conta (208 pedidos no bug original).
 // Fallback: buyer_total_amount, para escrows sem detail sincronizado.
 // null quando os dois estão zerados/ausentes → caller marca DADOS_INSUFICIENTES.
 function computeValorBrutoShopee(escrow: ShopeeEscrowRow | null): number | null {
   if (!escrow) return null;
   const osp = escrow.order_selling_price ?? 0;
-  const vfs = escrow.voucher_from_seller ?? 0;
-  if (osp > 0) return Math.round((osp - vfs) * 100) / 100;
+  if (osp > 0) return Math.round(osp * 100) / 100;
   const bta = escrow.buyer_total_amount ?? 0;
   if (bta > 0) return Math.round(bta * 100) / 100;
   return null;
