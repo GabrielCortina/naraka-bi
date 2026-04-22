@@ -607,15 +607,15 @@ export default function FinanceiroShopeePage() {
               sub={`${fmtInt(cf.difal_qtd)} cobranças`}
             />
             <MetricCard
-              label="Pedidos negativos"
-              value={fmtBRL(cf.pedidos_negativos)}
-              valueColor={COLORS.cinza}
-              sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos · Informativo — custo já contabilizado em devoluções`}
+              label="FBS (Fulfillment)"
+              value={fmtBRL(cf.fbs_custos)}
+              valueColor={COLORS.vermelho}
+              sub="Custos de armazenamento e manuseio"
             />
             <div className="card p-4 rounded-lg">
               <p className="text-[9px] uppercase tracking-wider opacity-50 mb-1">Outros custos</p>
               <span className="text-lg font-medium" style={{ color: COLORS.vermelho }}>
-                {fmtBRL(cf.outros + cf.fbs_custos)}
+                {fmtBRL(cf.outros)}
               </span>
               <button
                 onClick={() => setOutrosOpen(v => !v)}
@@ -774,10 +774,10 @@ export default function FinanceiroShopeePage() {
       )}
 
       {/* ============ INFORMATIVO (global, não filtrado) ============ */}
-      {!loading && info && (
+      {!loading && info && cf && (
         <>
           <SectionLabel>Informativo (global)</SectionLabel>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
             <MetricCard
               label="Receita pendente"
               value={fmtBRL(info.receita_pendente)}
@@ -789,6 +789,12 @@ export default function FinanceiroShopeePage() {
               value={fmtBRL(info.saldo_carteira)}
               valueColor={COLORS.azul}
               sub="Último current_balance sincronizado"
+            />
+            <MetricCard
+              label="Pedidos negativos"
+              value={fmtBRL(cf.pedidos_negativos)}
+              valueColor={COLORS.cinza}
+              sub={`${fmtInt(cf.pedidos_negativos_qtd)} pedidos · custo já contabilizado em devoluções`}
             />
           </div>
         </>
