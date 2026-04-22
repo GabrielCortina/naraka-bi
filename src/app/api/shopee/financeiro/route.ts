@@ -816,12 +816,12 @@ export async function GET(request: NextRequest) {
   // Take rate: comissão + taxa de serviço (somas são baseadas em detail).
   const takeRateValor = cur.escrow.commission_fee + cur.escrow.service_fee;
 
-  // Custos plataforma — inclui taxa de cartão (credit_card_transaction_fee),
-  // que estava sendo ignorada e custa ~R$ 300/dia de acordo com a OxeanJeans.
-  const taxaCartao = cur.escrow.credit_card_transaction_fee;
+  // Custos plataforma — NÃO inclui credit_card_transaction_fee: a taxa é
+  // cobrada do BUYER (buyer_transaction_fee == credit_card_transaction_fee
+  // nos payloads BR) e o escrow_amount já está calculado sem debitar isso
+  // do seller. Somar aqui inflaria o custo real da Shopee.
   const plataformaOutros =
     cur.escrow.seller_transaction_fee +
-    taxaCartao +
     cur.escrow.fbs_fee +
     cur.escrow.processing_fee;
   const plataformaTotal = takeRateValor + plataformaOutros;
@@ -981,7 +981,6 @@ export async function GET(request: NextRequest) {
         taxa_servico: round2(cur.escrow.service_fee),
         taxa_servico_pct: round1(pctOf(cur.escrow.service_fee, gmvDetail)),
         taxa_transacao: round2(cur.escrow.seller_transaction_fee),
-        taxa_cartao: round2(taxaCartao),
         fbs_fee: round2(cur.escrow.fbs_fee),
         processing_fee: round2(cur.escrow.processing_fee),
       },
@@ -1109,7 +1108,7 @@ function emptyPayload(
     },
     take_rate: { percentual: 0, valor: 0 },
     custos: {
-      plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, taxa_cartao: 0, fbs_fee: 0, processing_fee: 0 },
+      plataforma: { total: 0, pct_gmv: 0, comissao: 0, comissao_pct: 0, taxa_servico: 0, taxa_servico_pct: 0, taxa_transacao: 0, fbs_fee: 0, processing_fee: 0 },
       aquisicao: { total: 0, pct_gmv: 0, ads: 0, ads_roas: 0, ads_tacos: 0, afiliados: 0, afiliados_pct: 0 },
       friccao: {
         total: 0, pct_gmv: 0,

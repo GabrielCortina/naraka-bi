@@ -47,7 +47,7 @@ interface ApiResponse {
       total: number; pct_gmv: number;
       comissao: number; comissao_pct: number;
       taxa_servico: number; taxa_servico_pct: number;
-      taxa_transacao: number; taxa_cartao: number;
+      taxa_transacao: number;
       fbs_fee: number; processing_fee: number;
     };
     aquisicao: {
@@ -519,27 +519,19 @@ export default function FinanceiroShopeePage() {
             sub={`${fmtPct(cp.taxa_servico_pct)} do GMV`}
           />
           {(() => {
-            const outrosTotal = cp.taxa_transacao + cp.taxa_cartao + cp.fbs_fee + cp.processing_fee;
-            if (outrosTotal === 0) {
-              return (
-                <MetricCard
-                  label="Total plataforma"
-                  value={fmtBRL(cp.total)}
-                  valueColor={COLORS.vermelho}
-                  sub={`${fmtPct(cp.pct_gmv)} do GMV`}
-                />
-              );
-            }
+            const outrosTotal = cp.taxa_transacao + cp.fbs_fee + cp.processing_fee;
             // Mostra só os componentes com valor > 0. Quando há apenas 1,
             // usa rótulo completo; se houver vários, agrega na forma curta.
+            // Taxa de cartão NÃO entra: é cobrada do buyer, não do seller.
             const parts: Array<{ short: string; long: string }> = [];
-            if (cp.taxa_cartao > 0)    parts.push({ short: 'Cartão',    long: 'Taxa de cartão de crédito' });
-            if (cp.fbs_fee > 0)        parts.push({ short: 'FBS',       long: 'Taxa FBS' });
-            if (cp.taxa_transacao > 0) parts.push({ short: 'transação', long: 'Taxa de transação' });
+            if (cp.fbs_fee > 0)        parts.push({ short: 'FBS',        long: 'Taxa FBS' });
+            if (cp.taxa_transacao > 0) parts.push({ short: 'transação',  long: 'Taxa de transação' });
             if (cp.processing_fee > 0) parts.push({ short: 'processing', long: 'Taxa de processing' });
-            const sub = parts.length === 1
-              ? parts[0].long
-              : parts.map(p => p.short).join(' + ');
+            const sub = parts.length === 0
+              ? 'Sem outros custos de plataforma'
+              : parts.length === 1
+                ? parts[0].long
+                : parts.map(p => p.short).join(' + ');
             return (
               <MetricCard
                 label="Outros plataforma"
