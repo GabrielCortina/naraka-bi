@@ -78,6 +78,26 @@ interface TinyPedidoRow {
   situacao: number;
   data_entrega: string | null;
   valor_total_pedido: number;
+  valor_total_produtos: number | null;
+  valor_frete: number | null;
+}
+
+// Valor bruto Tiny para comparação com a Shopee. Espelha
+// computeValorBrutoShopee: usa só o valor dos produtos, sem frete,
+// porque a Shopee já manda o frete separado (buyer_total_amount é
+// que inflava a conta antes).
+// Preferência: valor_total_produtos.
+// Fallback: valor_total_pedido - valor_frete (pedidos antigos podem
+// não ter valor_total_produtos populado).
+// null só se ambas as fontes estiverem ausentes.
+function computeValorBrutoTiny(tiny: TinyPedidoRow | null): number | null {
+  if (!tiny) return null;
+  const vtp = tiny.valor_total_produtos ?? 0;
+  if (vtp > 0) return Math.round(vtp * 100) / 100;
+  const total = tiny.valor_total_pedido ?? 0;
+  const frete = tiny.valor_frete ?? 0;
+  if (total > 0) return Math.round((total - frete) * 100) / 100;
+  return null;
 }
 
 interface Classification {
@@ -129,7 +149,7 @@ function classify(
       if (shopeeValor == null) {
         return { classificacao: 'DADOS_INSUFICIENTES', severidade: 'info' };
       }
-      const tinyValor = tiny.valor_total_pedido ?? 0;
+      const tinyValor = computeValorBrutoTiny(tiny) ?? 0;
       if (shopeeValor > 0) {
         const diff = Math.abs(tinyValor - shopeeValor);
         const pct = (diff / shopeeValor) * 100;
@@ -165,7 +185,7 @@ function buildRow(
 ) {
   const valorBrutoShopee = computeValorBrutoShopee(escrow);
   const valorLiquidoShopee = escrow?.escrow_amount ?? null;
-  const valorBrutoTiny = tiny?.valor_total_pedido ?? null;
+  const valorBrutoTiny = computeValorBrutoTiny(tiny);
 
   let divergenciaValor: number | null = null;
   let divergenciaPercentual: number | null = null;
@@ -293,7 +313,7 @@ async function runOneShop(shop: ActiveShop) {
       .in('order_sn', orderSns),
     supabase
       .from('pedidos')
-      .select('id, numero_pedido, numero_pedido_ecommerce, situacao, data_entrega, valor_total_pedido')
+      .select('id, numero_pedido, numero_pedido_ecommerce, situacao, data_entrega, valor_total_pedido, valor_total_produtos, valor_frete')
       .in('numero_pedido_ecommerce', orderSns),
     supabase
       .from('shopee_conciliacao')
