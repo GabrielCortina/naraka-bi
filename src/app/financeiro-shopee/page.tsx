@@ -77,6 +77,11 @@ interface ApiResponse {
     coins: number; promo_cartao: number; pix_discount: number;
     pct_gmv: number;
   };
+  compensacoes: {
+    total: number;
+    qtd: number;
+    detalhe: Array<{ description: string; count: number; total: number }>;
+  };
   informativo: {
     saques: number; saques_qtd: number; saldo_carteira: number;
     cobertura_financeira: number; pedidos_sem_escrow: number;
@@ -660,6 +665,36 @@ export default function FinanceiroShopeePage() {
               )}
             </div>
           )}
+        </>
+      )}
+
+      {/* ============ COMPENSAÇÕES ============ */}
+      {!loading && data && data.compensacoes.total > 0 && (
+        <>
+          <SectionLabel>Compensações Shopee</SectionLabel>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+            <MetricCard
+              label="Compensações recebidas"
+              value={fmtBRL(data.compensacoes.total)}
+              valueColor={COLORS.verde}
+              sub={(
+                <>
+                  {fmtInt(data.compensacoes.qtd)} reembolsos — objetos perdidos e devoluções
+                  {data.compensacoes.detalhe.length > 0 && (
+                    <>
+                      {' · '}
+                      {data.compensacoes.detalhe.slice(0, 2).map((d, i) => (
+                        <span key={i}>
+                          {i > 0 && ' · '}
+                          {d.description}: {fmtBRL(d.total)}
+                        </span>
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
+            />
+          </div>
         </>
       )}
 

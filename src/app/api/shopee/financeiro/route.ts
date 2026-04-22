@@ -223,6 +223,11 @@ interface OutrosGroup {
   count: number;
   total: number;
 }
+interface CompensacaoGroup {
+  description: string;
+  count: number;
+  total: number;
+}
 interface WalletAggr {
   afiliados_debito: number;
   afiliados_credito: number;
@@ -238,6 +243,9 @@ interface WalletAggr {
   outros_credito: number;
   saques_total: number;
   saques_qtd: number;
+  compensacoes_total: number;
+  compensacoes_qtd: number;
+  compensacoes_detail: Map<string, CompensacaoGroup>;
   outros_detail: Map<string, OutrosGroup>;
 }
 function emptyWallet(): WalletAggr {
@@ -249,6 +257,8 @@ function emptyWallet(): WalletAggr {
     fbs_debito: 0, fbs_credito: 0,
     outros_debito: 0, outros_credito: 0,
     saques_total: 0, saques_qtd: 0,
+    compensacoes_total: 0, compensacoes_qtd: 0,
+    compensacoes_detail: new Map<string, CompensacaoGroup>(),
     outros_detail: new Map<string, OutrosGroup>(),
   };
 }
@@ -417,81 +427,123 @@ async function fetchPeriod(
       wOffset += PAGE;
     }
   }
+
+  // Derivamos sets por kpi_destino uma única vez por loja a partir do
+  // mapping — nenhum transaction_type é hardcoded no roteamento dos KPIs.
+  // Para adicionar suporte a um tipo novo, basta inserir uma linha em
+  // shopee_transaction_mapping com o kpi_destino desejado.
+  const typesByKpi = new Map<string, Set<string>>();
+  for (const [tt, m] of Array.from(mapping.entries())) {
+    let set = typesByKpi.get(m.kpi_destino);
+    if (!set) { set = new Set<string>(); typesByKpi.set(m.kpi_destino, set); }
+    set.add(tt);
+  }
+  const emptySet = new Set<string>();
+  const afiliadosTypes         = typesByKpi.get('afiliados')         ?? emptySet;
+  const devolucaoTypes         = typesByKpi.get('devolucao')         ?? emptySet;
+  const difalTypes             = typesByKpi.get('difal')             ?? emptySet;
+  const pedidosNegativosTypes  = typesByKpi.get('pedidos_negativos') ?? emptySet;
+  const fbsTypes               = typesByKpi.get('fbs')               ?? emptySet;
+  const saqueTypes             = typesByKpi.get('saque')             ?? emptySet;
+  const compensacaoTypes       = typesByKpi.get('compensacao')       ?? emptySet;
+  const ignorarTypes           = typesByKpi.get('ignorar')           ?? emptySet;
+
+  // Compensações: detectadas por (a) mapping kpi_destino='compensacao',
+  // (b) transaction_type vazio + description contém "objeto perdido"/"reembolso",
+  // (c) ADJUSTMENT_ADD + description indica compensação/extravio.
+  // A detecção por description cobre lançamentos que chegam com tipo em
+  // branco — sem ela, ficariam em "outros" sem classificação financeira real.
+  const matchCompensationByDescription = (tt: string, descLower: string): boolean => {
+    if (tt === '' && (descLower.includes('objeto perdido') || descLower.includes('reembolso'))) {
+      return true;
+    }
+    if (tt === 'ADJUSTMENT_ADD' && (
+      descLower.includes('compensation') ||
+      descLower.includes('perdido') ||
+      descLower.includes('danificado') ||
+      descLower.includes('extraviado')
+    )) {
+      return true;
+    }
+    return false;
+  };
+
   for (const w of walletRows) {
     const tt = ((w.transaction_type as string) ?? '').trim();
     const amount = num(w.amount);
     const desc = ((w.description as string | null) ?? '').trim();
+    const m = mapping.get(tt); // undefined quando o tipo ainda não foi mapeado
 
-    // Fallback: tipo desconhecido → tratar como 'outros'/custo_friccao.
-    const m: MappingRow = mapping.get(tt) ?? {
-      transaction_type: tt,
-      classificacao: 'custo_friccao',
-      kpi_destino: 'outros',
-      descricao_pt: desc || tt || '(sem descrição)',
-      entra_no_custo_total: true,
-      duplica_com: null,
-      natureza: amount < 0 ? 'debito' : 'credito',
-    };
+    // Ignorar: tipo marcado explicitamente como 'ignorar' (ads duplicados etc.).
+    if (ignorarTypes.has(tt) || m?.classificacao === 'ignorar') continue;
 
-    // Tipos explicitamente marcados como "ignorar" (ex: ads duplicados) — pulamos.
-    if (m.classificacao === 'ignorar' || m.kpi_destino === 'ignorar') continue;
-    if (m.duplica_com && m.duplica_com !== 'shopee_escrow' && m.kpi_destino !== 'receita_escrow') {
-      // duplica_com aponta para outra tabela-fonte; shopee_escrow é o backbone
-      // de receita e não conflita. Demais fontes (ex: shopee_ads_daily) já
-      // foram tratadas via classificacao=ignorar acima.
+    // duplica_com aponta para outra tabela-fonte autoritativa. shopee_escrow
+    // é o backbone de receita e não conflita; qualquer outra fonte (ex:
+    // shopee_ads_daily) deveria ter sido marcada como 'ignorar'. Defensivo:
+    if (m?.duplica_com && m.duplica_com !== 'shopee_escrow' && m.kpi_destino !== 'receita_escrow') {
       continue;
     }
 
+    // Natureza: do mapping quando existe; senão inferimos do sinal.
+    const isCredito = m ? m.natureza === 'credito' : amount > 0;
     const abs = Math.abs(amount);
 
-    switch (m.kpi_destino) {
-      case 'afiliados':
-        if (m.natureza === 'credito' || amount > 0) wallet.afiliados_credito += abs;
-        else wallet.afiliados_debito += abs;
-        break;
-      case 'devolucao':
-        wallet.devolucao_total += abs;
-        wallet.devolucao_qtd++;
-        break;
-      case 'difal':
-        wallet.difal_total += abs;
-        wallet.difal_qtd++;
-        break;
-      case 'pedidos_negativos':
-        wallet.pedidos_negativos_total += abs;
-        wallet.pedidos_negativos_qtd++;
-        break;
-      case 'fbs':
-        if (m.natureza === 'credito' || amount > 0) wallet.fbs_credito += abs;
-        else wallet.fbs_debito += abs;
-        break;
-      case 'saque':
-        // Só conta como saque quando SAIU dinheiro (débito).
-        if (amount < 0) {
-          wallet.saques_total += abs;
-          wallet.saques_qtd++;
-        }
-        break;
-      case 'outros': {
-        if (m.natureza === 'credito' || amount > 0) wallet.outros_credito += abs;
-        else wallet.outros_debito += abs;
-
-        const key = `${tt}::${desc}`;
-        const existing = wallet.outros_detail.get(key) ?? {
-          transaction_type: tt,
-          description: desc || m.descricao_pt,
-          classificacao: m.classificacao,
-          count: 0,
-          total: 0,
-        };
-        existing.count++;
-        existing.total += amount;
-        wallet.outros_detail.set(key, existing);
-        break;
+    // Compensações têm prioridade sobre o roteamento normal — o lançamento
+    // pode ter tipo em branco (sem mapping) ou vir como ADJUSTMENT_ADD
+    // (genérico). Só contamos valores positivos: é dinheiro que ENTRA.
+    const descLower = desc.toLowerCase();
+    if (compensacaoTypes.has(tt) || matchCompensationByDescription(tt, descLower)) {
+      if (amount > 0) {
+        wallet.compensacoes_total += amount;
+        wallet.compensacoes_qtd++;
+        const key = (desc || tt || '(compensação)').trim() || '(compensação)';
+        const g = wallet.compensacoes_detail.get(key) ?? { description: key, count: 0, total: 0 };
+        g.count++;
+        g.total += amount;
+        wallet.compensacoes_detail.set(key, g);
       }
-      default:
-        // receita_escrow / saque já tratados; demais caem aqui e são ignorados.
-        break;
+      continue;
+    }
+
+    if (afiliadosTypes.has(tt)) {
+      if (isCredito || amount > 0) wallet.afiliados_credito += abs;
+      else wallet.afiliados_debito += abs;
+    } else if (devolucaoTypes.has(tt)) {
+      wallet.devolucao_total += abs;
+      wallet.devolucao_qtd++;
+    } else if (difalTypes.has(tt)) {
+      wallet.difal_total += abs;
+      wallet.difal_qtd++;
+    } else if (pedidosNegativosTypes.has(tt)) {
+      wallet.pedidos_negativos_total += abs;
+      wallet.pedidos_negativos_qtd++;
+    } else if (fbsTypes.has(tt)) {
+      if (isCredito || amount > 0) wallet.fbs_credito += abs;
+      else wallet.fbs_debito += abs;
+    } else if (saqueTypes.has(tt)) {
+      // Só conta saque quando SAIU dinheiro (débito).
+      if (amount < 0) {
+        wallet.saques_total += abs;
+        wallet.saques_qtd++;
+      }
+    } else {
+      // Default: 'outros'. Abrange tanto tipos mapeados com kpi_destino='outros'
+      // quanto tipos ainda não presentes na tabela de mapping — ambos caem aqui
+      // sem precisar de hardcode. Os detalhes viram um breakdown para a UI.
+      if (isCredito || amount > 0) wallet.outros_credito += abs;
+      else wallet.outros_debito += abs;
+
+      const key = `${tt}::${desc}`;
+      const existing = wallet.outros_detail.get(key) ?? {
+        transaction_type: tt,
+        description: desc || m?.descricao_pt || tt || '(sem descrição)',
+        classificacao: m?.classificacao ?? 'custo_friccao',
+        count: 0,
+        total: 0,
+      };
+      existing.count++;
+      existing.total += amount;
+      wallet.outros_detail.set(key, existing);
     }
   }
 
@@ -963,6 +1015,18 @@ export async function GET(request: NextRequest) {
       pct_gmv: round1(pctOf(subsidioTotal, gmv)),
     },
 
+    compensacoes: {
+      total: round2(cur.wallet.compensacoes_total),
+      qtd: cur.wallet.compensacoes_qtd,
+      detalhe: Array.from(cur.wallet.compensacoes_detail.values())
+        .sort((a, b) => b.total - a.total)
+        .map(g => ({
+          description: g.description,
+          count: g.count,
+          total: round2(g.total),
+        })),
+    },
+
     informativo: {
       saques: round2(cur.wallet.saques_total),
       saques_qtd: cur.wallet.saques_qtd,
@@ -1042,6 +1106,7 @@ function emptyPayload(
     },
     margem: { valor: 0, pct_gmv: 0 },
     subsidio_shopee: { total: 0, desconto_shopee: 0, voucher_shopee: 0, coins: 0, promo_cartao: 0, pix_discount: 0, pct_gmv: 0 },
+    compensacoes: { total: 0, qtd: 0, detalhe: [] },
     informativo: { saques: 0, saques_qtd: 0, saldo_carteira: 0, cobertura_financeira: 0, pedidos_sem_escrow: 0, receita_pendente: 0, detail_coverage: 0, escrows_com_detail: 0, escrows_sem_detail: 0 },
     cupons_seller: { voucher_seller: 0, seller_discount: 0 },
     outros_custos_detalhe: [],
