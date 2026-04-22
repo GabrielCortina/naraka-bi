@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bar, Doughnut } from 'react-chartjs-2';
+import { DivergenciasModal } from './divergencias-modal';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -262,6 +263,7 @@ export default function FinanceiroShopeePage() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [outrosOpen, setOutrosOpen] = useState(false);
+  const [divergenciasOpen, setDivergenciasOpen] = useState(false);
 
   const fetchData = useCallback(async () => {
     if (period === 'custom' && (!customFrom || !customTo)) return;
@@ -867,18 +869,34 @@ export default function FinanceiroShopeePage() {
           }
           return (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
-              {visible.map(c => (
-                <div
-                  key={c.key}
-                  className="p-3 rounded-lg"
-                  style={{ background: c.bg }}
-                >
-                  <p className="text-[10px] font-medium" style={{ color: c.color }}>{c.label}</p>
-                  <p className="text-lg font-semibold" style={{ color: c.color }}>
-                    {fmtInt(data.conciliacao[c.key])}
-                  </p>
-                </div>
-              ))}
+              {visible.map(c => {
+                const clickable = c.key === 'PAGO_COM_DIVERGENCIA';
+                const body = (
+                  <>
+                    <p className="text-[10px] font-medium" style={{ color: c.color }}>
+                      {c.label}
+                      {clickable && <span className="ml-1 opacity-60">↗</span>}
+                    </p>
+                    <p className="text-lg font-semibold" style={{ color: c.color }}>
+                      {fmtInt(data.conciliacao[c.key])}
+                    </p>
+                  </>
+                );
+                return clickable ? (
+                  <button
+                    key={c.key}
+                    onClick={() => setDivergenciasOpen(true)}
+                    className="p-3 rounded-lg text-left hover:opacity-80 transition-opacity cursor-pointer"
+                    style={{ background: c.bg }}
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div key={c.key} className="p-3 rounded-lg" style={{ background: c.bg }}>
+                    {body}
+                  </div>
+                );
+              })}
             </div>
           );
         })()}
@@ -974,6 +992,13 @@ export default function FinanceiroShopeePage() {
           );
         })()}
       </div>
+
+      <DivergenciasModal
+        open={divergenciasOpen}
+        onClose={() => setDivergenciasOpen(false)}
+        shopFilter={shopFilter}
+        onChanged={fetchData}
+      />
     </div>
   );
 }

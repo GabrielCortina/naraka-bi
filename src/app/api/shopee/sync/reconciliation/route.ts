@@ -321,7 +321,7 @@ async function runOneShop(shop: ActiveShop) {
       .in('numero_pedido_ecommerce', orderSns),
     supabase
       .from('shopee_conciliacao')
-      .select('order_sn, classificacao')
+      .select('order_sn, classificacao, observacoes')
       .eq('shop_id', shop.shop_id)
       .in('order_sn', orderSns),
   ]);
@@ -345,9 +345,18 @@ async function runOneShop(shop: ActiveShop) {
     tinyBySn.set(t.numero_pedido_ecommerce, t);
 
   const existingBySn = new Map<string, string>();
-  for (const c of (existingRes.data as { order_sn: string; classificacao: string }[] | null) ??
-    [])
+  // Pedidos marcados manualmente como PAGO_OK via modal de divergências.
+  // O cron deve preservar essa classificação mesmo que o recálculo
+  // automático caia em PAGO_COM_DIVERGENCIA — senão a revisão humana
+  // some a cada 10 min.
+  const confirmadoManualmente = new Set<string>();
+  for (const c of (existingRes.data as { order_sn: string; classificacao: string; observacoes: string | null }[] | null) ??
+    []) {
     existingBySn.set(c.order_sn, c.classificacao);
+    if ((c.observacoes ?? '').toLowerCase().includes('confirmado manualmente')) {
+      confirmadoManualmente.add(c.order_sn);
+    }
+  }
 
   const now = new Date().toISOString();
   const rows: ReturnType<typeof buildRow>[] = [];
@@ -373,7 +382,12 @@ async function runOneShop(shop: ActiveShop) {
     const escrow = escrowBySn.get(p.order_sn) ?? null;
     const rets = returnsBySn.get(p.order_sn) ?? [];
 
-    const cls = classify(p, escrow, rets, tiny);
+    let cls = classify(p, escrow, rets, tiny);
+    // Override: pedido foi confirmado manualmente como OK pelo usuário.
+    // Mantém PAGO_OK para preservar a revisão humana.
+    if (confirmadoManualmente.has(p.order_sn)) {
+      cls = { classificacao: 'PAGO_OK', severidade: 'success' };
+    }
     byClass[cls.classificacao] = (byClass[cls.classificacao] ?? 0) + 1;
 
     rows.push(buildRow(shop.shop_id, p, escrow, rets, tiny, cls, now));
