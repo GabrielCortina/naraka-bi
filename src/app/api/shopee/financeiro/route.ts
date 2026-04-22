@@ -448,6 +448,18 @@ async function fetchPeriod(
   const compensacaoTypes       = typesByKpi.get('compensacao')       ?? emptySet;
   const ignorarTypes           = typesByKpi.get('ignorar')           ?? emptySet;
 
+  // Kpis cujos valores são contabilizados em OUTRA tabela-fonte autoritativa
+  // e NÃO devem aparecer no roteamento da wallet — senão viram double count
+  // ou caem no bucket "outros" como receita (caso do ESCROW_VERIFIED_ADD,
+  // que é receita_escrow: vem do shopee_escrow).
+  //   - receita_escrow / comissao / taxa → shopee_escrow
+  //   - ads → shopee_ads_daily
+  const elsewhereTypes = new Set<string>();
+  for (const kpi of ['receita_escrow', 'comissao', 'taxa', 'ads']) {
+    const s = typesByKpi.get(kpi);
+    if (s) for (const tt of Array.from(s)) elsewhereTypes.add(tt);
+  }
+
   // Compensações: detectadas por (a) mapping kpi_destino='compensacao',
   // (b) transaction_type vazio + description contém "objeto perdido"/"reembolso",
   // (c) ADJUSTMENT_ADD + description indica compensação/extravio.
@@ -477,10 +489,15 @@ async function fetchPeriod(
     // Ignorar: tipo marcado explicitamente como 'ignorar' (ads duplicados etc.).
     if (ignorarTypes.has(tt) || m?.classificacao === 'ignorar') continue;
 
-    // duplica_com aponta para outra tabela-fonte autoritativa. shopee_escrow
-    // é o backbone de receita e não conflita; qualquer outra fonte (ex:
-    // shopee_ads_daily) deveria ter sido marcada como 'ignorar'. Defensivo:
-    if (m?.duplica_com && m.duplica_com !== 'shopee_escrow' && m.kpi_destino !== 'receita_escrow') {
+    // Kpis contabilizados em outra tabela-fonte (ESCROW_VERIFIED_ADD →
+    // shopee_escrow; ads na shopee_ads_daily). Pular aqui evita que receita
+    // vire "outros custos" e que ads seja contado duas vezes.
+    if (elsewhereTypes.has(tt)) continue;
+
+    // Defensivo: duplica_com aponta para fonte autoritativa ≠ shopee_escrow
+    // (tipicamente shopee_ads_daily). Esses já caíram no check acima quando
+    // tinham kpi_destino compatível; este é o último filtro antes do roteamento.
+    if (m?.duplica_com && m.duplica_com !== 'shopee_escrow') {
       continue;
     }
 
