@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 
 // Página Lucro e Prejuízo — Etapa 3: visão por pedido.
 // Consome /api/lucro e /api/shopee/shops. Configs (toggles de custos,
@@ -12,11 +12,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Period = 'today' | 'yesterday' | '7d' | '15d' | 'month';
 type Filtro = 'todos' | 'com_lucro' | 'com_prejuizo' | 'saudavel' | 'atencao' | 'sem_cmv';
+type FiltroDevolucao = 'todos' | 'sem' | 'com';
 type Visao = 'pedidos' | 'skus';
 type MargemTipo = 'bruta' | 'operacional' | 'real';
 type Ordem = 'lucro' | 'margem' | 'venda' | 'cmv' | 'data';
 type Direcao = 'asc' | 'desc';
 type StatusPedido = 'saudavel' | 'atencao' | 'prejuizo' | 'sem_cmv';
+type OrdemSkus = 'lucro_desc' | 'lucro_asc' | 'qtd_desc' | 'margem_asc';
+
+interface ItemDetalhe {
+  sku: string;
+  descricao: string | null;
+  quantidade: number;
+  cmv_unitario: number;
+}
 
 interface Config {
   cmvAtivo: boolean;
@@ -129,6 +138,19 @@ const FILTRO_OPTIONS: Array<{ key: Filtro; label: string }> = [
   { key: 'sem_cmv',      label: 'Sem CMV' },
 ];
 
+const FILTRO_DEVOLUCAO_OPTIONS: Array<{ key: FiltroDevolucao; label: string }> = [
+  { key: 'todos', label: 'Todos os pedidos' },
+  { key: 'sem',   label: 'Sem devolução' },
+  { key: 'com',   label: 'Com devolução' },
+];
+
+const ORDEM_SKUS_OPTIONS: Array<{ key: OrdemSkus; label: string }> = [
+  { key: 'lucro_desc',  label: 'Maior lucro' },
+  { key: 'lucro_asc',   label: 'Maior prejuízo' },
+  { key: 'qtd_desc',    label: 'Maior volume' },
+  { key: 'margem_asc',  label: 'Menor margem' },
+];
+
 const DEFAULT_CONFIG: Config = {
   cmvAtivo: true,
   adsAtivo: false,
@@ -232,12 +254,22 @@ export default function LucroPrejuizoPage() {
   const [period, setPeriod] = useState<Period>('7d');
   const [shopFilter, setShopFilter] = useState<string>('all');
   const [filtro, setFiltro] = useState<Filtro>('todos');
+  const [filtroDevolucao, setFiltroDevolucao] = useState<FiltroDevolucao>('todos');
   const [visao, setVisao] = useState<Visao>('pedidos');
   const [busca, setBusca] = useState('');
   const [buscaDebounced, setBuscaDebounced] = useState('');
   const [ordem, setOrdem] = useState<Ordem>('lucro');
   const [direcao, setDirecao] = useState<Direcao>('desc');
+  const [ordemSkus, setOrdemSkus] = useState<OrdemSkus>('lucro_desc');
   const [page, setPage] = useState(1);
+
+  // Expansão de linha (apenas 1 por vez) + cache de itens por order_sn.
+  const [expandedOrderSn, setExpandedOrderSn] = useState<string | null>(null);
+  const [itensCache, setItensCache] = useState<Map<string, ItemDetalhe[]>>(new Map());
+  const [itensLoading, setItensLoading] = useState<string | null>(null);
+
+  // Modal de detalhe do SKU
+  const [skuDetalhe, setSkuDetalhe] = useState<SkuRow | null>(null);
 
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [data, setData] = useState<LucroResponse | null>(null);
@@ -307,7 +339,51 @@ export default function LucroPrejuizoPage() {
   // Reset para página 1 quando qualquer filtro muda (exceto page)
   useEffect(() => {
     setPage(1);
-  }, [period, shopFilter, filtro, visao, buscaDebounced, ordem, direcao, config]);
+  }, [period, shopFilter, filtro, filtroDevolucao, visao, buscaDebounced, ordem, direcao, config]);
+
+  // Fechar expansão e zerar cache quando o conjunto de pedidos muda
+  useEffect(() => {
+    setExpandedOrderSn(null);
+  }, [period, shopFilter, filtro, filtroDevolucao, visao, buscaDebounced, page]);
+
+  // Handler: expandir/recolher linha + lazy-load itens
+  const toggleExpand = useCallback(async (pedido: Pedido) => {
+    if (expandedOrderSn === pedido.order_sn) {
+      setExpandedOrderSn(null);
+      return;
+    }
+    setExpandedOrderSn(pedido.order_sn);
+    if (itensCache.has(pedido.order_sn)) return;
+
+    // shop_id do pedido não está no summary por linha; a UI filtra por shop
+    // ou mostra "all" — quando "all", tentamos usar o shop_id do primeiro
+    // shop cadastrado (melhor esforço; o endpoint vai responder com [] se
+    // não achar).
+    const shopId = shopFilter === 'all'
+      ? (shops[0]?.shop_id ?? 0)
+      : Number(shopFilter);
+    if (!shopId) return;
+
+    setItensLoading(pedido.order_sn);
+    try {
+      const res = await fetch(
+        `/api/lucro/pedido-itens?order_sn=${encodeURIComponent(pedido.order_sn)}&shop_id=${shopId}`,
+        { cache: 'no-store' },
+      );
+      const json = await res.json();
+      if (res.ok) {
+        setItensCache(prev => {
+          const next = new Map(prev);
+          next.set(pedido.order_sn, (json.itens ?? []) as ItemDetalhe[]);
+          return next;
+        });
+      }
+    } catch {
+      // silencioso — expansão mostra fallback vazio
+    } finally {
+      setItensLoading(null);
+    }
+  }, [expandedOrderSn, itensCache, shopFilter, shops]);
 
   // ---- Handlers ordenação ----
   function toggleOrdem(col: Ordem) {
@@ -321,7 +397,16 @@ export default function LucroPrejuizoPage() {
 
   // ---- Render ----
   const resumo = data?.resumo;
-  const pedidos = data?.pedidos ?? [];
+  const pedidosRaw = data?.pedidos ?? [];
+  // Filtro client-side por devolução — aplica sobre a página corrente.
+  // Nota: o filtro é posterior à paginação da API, então o total da
+  // paginação continua refletindo o set pré-filtro.
+  const pedidos = useMemo(() => {
+    if (filtroDevolucao === 'todos') return pedidosRaw;
+    if (filtroDevolucao === 'sem')   return pedidosRaw.filter(p => !p.tem_devolucao);
+    return pedidosRaw.filter(p => p.tem_devolucao);
+  }, [pedidosRaw, filtroDevolucao]);
+
   const skus = data?.skus ?? [];
   const pagination = data?.pagination;
 
@@ -382,6 +467,16 @@ export default function LucroPrejuizoPage() {
           className="px-2 py-1 rounded border border-current/15 bg-transparent text-xs"
         >
           {FILTRO_OPTIONS.map(f => (
+            <option key={f.key} value={f.key}>{f.label}</option>
+          ))}
+        </select>
+
+        <select
+          value={filtroDevolucao}
+          onChange={e => setFiltroDevolucao(e.target.value as FiltroDevolucao)}
+          className="px-2 py-1 rounded border border-current/15 bg-transparent text-xs"
+        >
+          {FILTRO_DEVOLUCAO_OPTIONS.map(f => (
             <option key={f.key} value={f.key}>{f.label}</option>
           ))}
         </select>
@@ -485,9 +580,32 @@ export default function LucroPrejuizoPage() {
           ordem={ordem}
           direcao={direcao}
           onSort={toggleOrdem}
+          expandedOrderSn={expandedOrderSn}
+          onToggleExpand={toggleExpand}
+          itensCache={itensCache}
+          itensLoading={itensLoading}
+          config={config}
         />
       ) : (
-        <SkusTable loading={loading} skus={skus} />
+        <SkusGrid
+          loading={loading}
+          skus={skus}
+          ordemSkus={ordemSkus}
+          onChangeOrdem={setOrdemSkus}
+          onOpenDetalhe={s => setSkuDetalhe(s)}
+        />
+      )}
+
+      {skuDetalhe && (
+        <SkuDetalheModal
+          sku={skuDetalhe}
+          periodLabel={
+            PERIOD_OPTIONS.find(p => p.key === period)?.label ?? 'Período'
+          }
+          shopFilter={shopFilter}
+          config={config}
+          onClose={() => setSkuDetalhe(null)}
+        />
       )}
 
       {/* Paginação */}
@@ -580,12 +698,18 @@ function inferCausa(pedidos: Pedido[], orderSn: string): string {
 
 function PedidosTable({
   loading, pedidos, ordem, direcao, onSort,
+  expandedOrderSn, onToggleExpand, itensCache, itensLoading, config,
 }: {
   loading: boolean;
   pedidos: Pedido[];
   ordem: Ordem;
   direcao: Direcao;
   onSort: (col: Ordem) => void;
+  expandedOrderSn: string | null;
+  onToggleExpand: (p: Pedido) => void;
+  itensCache: Map<string, ItemDetalhe[]>;
+  itensLoading: string | null;
+  config: Config;
 }) {
   return (
     <div className="card rounded-lg mb-4 overflow-hidden">
@@ -606,6 +730,7 @@ function PedidosTable({
         <table className="w-full text-xs">
           <thead>
             <tr className="text-left opacity-50 border-b border-current/10">
+              <th className="px-3 py-2 font-medium w-6" />
               <th className="px-3 py-2 font-medium">Pedido</th>
               <SortableTh label="Data"    col="data"   ordem={ordem} direcao={direcao} onSort={onSort} />
               <SortableTh label="Venda"   col="venda"  ordem={ordem} direcao={direcao} onSort={onSort} align="right" />
@@ -623,7 +748,7 @@ function PedidosTable({
               <>
                 {Array.from({ length: 8 }).map((_, i) => (
                   <tr key={i} className="border-t border-current/5 animate-pulse">
-                    <td colSpan={10} className="px-3 py-3">
+                    <td colSpan={11} className="px-3 py-3">
                       <div className="h-3 w-full bg-current/5 rounded" />
                     </td>
                   </tr>
@@ -632,7 +757,7 @@ function PedidosTable({
             )}
             {!loading && pedidos.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-8 text-center text-[11px] opacity-60">
+                <td colSpan={11} className="px-3 py-8 text-center text-[11px] opacity-60">
                   Nenhum pedido encontrado para o período selecionado.
                 </td>
               </tr>
@@ -643,46 +768,180 @@ function PedidosTable({
                 p.lucro > 0 ? 'rgba(29,158,117,0.05)'
                 : p.lucro < 0 ? 'rgba(226,75,74,0.05)'
                 : 'transparent';
+              const expanded = expandedOrderSn === p.order_sn;
               return (
-                <tr
-                  key={`${p.order_sn}-${p.data}`}
-                  className="border-t border-current/5 hover:bg-current/[0.02] transition-colors"
-                  style={{ background: bgLucro }}
-                >
-                  <td className="px-3 py-2 font-mono text-[11px] whitespace-nowrap" title={p.order_sn}>
-                    {p.order_sn.length > 10 ? `…${p.order_sn.slice(-10)}` : p.order_sn}
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap opacity-80">{fmtDateBR(p.data)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtBRL(p.venda)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap" style={{ color: p.cmv === 0 ? COLORS.cinza : undefined }}>
-                    {fmtBRL(p.cmv)}
-                  </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap" style={{ color: COLORS.vermelho }}>
-                    −{fmtBRL(taxas)}
-                  </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtBRL(p.receita_liquida)}</td>
-                  <td
-                    className="px-3 py-2 text-right whitespace-nowrap font-medium"
-                    style={{ color: p.lucro > 0 ? COLORS.verde : p.lucro < 0 ? COLORS.vermelho : undefined }}
+                <Fragment key={`${p.order_sn}-${p.data}`}>
+                  <tr
+                    className="border-t border-current/5 hover:bg-current/[0.04] transition-colors cursor-pointer"
+                    style={{ background: bgLucro }}
+                    onClick={() => onToggleExpand(p)}
                   >
-                    {fmtBRL(p.lucro)}
-                  </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">
-                    <MargemBadge margem={p.margem_pct} />
-                  </td>
-                  <td className="px-3 py-2">
-                    <CompositionBar pedido={p} />
-                  </td>
-                  <td className="px-3 py-2">
-                    <StatusBadge status={p.status} />
-                  </td>
-                </tr>
+                    <td className="px-3 py-2 opacity-50 text-center select-none w-6">
+                      {expanded ? '▾' : '▸'}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-[11px]" title={p.order_sn}>
+                      {p.order_sn}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap opacity-80">{fmtDateBR(p.data)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{fmtBRL(p.venda)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap" style={{ color: p.cmv === 0 ? COLORS.cinza : undefined }}>
+                      {fmtBRL(p.cmv)}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap" style={{ color: COLORS.vermelho }}>
+                      −{fmtBRL(taxas)}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{fmtBRL(p.receita_liquida)}</td>
+                    <td
+                      className="px-3 py-2 text-right whitespace-nowrap font-medium"
+                      style={{ color: p.lucro > 0 ? COLORS.verde : p.lucro < 0 ? COLORS.vermelho : undefined }}
+                    >
+                      {fmtBRL(p.lucro)}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <MargemBadge margem={p.margem_pct} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <CompositionBar pedido={p} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <StatusBadge status={p.status} />
+                    </td>
+                  </tr>
+                  {expanded && (
+                    <tr className="border-t border-current/5">
+                      <td colSpan={11} className="px-0 py-0 bg-black/[0.02] dark:bg-white/[0.03]">
+                        <PedidoExpandedPanel
+                          pedido={p}
+                          itens={itensCache.get(p.order_sn)}
+                          loadingItens={itensLoading === p.order_sn}
+                          config={config}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
           </tbody>
         </table>
       </div>
     </div>
+  );
+}
+
+function PedidoExpandedPanel({
+  pedido, itens, loadingItens, config,
+}: {
+  pedido: Pedido;
+  itens: ItemDetalhe[] | undefined;
+  loadingItens: boolean;
+  config: Config;
+}) {
+  const sign = (v: number) => (v === 0 ? '—' : `−${fmtBRL(v)}`);
+  const showAds = config.adsAtivo;
+  const showFbs = config.fbsAtivo;
+
+  const lucroColor = pedido.lucro > 0 ? COLORS.verde : pedido.lucro < 0 ? COLORS.vermelho : undefined;
+
+  return (
+    <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+      {/* Breakdown financeiro */}
+      <div>
+        <h3 className="text-[10px] uppercase tracking-wider opacity-60 mb-2">
+          Breakdown financeiro
+        </h3>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {pedido.tem_devolucao && <InlineBadge label="Devolução" color={COLORS.vermelho} />}
+          {pedido.tem_afiliado && <InlineBadge label="Afiliado" color={COLORS.coral} />}
+          {!pedido.tem_cmv && <InlineBadge label="Sem CMV" color={COLORS.cinza} />}
+          {pedido.metodo_pagamento && (
+            <InlineBadge label={pedido.metodo_pagamento} color={COLORS.azul} />
+          )}
+        </div>
+        <ul className="text-xs space-y-1">
+          <BreakdownRow label="Venda" value={fmtBRL(pedido.venda)} />
+          <BreakdownRow label="CMV" value={pedido.cmv === 0 ? '—' : `−${fmtBRL(pedido.cmv)}`} neutral={pedido.cmv === 0} />
+          <BreakdownRow label="Comissão" value={sign(pedido.comissao)} neutral={pedido.comissao === 0} />
+          <BreakdownRow label="Taxa de serviço" value={sign(pedido.taxa_servico)} neutral={pedido.taxa_servico === 0} />
+          <BreakdownRow label="Afiliado" value={sign(pedido.afiliado)} neutral={pedido.afiliado === 0} />
+          <BreakdownRow label="Cupom seller" value={sign(pedido.cupom_seller)} neutral={pedido.cupom_seller === 0} />
+          <BreakdownRow label="Frete devolução" value={sign(pedido.frete_devolucao)} neutral={pedido.frete_devolucao === 0} />
+          <BreakdownRow label="DIFAL" value={sign(pedido.difal)} neutral={pedido.difal === 0} />
+          {showAds && (
+            <BreakdownRow label="Rateio Ads" value={sign(pedido.rateio_ads)} neutral={pedido.rateio_ads === 0} />
+          )}
+          {showFbs && (
+            <BreakdownRow label="Rateio FBS" value={sign(pedido.rateio_fbs)} neutral={pedido.rateio_fbs === 0} />
+          )}
+          <li className="border-t border-current/10 my-2" />
+          <li className="flex items-center justify-between font-medium">
+            <span>Lucro</span>
+            <span style={{ color: lucroColor }}>{fmtBRL(pedido.lucro)}</span>
+          </li>
+          <li className="flex items-center justify-between">
+            <span>Margem</span>
+            <MargemBadge margem={pedido.margem_pct} />
+          </li>
+        </ul>
+      </div>
+
+      {/* Itens do pedido */}
+      <div>
+        <h3 className="text-[10px] uppercase tracking-wider opacity-60 mb-2">
+          Itens do pedido {itens ? `(${itens.length})` : ''}
+        </h3>
+        {loadingItens ? (
+          <div className="text-[11px] opacity-50">Carregando itens…</div>
+        ) : itens === undefined ? (
+          <div className="text-[11px] opacity-50">—</div>
+        ) : itens.length === 0 ? (
+          <div className="text-[11px] opacity-50">
+            Itens não encontrados (pedido sem vínculo com Tiny).
+          </div>
+        ) : (
+          <ul className="text-xs space-y-1.5">
+            {itens.map((it, i) => (
+              <li key={`${it.sku}-${i}`} className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[11px]">{it.sku}</div>
+                  {it.descricao && (
+                    <div className="text-[10px] opacity-60 truncate" title={it.descricao}>
+                      {it.descricao}
+                    </div>
+                  )}
+                </div>
+                <div className="text-right shrink-0 tabular-nums">
+                  <div className="text-[11px]">Qtd: <strong>{it.quantidade}</strong></div>
+                  <div className="text-[10px] opacity-70">
+                    CMV un.: {it.cmv_unitario > 0 ? fmtBRL(it.cmv_unitario) : <span className="opacity-50">—</span>}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BreakdownRow({ label, value, neutral }: { label: string; value: string; neutral?: boolean }) {
+  return (
+    <li className="flex items-center justify-between">
+      <span className={neutral ? 'opacity-60' : ''}>{label}</span>
+      <span className={`tabular-nums ${neutral ? 'opacity-50' : ''}`}>{value}</span>
+    </li>
+  );
+}
+
+function InlineBadge({ label, color }: { label: string; color: string }) {
+  return (
+    <span
+      className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+      style={{ background: `${color}1F`, color }}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -790,68 +1049,292 @@ function CompositionBar({ pedido }: { pedido: Pedido }) {
 // Tabela de SKUs (visão simplificada — comparte filtros/API)
 // ============================================================
 
-function SkusTable({ loading, skus }: { loading: boolean; skus: SkuRow[] }) {
+function SkusGrid({
+  loading, skus, ordemSkus, onChangeOrdem, onOpenDetalhe,
+}: {
+  loading: boolean;
+  skus: SkuRow[];
+  ordemSkus: OrdemSkus;
+  onChangeOrdem: (o: OrdemSkus) => void;
+  onOpenDetalhe: (s: SkuRow) => void;
+}) {
+  // Ordenação client-side — API retorna por lucro_total desc por padrão.
+  const ordenados = useMemo(() => {
+    const arr = [...skus];
+    switch (ordemSkus) {
+      case 'lucro_desc':  return arr.sort((a, b) => b.lucro_total - a.lucro_total);
+      case 'lucro_asc':   return arr.sort((a, b) => a.lucro_total - b.lucro_total);
+      case 'qtd_desc':    return arr.sort((a, b) => b.qtd_vendida - a.qtd_vendida);
+      case 'margem_asc':  return arr.sort((a, b) => a.margem_media - b.margem_media);
+    }
+  }, [skus, ordemSkus]);
+
   return (
-    <div className="card rounded-lg mb-4 overflow-hidden">
-      <div className="px-4 py-3 border-b border-current/10">
+    <div className="mb-4">
+      <div className="flex items-center justify-between mb-3 px-1">
         <h2 className="text-[10px] font-medium uppercase tracking-wider opacity-60">
-          Detalhamento por SKU pai
+          Detalhamento por SKU pai {skus.length > 0 && <span className="opacity-50">({skus.length})</span>}
         </h2>
+        <select
+          value={ordemSkus}
+          onChange={e => onChangeOrdem(e.target.value as OrdemSkus)}
+          className="px-2 py-1 rounded border border-current/15 bg-transparent text-xs"
+        >
+          {ORDEM_SKUS_OPTIONS.map(o => (
+            <option key={o.key} value={o.key}>{o.label}</option>
+          ))}
+        </select>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-left opacity-50 border-b border-current/10">
-              <th className="px-3 py-2 font-medium">SKU pai</th>
-              <th className="px-3 py-2 font-medium text-right">Qtd vendida</th>
-              <th className="px-3 py-2 font-medium text-right">Venda total</th>
-              <th className="px-3 py-2 font-medium text-right">CMV total</th>
-              <th className="px-3 py-2 font-medium text-right">Lucro total</th>
-              <th className="px-3 py-2 font-medium text-right">Margem média</th>
-              <th className="px-3 py-2 font-medium text-right">Pedidos neg.</th>
-              <th className="px-3 py-2 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && skus.length === 0 && (
-              <>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <tr key={i} className="border-t border-current/5 animate-pulse">
-                    <td colSpan={8} className="px-3 py-3">
-                      <div className="h-3 w-full bg-current/5 rounded" />
-                    </td>
-                  </tr>
-                ))}
-              </>
-            )}
-            {!loading && skus.length === 0 && (
-              <tr>
-                <td colSpan={8} className="px-3 py-8 text-center text-[11px] opacity-60">
-                  Nenhum SKU encontrado para o período selecionado.
-                </td>
-              </tr>
-            )}
-            {skus.map(s => (
-              <tr key={s.sku_pai} className="border-t border-current/5 hover:bg-current/[0.02]">
-                <td className="px-3 py-2 font-mono text-[11px]">{s.sku_pai}</td>
-                <td className="px-3 py-2 text-right">{fmtInt(s.qtd_vendida)}</td>
-                <td className="px-3 py-2 text-right">{fmtBRL(s.venda_total)}</td>
-                <td className="px-3 py-2 text-right">{fmtBRL(s.cmv_total)}</td>
-                <td className="px-3 py-2 text-right font-medium"
-                    style={{ color: s.lucro_total > 0 ? COLORS.verde : s.lucro_total < 0 ? COLORS.vermelho : undefined }}>
-                  {fmtBRL(s.lucro_total)}
-                </td>
-                <td className="px-3 py-2 text-right"><MargemBadge margem={s.margem_media} /></td>
-                <td className="px-3 py-2 text-right">
-                  {s.pedidos_negativos}{' '}
-                  <span className="opacity-50 text-[10px]">({fmtPct(s.pct_negativos)})</span>
-                </td>
-                <td className="px-3 py-2"><StatusBadge status={s.status} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+
+      {loading && skus.length === 0 ? (
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="card p-4 rounded-lg animate-pulse h-36">
+              <div className="h-4 w-16 bg-current/10 rounded mb-2" />
+              <div className="h-3 w-24 bg-current/5 rounded mb-3" />
+              <div className="h-3 w-full bg-current/5 rounded mb-1" />
+              <div className="h-3 w-full bg-current/5 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : ordenados.length === 0 ? (
+        <div className="card p-6 rounded-lg text-xs opacity-60 text-center">
+          Nenhum SKU encontrado para o período selecionado.
+        </div>
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+          {ordenados.map(s => (
+            <SkuCard key={s.sku_pai} sku={s} onClick={() => onOpenDetalhe(s)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function skuStatusColor(status: StatusPedido): string {
+  switch (status) {
+    case 'saudavel': return COLORS.verde;
+    case 'atencao':  return COLORS.amber;
+    case 'prejuizo': return COLORS.vermelho;
+    case 'sem_cmv':  return COLORS.cinza;
+  }
+}
+
+function SkuCard({ sku, onClick }: { sku: SkuRow; onClick: () => void }) {
+  const borderColor = skuStatusColor(sku.status);
+  const lucroColor =
+    sku.lucro_total > 0 ? COLORS.verde : sku.lucro_total < 0 ? COLORS.vermelho : undefined;
+  const margemColor =
+    sku.margem_media < 0 ? COLORS.vermelho
+    : sku.margem_media < 15 ? COLORS.amber
+    : COLORS.verde;
+  const negColor = sku.pct_negativos > 10 ? COLORS.vermelho : undefined;
+
+  // Barra visual da margem — centrada em 0, −20% ↔ +40% na escala visível.
+  const margemClamp = Math.max(-20, Math.min(40, sku.margem_media));
+  const margemRange = 60; // −20 → +40
+  const margemFill = ((margemClamp + 20) / margemRange) * 100;
+
+  return (
+    <button
+      onClick={onClick}
+      className="card p-4 rounded-lg text-left transition-colors hover:bg-current/[0.03] relative overflow-hidden"
+      style={{ borderLeft: `3px solid ${borderColor}` }}
+    >
+      <span className="absolute top-2 right-3 opacity-30 group-hover:opacity-60 text-xs">↗</span>
+
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="min-w-0">
+          <div className="text-[15px] font-medium truncate">SKU {sku.sku_pai}</div>
+          <div className="text-[10px] opacity-60 truncate mt-0.5">{sku.descricao || '—'}</div>
+        </div>
       </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+        <div>
+          <div className="text-[9px] uppercase opacity-50 tracking-wider">Vendas</div>
+          <div className="font-medium">{fmtInt(sku.qtd_vendida)} un.</div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase opacity-50 tracking-wider">Lucro total</div>
+          <div className="font-medium" style={lucroColor ? { color: lucroColor } : {}}>
+            {fmtBRL(sku.lucro_total)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase opacity-50 tracking-wider">Margem média</div>
+          <div className="font-medium" style={{ color: margemColor }}>
+            {fmtPct(sku.margem_media)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase opacity-50 tracking-wider">% negativos</div>
+          <div className="font-medium" style={negColor ? { color: negColor } : {}}>
+            {fmtPct(sku.pct_negativos)}
+          </div>
+        </div>
+      </div>
+
+      {/* Barra de margem */}
+      <div className="relative h-1.5 rounded-sm overflow-hidden" style={{ background: 'rgba(128,128,128,0.12)' }}>
+        <div
+          className="absolute top-0 left-0 h-full"
+          style={{ width: `${margemFill}%`, background: margemColor }}
+        />
+        {/* Linha zero */}
+        <div
+          className="absolute top-0 bottom-0 w-px"
+          style={{ left: `${(20 / margemRange) * 100}%`, background: 'rgba(0,0,0,0.25)' }}
+        />
+      </div>
+    </button>
+  );
+}
+
+function SkuDetalheModal({
+  sku, periodLabel, shopFilter, config, onClose,
+}: {
+  sku: SkuRow;
+  periodLabel: string;
+  shopFilter: string;
+  config: Config;
+  onClose: () => void;
+}) {
+  const [piores, setPiores] = useState<Pedido[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          shop_id: shopFilter,
+          visao: 'pedidos',
+          custos: custosString(config) || 'none',
+          margem: config.margemTipo,
+          filtro: 'todos',
+          ordem: 'lucro',
+          direcao: 'asc',
+          page: '1',
+          limit: '5',
+          busca: sku.sku_pai,
+          period: '15d',
+        });
+        const res = await fetch(`/api/lucro?${params.toString()}`, { cache: 'no-store' });
+        const json = await res.json();
+        if (!cancelled && res.ok) setPiores((json.pedidos ?? []) as Pedido[]);
+      } catch {
+        if (!cancelled) setPiores([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sku.sku_pai, shopFilter, config]);
+
+  const cmvMedio = sku.qtd_vendida > 0 ? sku.cmv_total / sku.qtd_vendida : 0;
+  const lucroColor = sku.lucro_total > 0 ? COLORS.verde : sku.lucro_total < 0 ? COLORS.vermelho : undefined;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 overflow-hidden p-4"
+      onClick={onClose}
+    >
+      <div
+        className="card rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="p-5 pb-3 border-b border-current/10 shrink-0 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium">
+              SKU {sku.sku_pai}
+              {sku.descricao && <span className="opacity-60"> — {sku.descricao}</span>}
+            </h3>
+            <p className="text-[10px] opacity-50 mt-0.5">
+              {fmtInt(sku.qtd_vendida)} vendas · {periodLabel}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-lg opacity-50 hover:opacity-100">×</button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 min-h-0 px-5 py-4 space-y-5">
+          {/* KPIs mini */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <MiniKpi label="Lucro total" value={fmtBRL(sku.lucro_total)} color={lucroColor} />
+            <MiniKpi label="Margem média" value={fmtPct(sku.margem_media)} color={
+              sku.margem_media < 0 ? COLORS.vermelho : sku.margem_media < 15 ? COLORS.amber : COLORS.verde
+            } />
+            <MiniKpi label="CMV médio" value={cmvMedio > 0 ? fmtBRL(cmvMedio) : '—'} />
+            <MiniKpi label="% negativos" value={fmtPct(sku.pct_negativos)} color={
+              sku.pct_negativos > 10 ? COLORS.vermelho : undefined
+            } />
+          </div>
+
+          {/* Piores pedidos */}
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wider opacity-60 mb-2">
+              Piores pedidos deste SKU (últimos 15 dias)
+            </h4>
+            {loading ? (
+              <div className="text-[11px] opacity-50">Carregando…</div>
+            ) : !piores || piores.length === 0 ? (
+              <div className="text-[11px] opacity-50">
+                Nenhum pedido negativo encontrado no período.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left opacity-50 border-b border-current/10">
+                      <th className="px-2 py-1.5 font-medium">Pedido</th>
+                      <th className="px-2 py-1.5 font-medium">Data</th>
+                      <th className="px-2 py-1.5 font-medium text-right">Venda</th>
+                      <th className="px-2 py-1.5 font-medium text-right">Lucro</th>
+                      <th className="px-2 py-1.5 font-medium text-right">Margem</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {piores.map(p => (
+                      <tr key={p.order_sn} className="border-t border-current/5">
+                        <td className="px-2 py-1.5 font-mono text-[11px]">{p.order_sn}</td>
+                        <td className="px-2 py-1.5 opacity-80">{fmtDateBR(p.data)}</td>
+                        <td className="px-2 py-1.5 text-right">{fmtBRL(p.venda)}</td>
+                        <td className="px-2 py-1.5 text-right font-medium"
+                            style={{ color: p.lucro > 0 ? COLORS.verde : p.lucro < 0 ? COLORS.vermelho : undefined }}>
+                          {fmtBRL(p.lucro)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right">
+                          <MargemBadge margem={p.margem_pct} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="p-4 border-t border-current/10 shrink-0 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs rounded-md border border-current/15 hover:border-current/30 transition-colors"
+          >
+            Fechar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MiniKpi({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="card-secondary p-3 rounded-md">
+      <div className="text-[9px] uppercase tracking-wider opacity-50 mb-0.5">{label}</div>
+      <div className="text-sm font-medium" style={color ? { color } : {}}>{value}</div>
     </div>
   );
 }
