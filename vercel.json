@@ -63,6 +63,10 @@
     {
       "path": "/api/shopee/sync/reconcile-releases",
       "schedule": "45 */6 * * *"
+    },
+    {
+      "path": "/api/shopee/sync/refresh-financeiro",
+      "schedule": "*/10 * * * *"
     }
   ]
 }
