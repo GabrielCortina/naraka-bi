@@ -82,6 +82,9 @@ export function SettingsPanel({ open, onClose, sidebarWidth, onOpenLojaConfig }:
               onClose();
             }}
           />
+          <Link href="/configuracoes/custos" onClick={onClose}>
+            <SettingsItem icon="💲" label="Custos" onClick={onClose} />
+          </Link>
         </div>
 
         <div className="mx-3.5 border-t dark:border-white/[0.06] border-black/[0.06]" />
