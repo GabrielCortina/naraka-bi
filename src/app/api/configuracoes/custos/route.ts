@@ -9,6 +9,7 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 const LOOKBACK_DAYS = 30;
+const PAGE_SIZE = 1000;
 
 interface CustoRow {
   id: number;
@@ -61,29 +62,39 @@ export async function GET() {
   const paisComCusto = new Set(custos.map(c => c.sku_pai));
 
   // SKU pais com vendas nos últimos 30 dias (agregado do summary do dashboard).
+  // Pagina o SELECT porque o default do supabase-js é 1000 linhas — com N SKUs ×
+  // M lojas × 30 dias a granular passa fácil desse teto, truncando a lista.
   const today = todayDateStr();
   const from = addDaysStr(today, -LOOKBACK_DAYS + 1);
 
-  const { data: statsData, error: statsErr } = await supabase
-    .from('dashboard_sku_daily_stats')
-    .select('sku_pai, sku, faturamento, quantidade')
-    .gte('data_pedido', from)
-    .lte('data_pedido', today);
-
-  if (statsErr) {
-    return NextResponse.json({ error: statsErr.message }, { status: 500 });
-  }
-
-  // Agrega por sku_pai — a tabela já tem sku_pai materializado, mas
-  // re-extraímos por sku caso o stats antigo tenha vindo vazio/NULL.
   const agg = new Map<string, { qtd: number; fat: number }>();
-  for (const row of statsData ?? []) {
-    const pai = (row.sku_pai as string | null) ?? extractSkuPai(row.sku as string);
-    if (!pai) continue;
-    const e = agg.get(pai) ?? { qtd: 0, fat: 0 };
-    e.qtd += Number(row.quantidade ?? 0);
-    e.fat += Number(row.faturamento ?? 0);
-    agg.set(pai, e);
+  let offset = 0;
+  while (true) {
+    const { data: page, error: statsErr } = await supabase
+      .from('dashboard_sku_daily_stats')
+      .select('sku_pai, sku, faturamento, quantidade')
+      .gte('data_pedido', from)
+      .lte('data_pedido', today)
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (statsErr) {
+      return NextResponse.json({ error: statsErr.message }, { status: 500 });
+    }
+    if (!page || page.length === 0) break;
+
+    // Agrega por sku_pai — a tabela já tem sku_pai materializado, mas
+    // re-extraímos por sku caso o stats antigo tenha vindo vazio/NULL.
+    for (const row of page) {
+      const pai = (row.sku_pai as string | null) ?? extractSkuPai(row.sku as string);
+      if (!pai) continue;
+      const e = agg.get(pai) ?? { qtd: 0, fat: 0 };
+      e.qtd += Number(row.quantidade ?? 0);
+      e.fat += Number(row.faturamento ?? 0);
+      agg.set(pai, e);
+    }
+
+    if (page.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
   }
 
   const sem_custo: SemCustoRow[] = Array.from(agg.entries())
