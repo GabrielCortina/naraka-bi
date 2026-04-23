@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
-import { getCMVBatch } from '@/lib/cmv';
+import { expandKits, getCMVBatchWithAlias } from '@/lib/cmv';
 
 // Endpoint auxiliar da aba Lucro e Prejuízo — retorna os itens detalhados
-// de um pedido (sku, quantidade, descricao, cmv_unitario). Usado pela
-// expansão de linha para mostrar o breakdown por SKU.
+// de um pedido (sku, quantidade, descricao, cmv_unitario).
 //
-// Resolução dos itens (mesma ordem de refresh_lucro_pedido_stats):
+// Fontes de itens (mesma ordem de refresh_lucro_pedido_stats):
 //   1) shopee_conciliacao.tiny_pedido_id → pedidos → pedido_itens (Tiny)
 //   2) pedidos.numero_pedido_ecommerce = order_sn → pedido_itens (Tiny direto)
-//   3) shopee_escrow.raw_json->'order_income'->'items' (Shopee raw — cobre
-//      os ~38% de pedidos sem vínculo Tiny)
+//   3) shopee_escrow.raw_json->'order_income'->'items' (raw — ~38% dos pedidos)
 //
-// CMV resolvido via src/lib/cmv.ts (getCMVBatch) — 1 query por sku_pai.
+// Pipeline após buscar itens (paridade com rpc_top_skus/rpc_sku_detalhes
+// e migration 054 do refresh_lucro_pedido_stats):
+//   → expandKits: 1 kit vira N componentes com quantidade multiplicada
+//   → getCMVBatchWithAlias: resolve sku_pai via sku_alias antes do custo
 //
 // GET /api/lucro/pedido-itens?order_sn=X&shop_id=Y
 
@@ -26,13 +27,48 @@ interface ItemOut {
   cmv_unitario: number;
 }
 
-// Shape relevante do item dentro de raw_json.order_income.items.
 interface RawEscrowItem {
   model_sku?: string | null;
   item_sku?: string | null;
   item_name?: string | null;
   model_name?: string | null;
   quantity_purchased?: number | string | null;
+}
+
+type Supabase = ReturnType<typeof createServiceClient>;
+
+// Expande kits e anexa CMV unitário. Entrada: itens brutos com SKU original
+// (kit ou não). Saída: itens possivelmente expandidos com cmv_unitario resolvido.
+async function normalizeAndResolveCMV(
+  supabase: Supabase,
+  itens: Array<{ sku: string; descricao: string | null; quantidade: number }>,
+  cmvDate: string,
+): Promise<ItemOut[]> {
+  if (itens.length === 0) return [];
+
+  const expanded = await expandKits(
+    supabase,
+    itens,
+    // Componentes herdam a descricao do kit quando não há nome próprio — a
+    // tabela sku_kit não guarda descricao, então preservamos o contexto do kit.
+    (orig, comp) => ({
+      sku: comp.sku,
+      descricao: orig.descricao,
+      quantidade: comp.quantidade,
+    }),
+  );
+
+  const cmvs = await getCMVBatchWithAlias(
+    supabase,
+    expanded.map(it => ({ sku: it.sku, data_pedido: cmvDate })),
+  );
+
+  return expanded.map((it, idx) => ({
+    sku: it.sku,
+    descricao: it.descricao,
+    quantidade: it.quantidade,
+    cmv_unitario: cmvs[idx] ?? 0,
+  }));
 }
 
 export async function GET(request: NextRequest) {
@@ -98,23 +134,21 @@ export async function GET(request: NextRequest) {
       }>;
 
       if (itens.length > 0) {
-        const cmvs = await getCMVBatch(
+        const normalized = await normalizeAndResolveCMV(
           supabase,
-          itens.map(it => ({ sku: it.sku, data_pedido: ped.data_pedido as string })),
+          itens.map(it => ({
+            sku: it.sku,
+            descricao: it.descricao,
+            quantidade: Number(it.quantidade) || 0,
+          })),
+          ped.data_pedido as string,
         );
-        const out: ItemOut[] = itens.map((it, idx) => ({
-          sku: it.sku,
-          descricao: it.descricao,
-          quantidade: Number(it.quantidade) || 0,
-          cmv_unitario: cmvs[idx] ?? 0,
-        }));
         return NextResponse.json({
-          itens: out,
+          itens: normalized,
           source: conc?.tiny_pedido_id ? 'conciliacao' : 'direto',
         });
       }
-      // Se o pedido existe no Tiny mas sem itens, continuamos para o raw
-      // como fallback — pode ser pedido antigo sem linhas em pedido_itens.
+      // Pedido existe no Tiny mas sem linhas em pedido_itens → cai no raw.
     }
   }
 
@@ -140,13 +174,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ itens: [] as ItemOut[], source: 'raw_empty' });
   }
 
-  // Data usada para resolver CMV: release_time do escrow (melhor aproximação
-  // quando não há pedido Tiny com data_pedido).
+  // Sem data_pedido Tiny nesse caminho — usa release_time como aproximação.
   const cmvDate = escrow.escrow_release_time
     ? String(escrow.escrow_release_time).slice(0, 10)
     : new Date().toISOString().slice(0, 10);
 
-  // model_sku é o canônico; item_sku é fallback. Descarta itens sem SKU.
   const parsed = rawItems
     .map(it => {
       const sku = (it.model_sku && it.model_sku.trim()) || (it.item_sku && it.item_sku.trim()) || '';
@@ -164,17 +196,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ itens: [] as ItemOut[], source: 'raw_empty' });
   }
 
-  const cmvs = await getCMVBatch(
-    supabase,
-    parsed.map(it => ({ sku: it.sku, data_pedido: cmvDate })),
-  );
-
-  const out: ItemOut[] = parsed.map((it, idx) => ({
-    sku: it.sku,
-    descricao: it.descricao,
-    quantidade: it.quantidade,
-    cmv_unitario: cmvs[idx] ?? 0,
-  }));
-
-  return NextResponse.json({ itens: out, source: 'raw_json' });
+  const normalized = await normalizeAndResolveCMV(supabase, parsed, cmvDate);
+  return NextResponse.json({ itens: normalized, source: 'raw_json' });
 }
