@@ -23,7 +23,11 @@ export interface CustoRow {
 
 export function extractSkuPai(sku: string | null | undefined): string | null {
   if (!sku) return null;
-  const m = sku.match(/^(\d+)/);
+  // Shopee raw SKUs podem vir prefixados com "KIT" ou "KITPC"; ignoramos o
+  // prefixo antes de pegar os dígitos para casar com sku_custo.sku_pai.
+  // Mantém paridade com resolve_cmv_for_sku em SQL.
+  const stripped = sku.replace(/^(KITPC|KIT)/i, '');
+  const m = stripped.match(/^(\d+)/);
   return m ? m[1] : null;
 }
 

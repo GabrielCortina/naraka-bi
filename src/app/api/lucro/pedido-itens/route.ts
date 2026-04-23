@@ -6,9 +6,11 @@ import { getCMVBatch } from '@/lib/cmv';
 // de um pedido (sku, quantidade, descricao, cmv_unitario). Usado pela
 // expansão de linha para mostrar o breakdown por SKU.
 //
-// Resolução dos itens (mesma lógica de refresh_lucro_pedido_stats):
-//   1) shopee_conciliacao.tiny_pedido_id → pedidos → pedido_itens
-//   2) fallback: pedidos.numero_pedido_ecommerce = order_sn
+// Resolução dos itens (mesma ordem de refresh_lucro_pedido_stats):
+//   1) shopee_conciliacao.tiny_pedido_id → pedidos → pedido_itens (Tiny)
+//   2) pedidos.numero_pedido_ecommerce = order_sn → pedido_itens (Tiny direto)
+//   3) shopee_escrow.raw_json->'order_income'->'items' (Shopee raw — cobre
+//      os ~38% de pedidos sem vínculo Tiny)
 //
 // CMV resolvido via src/lib/cmv.ts (getCMVBatch) — 1 query por sku_pai.
 //
@@ -22,6 +24,15 @@ interface ItemOut {
   descricao: string | null;
   quantidade: number;
   cmv_unitario: number;
+}
+
+// Shape relevante do item dentro de raw_json.order_income.items.
+interface RawEscrowItem {
+  model_sku?: string | null;
+  item_sku?: string | null;
+  item_name?: string | null;
+  model_name?: string | null;
+  quantity_purchased?: number | string | null;
 }
 
 export async function GET(request: NextRequest) {
@@ -39,7 +50,7 @@ export async function GET(request: NextRequest) {
 
   const supabase = createServiceClient();
 
-  // 1) Tenta conciliação
+  // 1) Conciliação
   const { data: conc } = await supabase
     .from('shopee_conciliacao')
     .select('tiny_pedido_id')
@@ -62,51 +73,108 @@ export async function GET(request: NextRequest) {
     if (ped?.id != null) pedidoId = Number(ped.id);
   }
 
-  if (pedidoId == null) {
-    return NextResponse.json({ itens: [] as ItemOut[], source: 'none' });
+  // Caminho Tiny (1 ou 2)
+  if (pedidoId != null) {
+    const { data: ped, error: pedErr } = await supabase
+      .from('pedidos')
+      .select('id, data_pedido')
+      .eq('id', pedidoId)
+      .maybeSingle();
+
+    if (!pedErr && ped) {
+      const { data: itensData, error: itensErr } = await supabase
+        .from('pedido_itens')
+        .select('sku, descricao, quantidade')
+        .eq('pedido_id', pedidoId);
+
+      if (itensErr) {
+        return NextResponse.json({ error: itensErr.message }, { status: 500 });
+      }
+
+      const itens = (itensData ?? []) as Array<{
+        sku: string;
+        descricao: string | null;
+        quantidade: number | string;
+      }>;
+
+      if (itens.length > 0) {
+        const cmvs = await getCMVBatch(
+          supabase,
+          itens.map(it => ({ sku: it.sku, data_pedido: ped.data_pedido as string })),
+        );
+        const out: ItemOut[] = itens.map((it, idx) => ({
+          sku: it.sku,
+          descricao: it.descricao,
+          quantidade: Number(it.quantidade) || 0,
+          cmv_unitario: cmvs[idx] ?? 0,
+        }));
+        return NextResponse.json({
+          itens: out,
+          source: conc?.tiny_pedido_id ? 'conciliacao' : 'direto',
+        });
+      }
+      // Se o pedido existe no Tiny mas sem itens, continuamos para o raw
+      // como fallback — pode ser pedido antigo sem linhas em pedido_itens.
+    }
   }
 
-  // Busca itens + data_pedido do pedido (para CMV)
-  const { data: ped, error: pedErr } = await supabase
-    .from('pedidos')
-    .select('id, data_pedido')
-    .eq('id', pedidoId)
+  // 3) Fallback raw_json do escrow
+  const { data: escrow, error: escrowErr } = await supabase
+    .from('shopee_escrow')
+    .select('raw_json, escrow_release_time')
+    .eq('shop_id', shopId)
+    .eq('order_sn', orderSn)
     .maybeSingle();
-  if (pedErr || !ped) {
+
+  if (escrowErr) {
+    return NextResponse.json({ error: escrowErr.message }, { status: 500 });
+  }
+
+  if (!escrow) {
     return NextResponse.json({ itens: [] as ItemOut[], source: 'none' });
   }
 
-  const { data: itensData, error: itensErr } = await supabase
-    .from('pedido_itens')
-    .select('sku, descricao, quantidade')
-    .eq('pedido_id', pedidoId);
-
-  if (itensErr) {
-    return NextResponse.json({ error: itensErr.message }, { status: 500 });
+  const rawJson = escrow.raw_json as { order_income?: { items?: RawEscrowItem[] } } | null;
+  const rawItems = rawJson?.order_income?.items;
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return NextResponse.json({ itens: [] as ItemOut[], source: 'raw_empty' });
   }
 
-  const itens = (itensData ?? []) as Array<{
-    sku: string;
-    descricao: string | null;
-    quantidade: number | string;
-  }>;
+  // Data usada para resolver CMV: release_time do escrow (melhor aproximação
+  // quando não há pedido Tiny com data_pedido).
+  const cmvDate = escrow.escrow_release_time
+    ? String(escrow.escrow_release_time).slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
 
-  if (itens.length === 0) {
-    return NextResponse.json({ itens: [] as ItemOut[], source: 'empty' });
+  // model_sku é o canônico; item_sku é fallback. Descarta itens sem SKU.
+  const parsed = rawItems
+    .map(it => {
+      const sku = (it.model_sku && it.model_sku.trim()) || (it.item_sku && it.item_sku.trim()) || '';
+      if (!sku) return null;
+      const qtd = Number(it.quantity_purchased);
+      return {
+        sku,
+        descricao: it.model_name || it.item_name || null,
+        quantidade: Number.isFinite(qtd) && qtd > 0 ? qtd : 1,
+      };
+    })
+    .filter((x): x is { sku: string; descricao: string | null; quantidade: number } => x !== null);
+
+  if (parsed.length === 0) {
+    return NextResponse.json({ itens: [] as ItemOut[], source: 'raw_empty' });
   }
 
-  // CMV em batch — 1 query por sku_pai distinto.
   const cmvs = await getCMVBatch(
     supabase,
-    itens.map(it => ({ sku: it.sku, data_pedido: ped.data_pedido as string })),
+    parsed.map(it => ({ sku: it.sku, data_pedido: cmvDate })),
   );
 
-  const out: ItemOut[] = itens.map((it, idx) => ({
+  const out: ItemOut[] = parsed.map((it, idx) => ({
     sku: it.sku,
     descricao: it.descricao,
-    quantidade: Number(it.quantidade) || 0,
+    quantidade: it.quantidade,
     cmv_unitario: cmvs[idx] ?? 0,
   }));
 
-  return NextResponse.json({ itens: out, source: conc?.tiny_pedido_id ? 'conciliacao' : 'direto' });
+  return NextResponse.json({ itens: out, source: 'raw_json' });
 }
