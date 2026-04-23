@@ -13,24 +13,31 @@ interface CustoRow {
   observacao: string | null;
 }
 
-interface SemCustoRow {
+type SkuStatus = 'sem' | 'parcial' | 'completo';
+
+interface SkuVendaRow {
   sku_pai: string;
   qtd_vendida_30d: number;
   faturamento_30d: number;
+  status: SkuStatus;
+  faixas_cadastradas: string[];
 }
 
 interface ApiResponse {
   custos: CustoRow[];
-  sem_custo: SemCustoRow[];
+  skus_com_vendas: SkuVendaRow[];
 }
 
 type Faixa = 'regular' | 'plus' | 'unico';
+type TipoTamanho = 'letras' | 'numerico';
 
 interface FormState {
   id: number | null;
   sku_pai: string;
   faixa: Faixa;
+  tipoTamanho: TipoTamanho;
   tamanhos: string[];
+  custoCustom: string;
   custo_unitario: string;
   vigencia_inicio: string;
   observacao: string;
@@ -38,18 +45,34 @@ interface FormState {
 
 const FAIXA_OPTIONS: Array<{ value: Faixa; label: string }> = [
   { value: 'unico',   label: 'Único (mesmo custo p/ todos tamanhos)' },
-  { value: 'regular', label: 'Regular (PP, P, M, G, GG)' },
-  { value: 'plus',    label: 'Plus (G1, G2, G3, G4)' },
+  { value: 'regular', label: 'Regular (tamanhos menores)' },
+  { value: 'plus',    label: 'Plus (tamanhos maiores)' },
 ];
 
-const TAMANHOS_DISPONIVEIS = ['PP', 'P', 'M', 'G', 'GG', 'G1', 'G2', 'G3', 'G4', 'EG', 'EGG'];
-const TAMANHOS_REGULAR_DEFAULT = ['PP', 'P', 'M', 'G', 'GG'];
-const TAMANHOS_PLUS_DEFAULT    = ['G1', 'G2', 'G3', 'G4'];
+const TAMANHOS_LETRAS    = ['PP', 'P', 'M', 'G', 'GG', 'G1', 'G2', 'G3', 'G4', 'EG', 'EGG'];
+const TAMANHOS_NUMERICOS = ['34', '36', '38', '40', '42', '44', '46', '48', '50', '52', '54', '56'];
+
+const DEFAULTS: Record<Exclude<Faixa, 'unico'>, Record<TipoTamanho, string[]>> = {
+  regular: {
+    letras:    ['PP', 'P', 'M', 'G', 'GG'],
+    numerico:  ['34', '36', '38', '40', '42', '44'],
+  },
+  plus: {
+    letras:    ['G1', 'G2', 'G3', 'G4'],
+    numerico:  ['46', '48', '50', '52', '54', '56'],
+  },
+};
 
 const FAIXA_BADGE: Record<Faixa, { bg: string; color: string; label: string }> = {
   regular: { bg: 'rgba(55,138,221,0.12)',  color: '#1F5FA5', label: 'Regular' },
   plus:    { bg: 'rgba(139,92,246,0.14)',  color: '#6D28D9', label: 'Plus' },
   unico:   { bg: 'rgba(156,163,175,0.14)', color: '#4b5563', label: 'Único' },
+};
+
+const STATUS_BADGE: Record<SkuStatus, { bg: string; color: string; label: string; border: string }> = {
+  sem:      { bg: 'rgba(226,75,74,0.12)',  color: '#E24B4A', border: 'rgba(226,75,74,0.35)', label: 'Sem custo' },
+  parcial:  { bg: 'rgba(239,159,39,0.14)', color: '#B5750A', border: 'rgba(239,159,39,0.4)', label: 'Parcial' },
+  completo: { bg: 'rgba(29,158,117,0.12)', color: '#1D9E75', border: 'rgba(29,158,117,0.35)', label: 'Cadastrado' },
 };
 
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -64,12 +87,20 @@ function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Se todos os tamanhos são numéricos puros, infere "numerico"; caso contrário "letras".
+function inferTipoTamanho(tamanhos: string[]): TipoTamanho {
+  if (tamanhos.length === 0) return 'letras';
+  return tamanhos.every(t => /^\d+$/.test(t)) ? 'numerico' : 'letras';
+}
+
 function emptyForm(skuPai = ''): FormState {
   return {
     id: null,
     sku_pai: skuPai,
     faixa: 'unico',
+    tipoTamanho: 'letras',
     tamanhos: [],
+    custoCustom: '',
     custo_unitario: '',
     vigencia_inicio: todayStr(),
     observacao: '',
@@ -77,11 +108,14 @@ function emptyForm(skuPai = ''): FormState {
 }
 
 function rowToForm(r: CustoRow): FormState {
+  const tamanhos = r.tamanhos ?? [];
   return {
     id: r.id,
     sku_pai: r.sku_pai,
     faixa: (r.faixa as Faixa) ?? 'unico',
-    tamanhos: r.tamanhos ?? [],
+    tipoTamanho: inferTipoTamanho(tamanhos),
+    tamanhos,
+    custoCustom: '',
     custo_unitario: String(r.custo_unitario),
     vigencia_inicio: r.vigencia_inicio,
     observacao: r.observacao ?? '',
@@ -129,12 +163,36 @@ export function CustosSection() {
     });
   }, [data]);
 
+  const resumoStatus = useMemo(() => {
+    if (!data) return { sem: 0, parcial: 0, completo: 0 };
+    const r = { sem: 0, parcial: 0, completo: 0 };
+    for (const s of data.skus_com_vendas) r[s.status]++;
+    return r;
+  }, [data]);
+
   function openNew(skuPai = '') {
     setEditing(emptyForm(skuPai));
   }
 
   function openEdit(r: CustoRow) {
     setEditing(rowToForm(r));
+  }
+
+  // Usado pelos cards — abre sempre um cadastro novo. Se o SKU já tem alguma
+  // faixa registrada, sugere a faixa complementar (ex: tem "regular" → sugere "plus").
+  function openNewForSku(row: SkuVendaRow) {
+    const existentes = new Set(row.faixas_cadastradas);
+    let faixaSugerida: Faixa = 'unico';
+    if (existentes.has('regular') && !existentes.has('plus')) faixaSugerida = 'plus';
+    else if (existentes.has('plus') && !existentes.has('regular')) faixaSugerida = 'regular';
+
+    const base = emptyForm(row.sku_pai);
+    if (faixaSugerida === 'unico') {
+      setEditing(base);
+    } else {
+      const def = DEFAULTS[faixaSugerida][base.tipoTamanho];
+      setEditing({ ...base, faixa: faixaSugerida, tamanhos: def });
+    }
   }
 
   function close() {
@@ -149,11 +207,24 @@ export function CustosSection() {
 
   function onChangeFaixa(next: Faixa) {
     if (!editing) return;
-    let tamanhos = editing.tamanhos;
-    if (next === 'unico') tamanhos = [];
-    else if (next === 'regular' && tamanhos.length === 0) tamanhos = TAMANHOS_REGULAR_DEFAULT;
-    else if (next === 'plus' && tamanhos.length === 0) tamanhos = TAMANHOS_PLUS_DEFAULT;
+    if (next === 'unico') {
+      setEditing({ ...editing, faixa: next, tamanhos: [] });
+      return;
+    }
+    // Ao trocar para regular/plus, aplica default se tamanhos estava vazio.
+    const tamanhos = editing.tamanhos.length === 0 ? DEFAULTS[next][editing.tipoTamanho] : editing.tamanhos;
     setEditing({ ...editing, faixa: next, tamanhos });
+  }
+
+  function onChangeTipoTamanho(next: TipoTamanho) {
+    if (!editing) return;
+    // Troca o conjunto de pills visíveis e substitui os tamanhos pelos defaults
+    // da nova combinação (faixa, tipo). Mantém vazio se for "unico".
+    if (editing.faixa === 'unico') {
+      setEditing({ ...editing, tipoTamanho: next, tamanhos: [] });
+      return;
+    }
+    setEditing({ ...editing, tipoTamanho: next, tamanhos: DEFAULTS[editing.faixa][next] });
   }
 
   function toggleTamanho(tam: string) {
@@ -161,6 +232,17 @@ export function CustosSection() {
     const has = editing.tamanhos.includes(tam);
     const next = has ? editing.tamanhos.filter(t => t !== tam) : [...editing.tamanhos, tam];
     setEditing({ ...editing, tamanhos: next });
+  }
+
+  function addCustomTamanho() {
+    if (!editing) return;
+    const val = editing.custoCustom.trim().toUpperCase();
+    if (!val) return;
+    if (editing.tamanhos.includes(val)) {
+      setEditing({ ...editing, custoCustom: '' });
+      return;
+    }
+    setEditing({ ...editing, tamanhos: [...editing.tamanhos, val], custoCustom: '' });
   }
 
   async function save() {
@@ -222,6 +304,15 @@ export function CustosSection() {
     }
   }
 
+  const pillsVisiveis = editing?.tipoTamanho === 'numerico' ? TAMANHOS_NUMERICOS : TAMANHOS_LETRAS;
+
+  // Pills extras: tamanhos já selecionados que não estão na lista padrão
+  // (customizados pelo usuário, ou herdados de edição anterior).
+  const pillsCustomizados = useMemo(() => {
+    if (!editing) return [] as string[];
+    return editing.tamanhos.filter(t => !pillsVisiveis.includes(t));
+  }, [editing, pillsVisiveis]);
+
   return (
     <div className="mt-8">
       {banner && (
@@ -244,40 +335,74 @@ export function CustosSection() {
         </div>
       )}
 
-      {/* =================== SKUs sem custo =================== */}
-      <h2 className="text-[10px] font-medium uppercase tracking-wider opacity-60 mb-3 px-1">
-        SKUs sem custo cadastrado
-      </h2>
+      {/* =================== SKUs com vendas recentes =================== */}
+      <div className="flex items-baseline justify-between mb-3 px-1">
+        <h2 className="text-[10px] font-medium uppercase tracking-wider opacity-60">
+          SKUs com vendas (30d){' '}
+          {!loading && data && (
+            <span className="opacity-50">({data.skus_com_vendas.length})</span>
+          )}
+        </h2>
+        {!loading && data && data.skus_com_vendas.length > 0 && (
+          <div className="flex items-center gap-3 text-[10px]">
+            {resumoStatus.sem > 0 && (
+              <span style={{ color: STATUS_BADGE.sem.color }}>● {resumoStatus.sem} sem custo</span>
+            )}
+            {resumoStatus.parcial > 0 && (
+              <span style={{ color: STATUS_BADGE.parcial.color }}>● {resumoStatus.parcial} parcial</span>
+            )}
+            {resumoStatus.completo > 0 && (
+              <span style={{ color: STATUS_BADGE.completo.color }}>● {resumoStatus.completo} ok</span>
+            )}
+          </div>
+        )}
+      </div>
 
       {loading ? (
         <div className="card p-6 rounded-lg text-xs opacity-50 mb-6">Carregando…</div>
-      ) : !data || data.sem_custo.length === 0 ? (
-        <div
-          className="card p-4 rounded-lg mb-6 text-xs flex items-center gap-2"
-          style={{ color: '#1D9E75' }}
-        >
-          <span>✓</span>
-          <span>Todos os SKUs com vendas recentes têm custo cadastrado</span>
+      ) : !data || data.skus_com_vendas.length === 0 ? (
+        <div className="card p-6 rounded-lg text-xs opacity-60 mb-6 text-center">
+          Nenhum SKU com vendas nos últimos 30 dias.
         </div>
       ) : (
-        <>
-          <div
-            className="rounded-md px-4 py-2.5 text-xs mb-3"
-            style={{ background: 'rgba(239,159,39,0.12)', color: '#8B5F0A', border: '1px solid rgba(239,159,39,0.3)' }}
-          >
-            <strong>{data.sem_custo.length}</strong>{' '}
-            {data.sem_custo.length === 1 ? 'SKU ativo sem custo' : 'SKUs ativos sem custo'} cadastrado.
-            Configure abaixo para cálculo correto de lucro.
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
-            {data.sem_custo.map(u => (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+          {data.skus_com_vendas.map(u => {
+            const sb = STATUS_BADGE[u.status];
+            const actionLabel =
+              u.status === 'sem' ? 'Cadastrar custo' :
+              u.status === 'parcial' ? 'Adicionar faixa' :
+              'Editar custos';
+            return (
               <div key={u.sku_pai} className="card p-4 rounded-lg flex flex-col gap-2">
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-[#378ADD]/15 text-[#378ADD]">
                     SKU {u.sku_pai}
                   </span>
+                  <span
+                    className="text-[10px] font-medium px-1.5 py-0.5 rounded whitespace-nowrap"
+                    style={{ background: sb.bg, color: sb.color, border: `1px solid ${sb.border}` }}
+                  >
+                    {sb.label}
+                  </span>
                 </div>
+
+                {u.faixas_cadastradas.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {u.faixas_cadastradas.map(f => {
+                      const fb = FAIXA_BADGE[(f as Faixa)] ?? FAIXA_BADGE.unico;
+                      return (
+                        <span
+                          key={f}
+                          className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                          style={{ background: fb.bg, color: fb.color }}
+                        >
+                          {fb.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between text-[11px] opacity-70">
                   <span>{fmtInt(u.qtd_vendida_30d)} vendas (30d)</span>
                 </div>
@@ -285,15 +410,20 @@ export function CustosSection() {
                   {fmtBRL(u.faturamento_30d)}
                 </div>
                 <button
-                  onClick={() => openNew(u.sku_pai)}
-                  className="mt-1 px-3 py-1.5 text-xs rounded-md bg-[#378ADD] text-white hover:opacity-90 transition-opacity"
+                  onClick={() => openNewForSku(u)}
+                  className="mt-1 px-3 py-1.5 text-xs rounded-md transition-opacity hover:opacity-90"
+                  style={
+                    u.status === 'completo'
+                      ? { border: '1px solid rgba(100,100,100,0.25)', background: 'transparent' }
+                      : { background: '#378ADD', color: 'white' }
+                  }
                 >
-                  Cadastrar custo
+                  {actionLabel}
                 </button>
               </div>
-            ))}
-          </div>
-        </>
+            );
+          })}
+        </div>
       )}
 
       {/* =================== Custos cadastrados =================== */}
@@ -416,7 +546,8 @@ export function CustosSection() {
         <ul className="mt-2 space-y-1.5 pl-4 list-disc">
           <li><strong>SKU pai:</strong> identificador numérico do produto (ex: <code className="font-mono text-[11px] px-1">90909</code>).</li>
           <li><strong>Faixa:</strong> diferencie custos entre tamanhos regulares e plus size. Use <em>Único</em> quando o custo é o mesmo para todos.</li>
-          <li><strong>Tamanhos:</strong> quais tamanhos pertencem a essa faixa. Ignorado quando faixa é <em>Único</em>.</li>
+          <li><strong>Tamanhos:</strong> quais tamanhos pertencem a essa faixa. Suporta letras (PP, P, M, G…) e numérico (34, 36, 38…). Ignorado quando faixa é <em>Único</em>.</li>
+          <li><strong>Status:</strong> <em>Sem custo</em> (nenhuma faixa), <em>Parcial</em> (falta a faixa complementar) ou <em>Cadastrado</em> (único, ou regular + plus).</li>
           <li><strong>Vigência:</strong> a partir de quando esse custo vale — útil quando o preço de compra muda. Ao cadastrar um custo novo, o anterior é fechado automaticamente.</li>
         </ul>
         <p className="mt-2">
@@ -466,14 +597,39 @@ export function CustosSection() {
                 </select>
               </Field>
 
+              {editing.faixa !== 'unico' && (
+                <Field label="Tipo de tamanho">
+                  <div className="flex rounded border border-current/15 overflow-hidden">
+                    {(['letras', 'numerico'] as TipoTamanho[]).map(tipo => {
+                      const ativo = editing.tipoTamanho === tipo;
+                      return (
+                        <button
+                          key={tipo}
+                          type="button"
+                          onClick={() => onChangeTipoTamanho(tipo)}
+                          className="flex-1 px-3 py-1.5 text-xs transition-colors"
+                          style={
+                            ativo
+                              ? { background: '#378ADD', color: 'white' }
+                              : { background: 'transparent' }
+                          }
+                        >
+                          {tipo === 'letras' ? 'Letras (PP–EGG)' : 'Numérico (34–56)'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Field>
+              )}
+
               <Field
                 label="Tamanhos"
                 hint={editing.faixa === 'unico'
                   ? 'Desabilitado — faixa Único aplica para todos tamanhos'
-                  : 'Selecione quais tamanhos pertencem a essa faixa'}
+                  : 'Clique para selecionar/deselecionar. Use o campo abaixo para adicionar tamanhos fora da lista.'}
               >
                 <div className="flex flex-wrap gap-1.5">
-                  {TAMANHOS_DISPONIVEIS.map(t => {
+                  {pillsVisiveis.map(t => {
                     const selected = editing.tamanhos.includes(t);
                     const disabled = editing.faixa === 'unico';
                     return (
@@ -493,7 +649,46 @@ export function CustosSection() {
                       </button>
                     );
                   })}
+                  {pillsCustomizados.map(t => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => editing.faixa !== 'unico' && toggleTamanho(t)}
+                      disabled={editing.faixa === 'unico'}
+                      className="text-[11px] font-mono px-2 py-1 rounded border transition-colors disabled:opacity-30"
+                      style={{ background: '#378ADD', borderColor: '#378ADD', color: 'white' }}
+                      title="Customizado — clique para remover"
+                    >
+                      {t} ×
+                    </button>
+                  ))}
                 </div>
+
+                {editing.faixa !== 'unico' && (
+                  <div className="flex gap-1.5 mt-2">
+                    <input
+                      type="text"
+                      value={editing.custoCustom}
+                      onChange={e => updateField('custoCustom', e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addCustomTamanho();
+                        }
+                      }}
+                      placeholder="Tamanho customizado (ex: 58, XL)"
+                      className="flex-1 px-2.5 py-1.5 text-xs rounded border border-current/15 bg-transparent"
+                    />
+                    <button
+                      type="button"
+                      onClick={addCustomTamanho}
+                      disabled={!editing.custoCustom.trim()}
+                      className="px-3 py-1.5 text-xs rounded border border-current/15 hover:border-current/30 transition-colors disabled:opacity-40"
+                    >
+                      Adicionar
+                    </button>
+                  </div>
+                )}
               </Field>
 
               <Field label="Custo unitário (R$)">

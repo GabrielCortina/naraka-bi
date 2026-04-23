@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase-server';
 
 // CRUD de custos de mercadoria (sku_custo). Usado pela seção "Custos"
-// em configurações. Detecta automaticamente SKUs com vendas mas sem
-// custo cadastrado a partir do dashboard_sku_daily_stats (últimos 30d).
+// em configurações. Lista todos os SKUs com vendas nos últimos 30 dias
+// (dashboard_sku_daily_stats) e marca cada um com um status baseado em
+// quais faixas já têm custo cadastrado.
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -22,10 +23,25 @@ interface CustoRow {
   observacao: string | null;
 }
 
-interface SemCustoRow {
+type SkuStatus = 'sem' | 'parcial' | 'completo';
+
+interface SkuVendaRow {
   sku_pai: string;
   qtd_vendida_30d: number;
   faturamento_30d: number;
+  status: SkuStatus;
+  faixas_cadastradas: string[];
+}
+
+// Regras de status:
+// - completo: tem faixa "unico" (cobre todos os tamanhos) OU tem ambos "regular" e "plus".
+// - parcial:  tem ao menos uma faixa cadastrada mas não cobre tudo (ex: só regular).
+// - sem:      nenhum registro em sku_custo.
+function computeStatus(faixas: Set<string>): SkuStatus {
+  if (faixas.size === 0) return 'sem';
+  if (faixas.has('unico')) return 'completo';
+  if (faixas.has('regular') && faixas.has('plus')) return 'completo';
+  return 'parcial';
 }
 
 function extractSkuPai(sku: string | null | undefined): string | null {
@@ -59,7 +75,14 @@ export async function GET() {
   }
 
   const custos = (custosData ?? []) as CustoRow[];
-  const paisComCusto = new Set(custos.map(c => c.sku_pai));
+
+  // Mapa de sku_pai → conjunto de faixas cadastradas (para derivar status).
+  const faixasPorPai = new Map<string, Set<string>>();
+  for (const c of custos) {
+    let set = faixasPorPai.get(c.sku_pai);
+    if (!set) { set = new Set<string>(); faixasPorPai.set(c.sku_pai, set); }
+    set.add(c.faixa);
+  }
 
   // SKU pais com vendas nos últimos 30 dias (agregado do summary do dashboard).
   // Pagina o SELECT porque o default do supabase-js é 1000 linhas — com N SKUs ×
@@ -97,16 +120,29 @@ export async function GET() {
     offset += PAGE_SIZE;
   }
 
-  const sem_custo: SemCustoRow[] = Array.from(agg.entries())
-    .filter(([pai]) => !paisComCusto.has(pai))
-    .map(([pai, v]) => ({
-      sku_pai: pai,
-      qtd_vendida_30d: Math.round(v.qtd),
-      faturamento_30d: Math.round(v.fat * 100) / 100,
-    }))
-    .sort((a, b) => b.faturamento_30d - a.faturamento_30d);
+  // Lista todos os SKUs com vendas recentes — o filtro anterior removia
+  // completamente o card quando qualquer faixa era cadastrada, o que impedia
+  // adicionar a faixa complementar (ex: cadastrei "regular" e sumiu, impossível
+  // adicionar "plus" pelo card). Agora cada linha vem marcada com status.
+  const skus_com_vendas: SkuVendaRow[] = Array.from(agg.entries())
+    .map(([pai, v]) => {
+      const faixas = faixasPorPai.get(pai) ?? new Set<string>();
+      return {
+        sku_pai: pai,
+        qtd_vendida_30d: Math.round(v.qtd),
+        faturamento_30d: Math.round(v.fat * 100) / 100,
+        status: computeStatus(faixas),
+        faixas_cadastradas: Array.from(faixas).sort(),
+      };
+    })
+    .sort((a, b) => {
+      // Ordem: sem > parcial > completo; dentro do grupo, por faturamento desc.
+      const rank: Record<SkuStatus, number> = { sem: 0, parcial: 1, completo: 2 };
+      if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+      return b.faturamento_30d - a.faturamento_30d;
+    });
 
-  return NextResponse.json({ custos, sem_custo });
+  return NextResponse.json({ custos, skus_com_vendas });
 }
 
 export async function POST(request: NextRequest) {
