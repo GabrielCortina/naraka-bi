@@ -606,7 +606,667 @@ const CONCILIACAO_KEYS = [
   'SEM_VINCULO_FINANCEIRO', 'ORFAO_SHOPEE', 'DADOS_INSUFICIENTES',
 ];
 
+// ============================================================
+// SUMMARY-FIRST PATH
+// ============================================================
+//
+// Novo fluxo: lê KPIs pré-calculados de shopee_financeiro_daily_stats
+// (populado pelo cron refresh-financeiro, migration 050) em vez de
+// iterar escrow/wallet em tempo real. ~100ms vs ~7s.
+//
+// Campos NÃO materializados no summary (breakdowns de compensações
+// e outros_custos, saldo wallet, receita pendente, conciliação,
+// últimos pedidos, cobertura global) seguem em tempo real.
+//
+// Se curRows vem vazio (primeira execução, dia futuro, loja nova),
+// retorna null e o handler cai no fallback computeRealtime.
+
+const SUM_KEYS = [
+  'gmv', 'receita_liquida', 'total_pedidos', 'count_with_detail',
+  'escrows_com_detail', 'escrows_sem_detail',
+  'order_selling_price_total', 'order_discounted_price_total',
+  'comissao', 'taxa_servico', 'seller_transaction_fee',
+  'ads_expense', 'ads_broad_gmv',
+  'afiliados_escrow', 'afiliados_wallet_debito', 'afiliados_wallet_credito',
+  'cupons_seller',
+  'devolucoes_frete_reverso', 'devolucoes_frete_ida', 'devolucoes_qtd', 'devolucoes_reversao',
+  'fbs_escrow',
+  'pedidos_negativos_escrow', 'pedidos_negativos_escrow_qtd',
+  'difal', 'difal_qtd',
+  'fbs_wallet_debito', 'fbs_wallet_credito',
+  'pedidos_negativos_wallet', 'pedidos_negativos_wallet_qtd',
+  'devolucao_total_wallet', 'devolucao_qtd_wallet',
+  'outros_debito', 'outros_credito',
+  'subsidio_coins', 'subsidio_voucher_shopee', 'subsidio_shopee_discount',
+  'subsidio_promo_cartao', 'subsidio_pix_discount',
+  'compensacoes_total', 'compensacoes_qtd',
+  'saques', 'saques_qtd',
+  'dias_pagamento_soma', 'dias_pagamento_count',
+  'seller_discount_total',
+] as const;
+
+type SumKey = typeof SUM_KEYS[number];
+type AggSummary = { [K in SumKey]: number };
+
+function aggregateSummary(rows: Array<Record<string, unknown>>): AggSummary {
+  const agg = {} as AggSummary;
+  for (const k of SUM_KEYS) agg[k] = 0;
+  for (const r of rows) {
+    for (const k of SUM_KEYS) agg[k] += num(r[k]);
+  }
+  return agg;
+}
+
+async function fetchReceitaPendente(
+  supabase: SupabaseClient,
+  shopIds: number[],
+): Promise<number> {
+  let total = 0;
+  let offset = 0;
+  const PAGE = 1000;
+  while (true) {
+    const { data: rows } = await supabase
+      .from('shopee_escrow')
+      .select('escrow_amount, payout_amount')
+      .in('shop_id', shopIds)
+      .eq('is_released', false)
+      .range(offset, offset + PAGE - 1);
+    if (!rows || rows.length === 0) break;
+    for (const r of rows) {
+      const ea = r.escrow_amount;
+      const pa = r.payout_amount;
+      if (ea != null) {
+        const v = num(ea);
+        if (v > 0) total += v;
+      } else {
+        const v = num(pa);
+        if (v > 0) total += v;
+      }
+    }
+    if (rows.length < PAGE) break;
+    offset += PAGE;
+  }
+  return Math.max(0, total);
+}
+
+async function fetchConciliacao(
+  supabase: SupabaseClient,
+  shopIds: number[],
+): Promise<Array<{ classificacao: string }>> {
+  const out: Array<{ classificacao: string }> = [];
+  let off = 0;
+  const SIZE = 1000;
+  while (true) {
+    const { data } = await supabase
+      .from('shopee_conciliacao')
+      .select('classificacao')
+      .in('shop_id', shopIds)
+      .range(off, off + SIZE - 1);
+    if (!data || data.length === 0) break;
+    out.push(...(data as Array<{ classificacao: string }>));
+    if (data.length < SIZE) break;
+    off += SIZE;
+  }
+  return out;
+}
+
+// Réplica enxuta do loop de wallet de fetchPeriod, mas populando APENAS
+// os breakdowns (compensações por description + outros_custos por tt/desc).
+// Os agregados numéricos já estão no summary — aqui só coletamos as
+// listas que a UI precisa. Classificação idêntica à API original:
+// mesmos 3 padrões de compensação (kpi='compensacao', tt='' com
+// objeto perdido|reembolso, ADJUSTMENT_ADD com compensation|perdido|
+// danificado|extraviado).
+async function fetchWalletDetails(
+  supabase: SupabaseClient,
+  fromIso: string,
+  toIso: string,
+  shopIds: number[],
+  mapping: Map<string, MappingRow>,
+): Promise<{
+  compensacoes_detail: Map<string, CompensacaoGroup>;
+  outros_detail: Map<string, OutrosGroup>;
+}> {
+  const compensacoes_detail = new Map<string, CompensacaoGroup>();
+  const outros_detail = new Map<string, OutrosGroup>();
+
+  const walletRows: Array<{ transaction_type: string; amount: number; description: string | null }> = [];
+  const PAGE = 1000;
+  let wOffset = 0;
+  while (true) {
+    const { data: page } = await supabase
+      .from('shopee_wallet')
+      .select('transaction_type, amount, description')
+      .gte('create_time', fromIso)
+      .lte('create_time', toIso)
+      .in('shop_id', shopIds)
+      .range(wOffset, wOffset + PAGE - 1);
+    if (!page || page.length === 0) break;
+    walletRows.push(...(page as typeof walletRows));
+    if (page.length < PAGE) break;
+    wOffset += PAGE;
+  }
+
+  const typesByKpi = new Map<string, Set<string>>();
+  for (const [tt, m] of Array.from(mapping.entries())) {
+    let set = typesByKpi.get(m.kpi_destino);
+    if (!set) { set = new Set<string>(); typesByKpi.set(m.kpi_destino, set); }
+    set.add(tt);
+  }
+  const emptySet = new Set<string>();
+  const afiliadosTypes         = typesByKpi.get('afiliados')         ?? emptySet;
+  const devolucaoTypes         = typesByKpi.get('devolucao')         ?? emptySet;
+  const difalTypes             = typesByKpi.get('difal')             ?? emptySet;
+  const pedidosNegativosTypes  = typesByKpi.get('pedidos_negativos') ?? emptySet;
+  const fbsTypes               = typesByKpi.get('fbs')               ?? emptySet;
+  const saqueTypes             = typesByKpi.get('saque')             ?? emptySet;
+  const compensacaoTypes       = typesByKpi.get('compensacao')       ?? emptySet;
+  const ignorarTypes           = typesByKpi.get('ignorar')           ?? emptySet;
+
+  const elsewhereTypes = new Set<string>();
+  for (const kpi of ['receita_escrow', 'comissao', 'taxa', 'ads']) {
+    const s = typesByKpi.get(kpi);
+    if (s) for (const tt of Array.from(s)) elsewhereTypes.add(tt);
+  }
+
+  const matchCompensationByDescription = (tt: string, descLower: string): boolean => {
+    if (tt === '' && (descLower.includes('objeto perdido') || descLower.includes('reembolso'))) {
+      return true;
+    }
+    if (tt === 'ADJUSTMENT_ADD' && (
+      descLower.includes('compensation') ||
+      descLower.includes('perdido') ||
+      descLower.includes('danificado') ||
+      descLower.includes('extraviado')
+    )) {
+      return true;
+    }
+    return false;
+  };
+
+  for (const w of walletRows) {
+    const tt = ((w.transaction_type as string) ?? '').trim();
+    const amount = num(w.amount);
+    const desc = ((w.description as string | null) ?? '').trim();
+    const m = mapping.get(tt);
+
+    if (ignorarTypes.has(tt) || m?.classificacao === 'ignorar') continue;
+    if (elsewhereTypes.has(tt)) continue;
+    if (m?.duplica_com && m.duplica_com !== 'shopee_escrow') continue;
+
+    const descLower = desc.toLowerCase();
+
+    if (compensacaoTypes.has(tt) || matchCompensationByDescription(tt, descLower)) {
+      if (amount > 0) {
+        const key = (desc || tt || '(compensação)').trim() || '(compensação)';
+        const g = compensacoes_detail.get(key) ?? { description: key, count: 0, total: 0 };
+        g.count++;
+        g.total += amount;
+        compensacoes_detail.set(key, g);
+      }
+      continue;
+    }
+
+    // Roteamentos específicos já estão no summary — só "outros" precisa
+    // de breakdown (para outros_custos_detalhe).
+    if (afiliadosTypes.has(tt)
+        || devolucaoTypes.has(tt)
+        || difalTypes.has(tt)
+        || pedidosNegativosTypes.has(tt)
+        || fbsTypes.has(tt)
+        || saqueTypes.has(tt)) {
+      continue;
+    }
+
+    const key = `${tt}::${desc}`;
+    const existing = outros_detail.get(key) ?? {
+      transaction_type: tt,
+      description: desc || m?.descricao_pt || tt || '(sem descrição)',
+      classificacao: m?.classificacao ?? 'custo_friccao',
+      count: 0,
+      total: 0,
+    };
+    existing.count++;
+    existing.total += amount;
+    outros_detail.set(key, existing);
+  }
+
+  return { compensacoes_detail, outros_detail };
+}
+
+// Tenta montar a resposta a partir do summary. Retorna null nas condições
+// que devem cair no fallback:
+//   - params inválidos (deixa o fallback retornar 400)
+//   - nenhuma loja ativa (fallback retorna emptyPayload)
+//   - summary vazio para o período
+async function tryComputeFromSummary(
+  request: NextRequest,
+): Promise<Record<string, unknown> | null> {
+  const supabase = createServiceClient();
+  const sp = request.nextUrl.searchParams;
+  const period = (sp.get('period') as PeriodKey) ?? '7d';
+  const fromStr = sp.get('from');
+  const toStr = sp.get('to');
+  const shopIdStr = sp.get('shop_id') ?? 'all';
+
+  let periodRange;
+  try {
+    periodRange = computePeriod(period, fromStr, toStr);
+  } catch {
+    return null;
+  }
+  const { from, to, label } = periodRange;
+
+  const durationMs = to.getTime() - from.getTime() + 1;
+  const prevTo = new Date(from.getTime() - 1);
+  const prevFrom = new Date(prevTo.getTime() - durationMs + 1);
+
+  const { data: shopsData } = await supabase
+    .from('shopee_tokens')
+    .select('shop_id, shop_name')
+    .eq('is_active', true)
+    .order('shop_id');
+  const allShops = (shopsData as Array<{ shop_id: number; shop_name: string | null }> | null) ?? [];
+
+  let shopIds: number[];
+  if (shopIdStr === 'all') {
+    shopIds = allShops.map(s => s.shop_id);
+  } else {
+    const n = Number(shopIdStr);
+    if (!Number.isFinite(n)) return null;
+    shopIds = [n];
+  }
+  if (shopIds.length === 0) return null;
+
+  const fromDate = brDateString(from);
+  const toDate = brDateString(to);
+  const { data: curRows } = await supabase
+    .from('shopee_financeiro_daily_stats')
+    .select('*')
+    .gte('data', fromDate)
+    .lte('data', toDate)
+    .in('shop_id', shopIds);
+
+  if (!curRows || curRows.length === 0) return null;
+
+  const prevFromDate = brDateString(prevFrom);
+  const prevToDate = brDateString(prevTo);
+  const [prevRes, mapping] = await Promise.all([
+    supabase
+      .from('shopee_financeiro_daily_stats')
+      .select('gmv, receita_liquida')
+      .gte('data', prevFromDate)
+      .lte('data', prevToDate)
+      .in('shop_id', shopIds),
+    loadMapping(supabase),
+  ]);
+
+  const agg = aggregateSummary(curRows as Array<Record<string, unknown>>);
+  const prevAgg = aggregateSummary((prevRes.data ?? []) as Array<Record<string, unknown>>);
+
+  const fromIso = from.toISOString();
+  const toIso = to.toISOString();
+
+  // Tempo real em paralelo: breakdowns, saldo, receita pendente,
+  // conciliação, últimos pedidos e cobertura GLOBAL (não-período).
+  const [
+    walletDetails, walletBalanceRes, concRows, ultimosRes,
+    pedidosEspRes, escrowsComDetailGlobalRes, receitaPendente,
+  ] = await Promise.all([
+    fetchWalletDetails(supabase, fromIso, toIso, shopIds, mapping),
+    supabase
+      .from('shopee_wallet')
+      .select('current_balance')
+      .in('shop_id', shopIds)
+      .not('current_balance', 'is', null)
+      .order('create_time', { ascending: false })
+      .limit(1),
+    fetchConciliacao(supabase, shopIds),
+    supabase
+      .from('shopee_escrow')
+      .select(
+        'order_sn, buyer_total_amount, commission_fee, service_fee, escrow_amount, buyer_payment_method, is_released, reverse_shipping_fee, order_ams_commission_fee, escrow_release_time',
+      )
+      .in('shop_id', shopIds)
+      .eq('is_released', true)
+      .not('escrow_release_time', 'is', null)
+      .order('escrow_release_time', { ascending: false })
+      .limit(20),
+    supabase
+      .from('shopee_pedidos')
+      .select('*', { count: 'exact', head: true })
+      .in('shop_id', shopIds)
+      .in('order_status', ['COMPLETED', 'SHIPPED', 'TO_CONFIRM_RECEIVE']),
+    supabase
+      .from('shopee_escrow')
+      .select('*', { count: 'exact', head: true })
+      .in('shop_id', shopIds)
+      .not('escrow_amount', 'is', null)
+      .neq('escrow_amount', 0),
+    fetchReceitaPendente(supabase, shopIds),
+  ]);
+
+  const pedidosEsperandoEscrow = pedidosEspRes.count ?? 0;
+  const escrowsComDetailGlobal = escrowsComDetailGlobalRes.count ?? 0;
+
+  const ultimosEscrows =
+    (ultimosRes.data as Array<{
+      order_sn: string;
+      buyer_total_amount: number | null;
+      commission_fee: number | null;
+      service_fee: number | null;
+      escrow_amount: number | null;
+      buyer_payment_method: string | null;
+      is_released: boolean | null;
+      reverse_shipping_fee: number | null;
+      order_ams_commission_fee: number | null;
+      escrow_release_time: string | null;
+    }> | null) ?? [];
+
+  const ultimosStatusMap = new Map<string, string>();
+  if (ultimosEscrows.length > 0) {
+    const sns = ultimosEscrows.map(e => e.order_sn);
+    const { data: sts } = await supabase
+      .from('shopee_pedidos')
+      .select('order_sn, order_status')
+      .in('shop_id', shopIds)
+      .in('order_sn', sns);
+    for (const s of sts ?? []) {
+      ultimosStatusMap.set(s.order_sn as string, (s.order_status as string | null) ?? '');
+    }
+  }
+
+  const saldoWallet = num((walletBalanceRes.data as Array<{ current_balance: number }> | null)?.[0]?.current_balance);
+
+  const conciliacao: Record<string, number> = Object.fromEntries(
+    CONCILIACAO_KEYS.map(k => [k, 0]),
+  );
+  for (const c of concRows) {
+    if (c.classificacao in conciliacao) conciliacao[c.classificacao]++;
+  }
+
+  // ============ KPIs derivados (mesmas fórmulas da API atual) ============
+  const gmv = agg.gmv;
+  const receitaLiquida = agg.receita_liquida;
+  const totalPedidos = agg.total_pedidos;
+  const countWithDetail = agg.count_with_detail;
+  const ticketMedio = totalPedidos > 0 ? gmv / totalPedidos : 0;
+  const precoMedioEfetivo = countWithDetail > 0
+    ? agg.order_discounted_price_total / countWithDetail
+    : 0;
+  const detailCoverage = pctOf(countWithDetail, totalPedidos);
+
+  const takeRateValor = agg.comissao + agg.taxa_servico;
+
+  // Custos plataforma: processing_fee sempre 0 (paridade).
+  const plataformaOutros = agg.seller_transaction_fee + agg.fbs_escrow;
+  const plataformaTotal = takeRateValor + plataformaOutros;
+
+  const adsExpense = agg.ads_expense;
+  const adsRoas = adsExpense > 0 ? agg.ads_broad_gmv / adsExpense : 0;
+  const adsTacos = pctOf(adsExpense, agg.ads_broad_gmv);
+
+  const afiliadosWallet = Math.max(0, agg.afiliados_wallet_debito - agg.afiliados_wallet_credito);
+  const afiliadosEscrow = agg.afiliados_escrow;
+  const afiliadosLiquido = Math.max(afiliadosWallet, afiliadosEscrow);
+  const cuponsSeller = agg.cupons_seller;
+  const aquisicaoTotal = adsExpense + afiliadosLiquido + cuponsSeller;
+
+  const devolucoesTotalWallet = agg.devolucao_total_wallet;
+  const freteReverso = agg.devolucoes_frete_reverso;
+  const freteIdaSeller = agg.devolucoes_frete_ida;
+  const devolucoesCustoTotal = freteReverso + freteIdaSeller;
+  const devolucoesReversaoReceita = Math.max(0, devolucoesTotalWallet - freteReverso);
+
+  const difal = agg.difal;
+  const pedidosNegativos = agg.pedidos_negativos_wallet;
+  const fbsCustosLiquido = Math.max(0, agg.fbs_wallet_debito - agg.fbs_wallet_credito);
+  const outrosCustos = Math.max(0, agg.outros_debito - agg.outros_credito);
+
+  const friccaoTotal =
+    devolucoesCustoTotal + difal + fbsCustosLiquido + outrosCustos;
+
+  const custoTotal = plataformaTotal + aquisicaoTotal + friccaoTotal;
+
+  // Margem: paridade API — receita líquida (já sem comissão/taxa) menos
+  // custos não-plataforma.
+  const margemValor = receitaLiquida
+    - adsExpense - afiliadosLiquido
+    - devolucoesCustoTotal - difal - fbsCustosLiquido - outrosCustos;
+
+  const subsidioTotal =
+    agg.subsidio_shopee_discount +
+    agg.subsidio_voucher_shopee +
+    agg.subsidio_coins +
+    agg.subsidio_promo_cartao +
+    agg.subsidio_pix_discount;
+
+  const coberturaRaw = pedidosEsperandoEscrow > 0
+    ? pctOf(escrowsComDetailGlobal, pedidosEsperandoEscrow)
+    : 100;
+  const cobertura = Math.min(coberturaRaw, 100);
+  const pedidosSemEscrow = Math.max(0, pedidosEsperandoEscrow - escrowsComDetailGlobal);
+
+  const gmvVariacao =
+    prevAgg.gmv > 0
+      ? ((gmv - prevAgg.gmv) / prevAgg.gmv) * 100
+      : gmv > 0 ? 100 : 0;
+  const receitaLiquidaVariacao =
+    prevAgg.receita_liquida > 0
+      ? ((receitaLiquida - prevAgg.receita_liquida) / prevAgg.receita_liquida) * 100
+      : receitaLiquida > 0 ? 100 : 0;
+
+  const mediaDiasPagamento = agg.dias_pagamento_count > 0
+    ? round1(agg.dias_pagamento_soma / agg.dias_pagamento_count)
+    : 0;
+
+  const outrosDetalhe = Array.from(walletDetails.outros_detail.values())
+    .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+    .map(o => ({
+      transaction_type: o.transaction_type,
+      description: o.description,
+      classificacao: o.classificacao,
+      count: o.count,
+      total: round2(o.total),
+    }));
+
+  // Receita por dia: agrupa linhas do summary por data (várias lojas
+  // somadas na mesma data) e preenche dias zerados no intervalo.
+  const byDay = new Map<string, { gmv: number; liquido: number; comissao: number; taxa: number; ads: number }>();
+  for (const r of curRows as Array<Record<string, unknown>>) {
+    const d = r.data as string;
+    const e = byDay.get(d) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0, ads: 0 };
+    e.gmv += num(r.gmv);
+    e.liquido += num(r.receita_liquida);
+    e.comissao += num(r.comissao);
+    e.taxa += num(r.taxa_servico);
+    e.ads += num(r.ads_expense);
+    byDay.set(d, e);
+  }
+
+  const receitaPorDia: Array<{
+    date: string;
+    gmv: number; liquido: number; ads: number; custos_plataforma: number;
+  }> = [];
+  for (let t = from.getTime(); t <= to.getTime(); t += DAY_MS) {
+    const dStr = brDateString(new Date(t));
+    const p = byDay.get(dStr) ?? { gmv: 0, liquido: 0, comissao: 0, taxa: 0, ads: 0 };
+    receitaPorDia.push({
+      date: dStr,
+      gmv: round2(p.gmv),
+      liquido: round2(p.liquido),
+      ads: round2(p.ads),
+      custos_plataforma: round2(p.comissao + p.taxa),
+    });
+  }
+
+  const liquidoAposCustos = gmv - custoTotal;
+  const distribuicao = {
+    liquido_pct: round1(pctOf(liquidoAposCustos, gmv)),
+    plataforma_pct: round1(pctOf(plataformaTotal, gmv)),
+    ads_pct: round1(pctOf(adsExpense, gmv)),
+    afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+    cupons_seller_pct: round1(pctOf(cuponsSeller, gmv)),
+    difal_pct: round1(pctOf(difal, gmv)),
+    devolucoes_frete_pct: round1(pctOf(devolucoesCustoTotal, gmv)),
+    outros_pct: round1(pctOf(fbsCustosLiquido + outrosCustos, gmv)),
+  };
+
+  return {
+    period: {
+      from: brDateString(from),
+      to: brDateString(to),
+      label,
+    },
+    shops: allShops.map(s => ({ shop_id: s.shop_id, name: s.shop_name })),
+    shop_filter: shopIdStr,
+
+    receita: {
+      gmv: round2(gmv),
+      gmv_variacao: round1(gmvVariacao),
+      receita_liquida: round2(receitaLiquida),
+      receita_liquida_pct: round1(pctOf(receitaLiquida, gmv)),
+      receita_liquida_variacao: round1(receitaLiquidaVariacao),
+      ticket_medio: round2(ticketMedio),
+      preco_medio_efetivo: round2(precoMedioEfetivo),
+      total_pedidos: totalPedidos,
+      total_pecas: 0,
+    },
+
+    take_rate: {
+      percentual: round1(pctOf(takeRateValor, gmv)),
+      valor: round2(takeRateValor),
+    },
+
+    custos: {
+      plataforma: {
+        total: round2(plataformaTotal),
+        pct_gmv: round1(pctOf(plataformaTotal, gmv)),
+        comissao: round2(agg.comissao),
+        comissao_pct: round1(pctOf(agg.comissao, gmv)),
+        taxa_servico: round2(agg.taxa_servico),
+        taxa_servico_pct: round1(pctOf(agg.taxa_servico, gmv)),
+        taxa_transacao: round2(agg.seller_transaction_fee),
+        fbs_fee: round2(agg.fbs_escrow),
+        processing_fee: 0,
+      },
+      aquisicao: {
+        total: round2(aquisicaoTotal),
+        pct_gmv: round1(pctOf(aquisicaoTotal, gmv)),
+        ads: round2(adsExpense),
+        ads_roas: round2(adsRoas),
+        ads_tacos: round1(adsTacos),
+        afiliados: round2(afiliadosLiquido),
+        afiliados_pct: round1(pctOf(afiliadosLiquido, gmv)),
+        cupons_seller: round2(cuponsSeller),
+        cupons_seller_pct: round1(pctOf(cuponsSeller, gmv)),
+      },
+      friccao: {
+        total: round2(friccaoTotal),
+        pct_gmv: round1(pctOf(friccaoTotal, gmv)),
+        devolucoes: {
+          custo_total: round2(devolucoesCustoTotal),
+          frete_reverso: round2(freteReverso),
+          frete_ida_seller: round2(freteIdaSeller),
+          total_wallet: round2(devolucoesTotalWallet),
+          reversao_receita: round2(devolucoesReversaoReceita),
+          qtd: Math.max(agg.devolucao_qtd_wallet, agg.devolucoes_qtd),
+        },
+        difal: round2(difal),
+        difal_qtd: agg.difal_qtd,
+        pedidos_negativos: round2(pedidosNegativos),
+        pedidos_negativos_qtd: agg.pedidos_negativos_wallet_qtd,
+        fbs_custos: round2(fbsCustosLiquido),
+        outros: round2(outrosCustos),
+      },
+      total: round2(custoTotal),
+      total_pct_gmv: round1(pctOf(custoTotal, gmv)),
+    },
+
+    margem: {
+      valor: round2(margemValor),
+      pct_gmv: round1(pctOf(margemValor, gmv)),
+    },
+
+    subsidio_shopee: {
+      total: round2(subsidioTotal),
+      desconto_shopee: round2(agg.subsidio_shopee_discount),
+      voucher_shopee: round2(agg.subsidio_voucher_shopee),
+      coins: round2(agg.subsidio_coins),
+      promo_cartao: round2(agg.subsidio_promo_cartao),
+      pix_discount: round2(agg.subsidio_pix_discount),
+      pct_gmv: round1(pctOf(subsidioTotal, gmv)),
+    },
+
+    compensacoes: {
+      total: round2(agg.compensacoes_total),
+      qtd: agg.compensacoes_qtd,
+      detalhe: Array.from(walletDetails.compensacoes_detail.values())
+        .sort((a, b) => b.total - a.total)
+        .map(g => ({
+          description: g.description,
+          count: g.count,
+          total: round2(g.total),
+        })),
+    },
+
+    informativo: {
+      saques: round2(agg.saques),
+      saques_qtd: agg.saques_qtd,
+      saldo_carteira: round2(saldoWallet),
+      cobertura_financeira: round1(cobertura),
+      pedidos_sem_escrow: pedidosSemEscrow,
+      receita_pendente: round2(receitaPendente),
+      media_dias_pagamento: mediaDiasPagamento,
+      detail_coverage: round1(detailCoverage),
+      escrows_com_detail: countWithDetail,
+      escrows_sem_detail: Math.max(0, totalPedidos - countWithDetail),
+    },
+
+    cupons_seller: {
+      voucher_seller: round2(agg.cupons_seller),
+      seller_discount: round2(agg.seller_discount_total),
+    },
+
+    outros_custos_detalhe: outrosDetalhe,
+
+    receita_por_dia: receitaPorDia,
+
+    distribuicao,
+
+    conciliacao,
+
+    ultimos_pedidos: ultimosEscrows.map(e => ({
+      order_sn: e.order_sn,
+      buyer_total_amount: e.buyer_total_amount,
+      commission_fee: e.commission_fee,
+      service_fee: e.service_fee,
+      escrow_amount: e.escrow_amount,
+      buyer_payment_method: e.buyer_payment_method,
+      is_released: e.is_released ?? false,
+      order_status: ultimosStatusMap.get(e.order_sn) ?? null,
+      reverse_shipping_fee: e.reverse_shipping_fee,
+      order_ams_commission_fee: e.order_ams_commission_fee,
+    })),
+  };
+}
+
+// Handler público: tenta o summary primeiro, cai no realtime (fallback)
+// quando o summary está vazio, params inválidos, ou nenhuma loja ativa.
 export async function GET(request: NextRequest) {
+  try {
+    const fromSummary = await tryComputeFromSummary(request);
+    if (fromSummary) return NextResponse.json(fromSummary);
+  } catch (err) {
+    console.error('[financeiro] summary path falhou, caindo no realtime:', err);
+  }
+  return await computeRealtime(request);
+}
+
+// Lógica realtime antiga — usada como fallback quando o summary está
+// vazio para o período (primeira execução, dia futuro, loja nova).
+// Mantém paridade 100% com a versão pré-otimização.
+async function computeRealtime(request: NextRequest): Promise<NextResponse> {
   const supabase = createServiceClient();
   const sp = request.nextUrl.searchParams;
   const period = (sp.get('period') as PeriodKey) ?? '7d';
