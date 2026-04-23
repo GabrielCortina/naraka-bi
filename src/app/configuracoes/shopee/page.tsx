@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { MappingSection } from './mapping-section';
+import { CustosSection } from './custos-section';
 
 // Valores fixos do app Shopee (Partner Portal). Referência: SHOPEE_API_REFERENCE.md §1.
 const APP_INFO = {
@@ -348,6 +349,7 @@ function ShopeeConfigContent() {
 
       {/* Seção 4 — Mapeamento de transações */}
       <MappingSection />
+      <CustosSection />
     </div>
   );
 }
