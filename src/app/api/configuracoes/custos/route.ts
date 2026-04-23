@@ -60,6 +60,63 @@ function addDaysStr(dateStr: string, days: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
+// Dispara recálculo do summary lucro_pedido_stats para todas as combinações
+// (shop_id, data_liberacao) onde este sku_pai aparece nos últimos 30 dias.
+// Best-effort: falhas são logadas mas não propagam — o cron refresh-lucro
+// (*/10 min) recalcula de qualquer forma na próxima rodada.
+async function recalcLucroForSkuPai(
+  supabase: ReturnType<typeof createServiceClient>,
+  sku_pai: string,
+): Promise<{ attempted: number; failed: number }> {
+  const RECALC_WINDOW_DAYS = 30;
+  const MAX_PAIRS = 60; // teto defensivo para não estourar timeout do handler
+
+  const today = todayDateStr();
+  const from = addDaysStr(today, -RECALC_WINDOW_DAYS + 1);
+
+  const { data, error } = await supabase
+    .from('lucro_pedido_stats')
+    .select('shop_id, data_liberacao')
+    .contains('sku_pais', [sku_pai])
+    .gte('data_liberacao', from)
+    .lte('data_liberacao', today);
+
+  if (error) {
+    console.error('[configuracoes/custos] recalc lookup falhou:', error.message);
+    return { attempted: 0, failed: 0 };
+  }
+
+  // Pares únicos (shop_id, data) — uma loja pode ter vários pedidos no mesmo dia.
+  const seen = new Set<string>();
+  const pairs: Array<{ shop_id: number; data: string }> = [];
+  for (const r of data ?? []) {
+    const key = `${r.shop_id}|${r.data_liberacao}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ shop_id: Number(r.shop_id), data: String(r.data_liberacao) });
+    if (pairs.length >= MAX_PAIRS) break;
+  }
+
+  if (pairs.length === 0) return { attempted: 0, failed: 0 };
+
+  const results = await Promise.allSettled(
+    pairs.map(p =>
+      supabase.rpc('refresh_lucro_pedido_stats', { p_data: p.data, p_shop_id: p.shop_id }),
+    ),
+  );
+
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === 'rejected' || (r.status === 'fulfilled' && r.value.error)) failed++;
+  }
+  if (failed > 0) {
+    console.warn(
+      `[configuracoes/custos] recalc sku_pai=${sku_pai} falhou em ${failed}/${pairs.length} pares — cron vai compensar`,
+    );
+  }
+  return { attempted: pairs.length, failed };
+}
+
 export async function GET() {
   const supabase = createServiceClient();
 
@@ -202,6 +259,7 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    await recalcLucroForSkuPai(supabase, sku_pai);
     return NextResponse.json({ success: true, data });
   }
 
@@ -227,6 +285,7 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    await recalcLucroForSkuPai(supabase, sku_pai);
     return NextResponse.json({ success: true, data });
   }
 
@@ -266,6 +325,7 @@ export async function POST(request: NextRequest) {
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  await recalcLucroForSkuPai(supabase, sku_pai);
   return NextResponse.json({ success: true, data });
 }
 
@@ -284,8 +344,20 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: 'id obrigatório' }, { status: 400 });
   }
 
+  // Lê o sku_pai antes de deletar — precisamos dele para disparar o recálculo
+  // dos pedidos afetados depois que a linha já não existe.
+  const { data: existing } = await supabase
+    .from('sku_custo')
+    .select('sku_pai')
+    .eq('id', id)
+    .maybeSingle();
+
   const { error } = await supabase.from('sku_custo').delete().eq('id', id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  if (existing?.sku_pai) {
+    await recalcLucroForSkuPai(supabase, existing.sku_pai as string);
+  }
 
   return NextResponse.json({ success: true, deleted: id });
 }
