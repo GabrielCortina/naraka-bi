@@ -140,6 +140,78 @@ async function fetchShopNames(
   return map;
 }
 
+interface SkuCustoRow {
+  faixa: 'regular' | 'plus' | 'unico';
+  tamanhos: string[];
+  custo_unitario: number;
+  vigencia_inicio: string;
+}
+
+async function fetchSkuCusto(
+  supabase: ReturnType<typeof createServiceClient>,
+  skuPai: string,
+): Promise<SkuCustoRow[]> {
+  const { data, error } = await supabase
+    .from('sku_custo')
+    .select('faixa, tamanhos, custo_unitario, vigencia_inicio')
+    .eq('sku_pai', skuPai)
+    .is('vigencia_fim', null)
+    .gt('custo_unitario', 0);
+  if (error) return [];
+  return (data ?? []) as unknown as SkuCustoRow[];
+}
+
+// CMV médio ponderado pelas vendas:
+//   - faixa 'unico': retorna o custo direto (mais recente).
+//   - regular + plus: classifica cada SKU vendido por tamanho nas faixas e
+//     faz média ponderada pelas quantidades observadas.
+//   - sem cadastro ou sem match: retorna null (renderizado como "Sem CMV").
+function computeCmvMedio(
+  rows: LucroRow[],
+  skuPai: string,
+  custos: SkuCustoRow[],
+): number | null {
+  if (custos.length === 0) return null;
+
+  // Faixa 'unico' tem prioridade — se existe, usa direto.
+  const unico = custos
+    .filter(c => c.faixa === 'unico')
+    .sort((a, b) => (a.vigencia_inicio < b.vigencia_inicio ? 1 : -1))[0];
+  if (unico) return round2(unico.custo_unitario);
+
+  const regular = custos
+    .filter(c => c.faixa === 'regular')
+    .sort((a, b) => (a.vigencia_inicio < b.vigencia_inicio ? 1 : -1))[0];
+  const plus = custos
+    .filter(c => c.faixa === 'plus')
+    .sort((a, b) => (a.vigencia_inicio < b.vigencia_inicio ? 1 : -1))[0];
+
+  if (!regular && !plus) return null;
+
+  const setRegular = new Set(regular?.tamanhos ?? []);
+  const setPlus = new Set(plus?.tamanhos ?? []);
+
+  let qtdRegular = 0;
+  let qtdPlus = 0;
+  for (const r of rows) {
+    for (const s of r.skus ?? []) {
+      if (!s.startsWith(skuPai)) continue;
+      const t = extrairTamanho(s);
+      if (!t) continue;
+      if (setRegular.has(t)) qtdRegular += 1;
+      else if (setPlus.has(t)) qtdPlus += 1;
+    }
+  }
+
+  const qtdTotal = qtdRegular + qtdPlus;
+  if (qtdTotal === 0) return null;
+
+  const custoRegular = regular?.custo_unitario ?? 0;
+  const custoPlus = plus?.custo_unitario ?? 0;
+  const soma = qtdRegular * custoRegular + qtdPlus * custoPlus;
+  return round2(soma / qtdTotal);
+}
+
 async function fetchDescricao(
   supabase: ReturnType<typeof createServiceClient>,
   skuPai: string,
@@ -198,10 +270,13 @@ export async function GET(request: NextRequest) {
     const rows = await fetchLucroRowsBySkuPai(supabase, skuPai, range.from, range.to, shopFilter);
 
     const shopIds = Array.from(new Set(rows.map(r => r.shop_id)));
-    const [shopMap, descricao] = await Promise.all([
+    const [shopMap, descricao, skuCustos] = await Promise.all([
       fetchShopNames(supabase, shopIds),
       fetchDescricao(supabase, skuPai, range.from, range.to),
+      fetchSkuCusto(supabase, skuPai),
     ]);
+
+    const cmvMedio = computeCmvMedio(rows, skuPai, skuCustos);
 
     // ============ POR LOJA ============
     interface LojaAgg {
@@ -325,6 +400,7 @@ export async function GET(request: NextRequest) {
       sku_pai: skuPai,
       descricao,
       range,
+      cmv_medio: cmvMedio,
       por_loja: porLoja,
       por_tamanho: porTamanho,
       piores_pedidos: piores,

@@ -1226,6 +1226,7 @@ interface SkuDetalheResponse {
   sku_pai: string;
   descricao: string | null;
   range: { from: string; to: string };
+  cmv_medio: number | null;
   por_loja: SkuDetalheLoja[];
   por_tamanho: SkuDetalheTamanho[];
   piores_pedidos: SkuDetalhePior[];
@@ -1281,9 +1282,11 @@ function SkuDetalheModal({
     return () => { cancelled = true; };
   }, [sku.sku_pai, period, shopFilter]);
 
-  const cmvMedio = sku.qtd_vendida > 0 ? sku.cmv_total / sku.qtd_vendida : 0;
   const lucroColor = sku.lucro_total > 0 ? COLORS.verde : sku.lucro_total < 0 ? COLORS.vermelho : undefined;
-  const semCmv = sku.cmv_total === 0 && !sku.tem_cmv;
+  // CMV médio agora vem do endpoint (ponderado por faixa/tamanho via sku_custo).
+  // Antes do fetch resolver, cai num fallback neutro.
+  const cmvMedio = detalhe?.cmv_medio ?? null;
+  const semCmv = !loading && detalhe != null && cmvMedio == null;
 
   const descricaoReal = detalhe?.descricao ?? null;
   const periodoStr = detalhe?.range
@@ -1325,7 +1328,15 @@ function SkuDetalheModal({
             />
             <MiniKpi
               label="CMV médio"
-              value={semCmv ? 'Sem CMV' : cmvMedio > 0 ? fmtBRL(cmvMedio) : '—'}
+              value={
+                loading
+                  ? '—'
+                  : semCmv
+                    ? 'Sem CMV'
+                    : cmvMedio != null
+                      ? fmtBRL(cmvMedio)
+                      : '—'
+              }
               color={semCmv ? COLORS.cinza : undefined}
             />
             <MiniKpi
