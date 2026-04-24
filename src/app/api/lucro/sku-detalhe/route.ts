@@ -410,6 +410,35 @@ export async function GET(request: NextRequest) {
         };
       });
 
+    // ============ DEBUG TEMPORÁRIO ============
+    // Expõe o que chegou no rows[0] para diagnosticar por que por_tamanho=[].
+    // Remover depois de diagnosticar.
+    const primeiroRow = rows[0];
+    const debug = primeiroRow
+      ? (() => {
+          const rawSkus = primeiroRow.skus as unknown;
+          const normalizados = normSkus(rawSkus);
+          const filtrados = normalizados.filter(s => s.startsWith(skuPai));
+          const tamanhos = normalizados.map(s => ({ sku: s, tamanho: extrairTamanho(s) }));
+          return {
+            skuPai,
+            skuPai_len: skuPai.length,
+            skuPai_charCodes: Array.from(skuPai).map(c => c.charCodeAt(0)),
+            total_rows: rows.length,
+            primeiro: {
+              order_sn: primeiroRow.order_sn,
+              skus_raw: rawSkus,
+              typeof_skus: typeof rawSkus,
+              isArray_skus: Array.isArray(rawSkus),
+              skus_normalizados: normalizados,
+              filtrados_startsWith_skuPai: filtrados,
+              tamanhos_por_sku: tamanhos,
+              sku_pais_raw: primeiroRow.sku_pais,
+            },
+          };
+        })()
+      : { skuPai, total_rows: 0, primeiro: 'sem rows' };
+
     return NextResponse.json({
       sku_pai: skuPai,
       descricao,
@@ -418,6 +447,7 @@ export async function GET(request: NextRequest) {
       por_loja: porLoja,
       por_tamanho: porTamanho,
       piores_pedidos: piores,
+      debug,
     });
   } catch (err) {
     console.error('[api/lucro/sku-detalhe] erro:', err);
