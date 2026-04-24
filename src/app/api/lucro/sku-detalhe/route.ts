@@ -80,6 +80,20 @@ function extrairTamanho(sku: string): string | null {
   return sku.slice(idx + 1);
 }
 
+// Defesa contra Supabase devolver TEXT[] como string literal de array Postgres
+// ('{"70006-44","70006-46"}'). Normaliza para string[].
+function normSkus(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw as string[];
+  if (typeof raw === 'string') {
+    return raw
+      .replace(/^\{|\}$/g, '')
+      .split(',')
+      .map(s => s.trim().replace(/^"|"$/g, ''))
+      .filter(Boolean);
+  }
+  return [];
+}
+
 // Nome curto da loja: remove sufixos comuns ("Jeans - SHOPEE", " - SHOPEE").
 function nomeLojaCurto(full: string | null): string {
   if (!full) return 'Loja';
@@ -194,7 +208,7 @@ function computeCmvMedio(
   let qtdRegular = 0;
   let qtdPlus = 0;
   for (const r of rows) {
-    for (const s of r.skus ?? []) {
+    for (const s of normSkus(r.skus)) {
       if (!s.startsWith(skuPai)) continue;
       const t = extrairTamanho(s);
       if (!t) continue;
@@ -340,7 +354,7 @@ export async function GET(request: NextRequest) {
     const porTamanhoMap = new Map<string, TamAgg>();
     for (const r of rows) {
       const tamanhosDoPedido = new Set<string>();
-      for (const s of r.skus ?? []) {
+      for (const s of normSkus(r.skus)) {
         if (!s.startsWith(skuPai)) continue;
         const t = extrairTamanho(s);
         if (t) tamanhosDoPedido.add(t);
@@ -375,7 +389,7 @@ export async function GET(request: NextRequest) {
       .map(r => {
         // Tamanho representativo: o primeiro SKU do pedido que bate no sku_pai.
         let tamanho: string | null = null;
-        for (const s of r.skus ?? []) {
+        for (const s of normSkus(r.skus)) {
           if (!s.startsWith(skuPai)) continue;
           const t = extrairTamanho(s);
           if (t) { tamanho = t; break; }
