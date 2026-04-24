@@ -175,6 +175,42 @@ async function fetchSkuCusto(
   return (data ?? []) as unknown as SkuCustoRow[];
 }
 
+// Busca todos os sku_original que o sku_alias mapeia para o skuPai canônico.
+// Ex: canônico "7006" ↔ original "70006" (em Shopee os SKUs podem chegar
+// como "70006-44"). Retorna o Set de prefixos aceitos: { skuPai, ...originais }.
+async function fetchSkuPaiAliases(
+  supabase: ReturnType<typeof createServiceClient>,
+  skuPai: string,
+): Promise<Set<string>> {
+  const set = new Set<string>([skuPai]);
+  const { data, error } = await supabase
+    .from('sku_alias')
+    .select('sku_original')
+    .eq('sku_canonico', skuPai)
+    .eq('ativo', true);
+  if (!error && data) {
+    for (const r of data) {
+      const orig = (r as { sku_original?: unknown }).sku_original;
+      if (typeof orig === 'string' && orig) set.add(orig);
+    }
+  }
+  return set;
+}
+
+// Prefixo numérico do SKU ("70006-44" → "70006", "41471P-GG" → "41471").
+// null se o SKU não começa com dígito.
+function prefixoNumerico(sku: string): string | null {
+  const m = sku.match(/^(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Um SKU pertence ao sku_pai solicitado se seu prefixo numérico bate com o
+// canônico OU com qualquer sku_original mapeado por sku_alias.
+function skuBateComSkuPai(sku: string, prefixosAceitos: Set<string>): boolean {
+  const p = prefixoNumerico(sku);
+  return p != null && prefixosAceitos.has(p);
+}
+
 // CMV médio ponderado pelas vendas:
 //   - faixa 'unico': retorna o custo direto (mais recente).
 //   - regular + plus: classifica cada SKU vendido por tamanho nas faixas e
@@ -182,7 +218,7 @@ async function fetchSkuCusto(
 //   - sem cadastro ou sem match: retorna null (renderizado como "Sem CMV").
 function computeCmvMedio(
   rows: LucroRow[],
-  skuPai: string,
+  prefixosAceitos: Set<string>,
   custos: SkuCustoRow[],
 ): number | null {
   if (custos.length === 0) return null;
@@ -209,7 +245,7 @@ function computeCmvMedio(
   let qtdPlus = 0;
   for (const r of rows) {
     for (const s of normSkus(r.skus)) {
-      if (!s.startsWith(skuPai)) continue;
+      if (!skuBateComSkuPai(s, prefixosAceitos)) continue;
       const t = extrairTamanho(s);
       if (!t) continue;
       if (setRegular.has(t)) qtdRegular += 1;
@@ -284,13 +320,14 @@ export async function GET(request: NextRequest) {
     const rows = await fetchLucroRowsBySkuPai(supabase, skuPai, range.from, range.to, shopFilter);
 
     const shopIds = Array.from(new Set(rows.map(r => r.shop_id)));
-    const [shopMap, descricao, skuCustos] = await Promise.all([
+    const [shopMap, descricao, skuCustos, prefixosAceitos] = await Promise.all([
       fetchShopNames(supabase, shopIds),
       fetchDescricao(supabase, skuPai, range.from, range.to),
       fetchSkuCusto(supabase, skuPai),
+      fetchSkuPaiAliases(supabase, skuPai),
     ]);
 
-    const cmvMedio = computeCmvMedio(rows, skuPai, skuCustos);
+    const cmvMedio = computeCmvMedio(rows, prefixosAceitos, skuCustos);
 
     // ============ POR LOJA ============
     interface LojaAgg {
@@ -355,7 +392,7 @@ export async function GET(request: NextRequest) {
     for (const r of rows) {
       const tamanhosDoPedido = new Set<string>();
       for (const s of normSkus(r.skus)) {
-        if (!s.startsWith(skuPai)) continue;
+        if (!skuBateComSkuPai(s, prefixosAceitos)) continue;
         const t = extrairTamanho(s);
         if (t) tamanhosDoPedido.add(t);
       }
@@ -390,7 +427,7 @@ export async function GET(request: NextRequest) {
         // Tamanho representativo: o primeiro SKU do pedido que bate no sku_pai.
         let tamanho: string | null = null;
         for (const s of normSkus(r.skus)) {
-          if (!s.startsWith(skuPai)) continue;
+          if (!skuBateComSkuPai(s, prefixosAceitos)) continue;
           const t = extrairTamanho(s);
           if (t) { tamanho = t; break; }
         }
@@ -410,35 +447,6 @@ export async function GET(request: NextRequest) {
         };
       });
 
-    // ============ DEBUG TEMPORÁRIO ============
-    // Expõe o que chegou no rows[0] para diagnosticar por que por_tamanho=[].
-    // Remover depois de diagnosticar.
-    const primeiroRow = rows[0];
-    const debug = primeiroRow
-      ? (() => {
-          const rawSkus = primeiroRow.skus as unknown;
-          const normalizados = normSkus(rawSkus);
-          const filtrados = normalizados.filter(s => s.startsWith(skuPai));
-          const tamanhos = normalizados.map(s => ({ sku: s, tamanho: extrairTamanho(s) }));
-          return {
-            skuPai,
-            skuPai_len: skuPai.length,
-            skuPai_charCodes: Array.from(skuPai).map(c => c.charCodeAt(0)),
-            total_rows: rows.length,
-            primeiro: {
-              order_sn: primeiroRow.order_sn,
-              skus_raw: rawSkus,
-              typeof_skus: typeof rawSkus,
-              isArray_skus: Array.isArray(rawSkus),
-              skus_normalizados: normalizados,
-              filtrados_startsWith_skuPai: filtrados,
-              tamanhos_por_sku: tamanhos,
-              sku_pais_raw: primeiroRow.sku_pais,
-            },
-          };
-        })()
-      : { skuPai, total_rows: 0, primeiro: 'sem rows' };
-
     return NextResponse.json({
       sku_pai: skuPai,
       descricao,
@@ -447,7 +455,6 @@ export async function GET(request: NextRequest) {
       por_loja: porLoja,
       por_tamanho: porTamanho,
       piores_pedidos: piores,
-      debug,
     });
   } catch (err) {
     console.error('[api/lucro/sku-detalhe] erro:', err);
