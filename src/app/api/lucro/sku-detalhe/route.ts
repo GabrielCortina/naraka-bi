@@ -101,7 +101,10 @@ function nomeLojaCurto(full: string | null): string {
 }
 
 function inferCausa(row: LucroRow): string {
-  if (row.tem_devolucao) return 'Devolução';
+  // Devolução TOTAL (antes da entrega): venda = 0 e escrow zerado. Sinaliza
+  // mesmo quando tem_devolucao não foi setado (migration 055 cobre isso, mas
+  // rows antigos ficam inferidos aqui).
+  if (row.tem_devolucao || (row.venda === 0 && row.receita_liquida <= 0)) return 'Devolução';
   if (!row.tem_cmv) return 'Sem CMV';
   if (row.venda > 0 && row.afiliado > row.venda * 0.10) return 'Afiliado alto';
   if (row.venda > 0 && (row.comissao + row.taxa_servico) > row.venda * 0.40) return 'Comissão alta';

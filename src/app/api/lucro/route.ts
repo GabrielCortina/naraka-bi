@@ -411,13 +411,14 @@ interface SkuAggregate {
 }
 
 function aggregateBySku(rows: ComputedRow[]): SkuAggregate[] {
-  // Um pedido pode ter múltiplos sku_pais: rateia venda/cmv/lucro
-  // proporcionalmente à quantidade de sku_pais do pedido (fallback simples).
-  // Queries que precisam de rateio por valor do item devem iterar em pedido_itens.
+  // O pedido é uma unidade: se contém um sku_pai, o pedido inteiro entra
+  // pra esse sku_pai. Mesma regra do banco (sku_pais @> [pai] → SUM full)
+  // e do endpoint /api/lucro/sku-detalhe (Lucro por loja). Antes rateávamos
+  // por sku_pai.length, o que divergia das outras duas vistas pra pedidos
+  // com múltiplos sku_pais (ex: kit misto).
   const map = new Map<string, SkuAggregate>();
   for (const r of rows) {
     if (r.sku_pais.length === 0) continue;
-    const share = 1 / r.sku_pais.length;
     for (const pai of r.sku_pais) {
       let agg = map.get(pai);
       if (!agg) {
@@ -436,10 +437,10 @@ function aggregateBySku(rows: ComputedRow[]): SkuAggregate[] {
         };
         map.set(pai, agg);
       }
-      agg.qtd_vendida += r.qtd_itens * share;
-      agg.venda_total += r.venda * share;
-      agg.cmv_total += r.cmv * share;
-      agg.lucro_total += r.lucro * share;
+      agg.qtd_vendida += r.qtd_itens;
+      agg.venda_total += r.venda;
+      agg.cmv_total += r.cmv;
+      agg.lucro_total += r.lucro;
       if (r.venda > 0) {
         agg.margem_soma += r.margem_pct;
         agg.margem_count += 1;
