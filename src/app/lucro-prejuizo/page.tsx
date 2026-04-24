@@ -599,11 +599,11 @@ export default function LucroPrejuizoPage() {
       {skuDetalhe && (
         <SkuDetalheModal
           sku={skuDetalhe}
+          period={period}
           periodLabel={
             PERIOD_OPTIONS.find(p => p.key === period)?.label ?? 'Período'
           }
           shopFilter={shopFilter}
-          config={config}
           onClose={() => setSkuDetalhe(null)}
         />
       )}
@@ -1192,16 +1192,71 @@ function SkuCard({ sku, onClick }: { sku: SkuRow; onClick: () => void }) {
   );
 }
 
+interface SkuDetalheLoja {
+  shop_id: number;
+  shop_name: string;
+  shop_name_curto: string;
+  qtd: number;
+  receita: number;
+  cmv: number;
+  lucro: number;
+  margem: number;
+}
+interface SkuDetalheTamanho {
+  tamanho: string;
+  qtd: number;
+  margem: number;
+  lucro: number;
+}
+interface SkuDetalhePior {
+  order_sn: string;
+  data: string;
+  shop_id: number;
+  loja: string;
+  tamanho: string | null;
+  venda: number;
+  lucro: number;
+  margem: number;
+  causa: string;
+  tem_devolucao: boolean;
+  tem_afiliado: boolean;
+  tem_cmv: boolean;
+}
+interface SkuDetalheResponse {
+  sku_pai: string;
+  descricao: string | null;
+  range: { from: string; to: string };
+  por_loja: SkuDetalheLoja[];
+  por_tamanho: SkuDetalheTamanho[];
+  piores_pedidos: SkuDetalhePior[];
+}
+
+function margemColorFor(m: number): string {
+  if (m < 0) return COLORS.vermelho;
+  if (m < 15) return COLORS.amber;
+  return COLORS.verde;
+}
+
+function causaColor(causa: string): string {
+  switch (causa) {
+    case 'Devolução':     return COLORS.vermelho;
+    case 'Sem CMV':       return COLORS.cinza;
+    case 'Afiliado alto': return COLORS.coral;
+    case 'Comissão alta': return COLORS.amber;
+    default:              return COLORS.cinza;
+  }
+}
+
 function SkuDetalheModal({
-  sku, periodLabel, shopFilter, config, onClose,
+  sku, period, periodLabel, shopFilter, onClose,
 }: {
   sku: SkuRow;
+  period: Period;
   periodLabel: string;
   shopFilter: string;
-  config: Config;
   onClose: () => void;
 }) {
-  const [piores, setPiores] = useState<Pedido[] | null>(null);
+  const [detalhe, setDetalhe] = useState<SkuDetalheResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1210,32 +1265,30 @@ function SkuDetalheModal({
       setLoading(true);
       try {
         const params = new URLSearchParams({
+          sku_pai: sku.sku_pai,
+          period,
           shop_id: shopFilter,
-          visao: 'pedidos',
-          custos: custosString(config) || 'none',
-          margem: config.margemTipo,
-          filtro: 'todos',
-          ordem: 'lucro',
-          direcao: 'asc',
-          page: '1',
-          limit: '5',
-          busca: sku.sku_pai,
-          period: '15d',
         });
-        const res = await fetch(`/api/lucro?${params.toString()}`, { cache: 'no-store' });
+        const res = await fetch(`/api/lucro/sku-detalhe?${params.toString()}`, { cache: 'no-store' });
         const json = await res.json();
-        if (!cancelled && res.ok) setPiores((json.pedidos ?? []) as Pedido[]);
+        if (!cancelled && res.ok) setDetalhe(json as SkuDetalheResponse);
       } catch {
-        if (!cancelled) setPiores([]);
+        if (!cancelled) setDetalhe(null);
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [sku.sku_pai, shopFilter, config]);
+  }, [sku.sku_pai, period, shopFilter]);
 
   const cmvMedio = sku.qtd_vendida > 0 ? sku.cmv_total / sku.qtd_vendida : 0;
   const lucroColor = sku.lucro_total > 0 ? COLORS.verde : sku.lucro_total < 0 ? COLORS.vermelho : undefined;
+  const semCmv = sku.cmv_total === 0 && !sku.tem_cmv;
+
+  const descricaoReal = detalhe?.descricao ?? null;
+  const periodoStr = detalhe?.range
+    ? `${fmtDateBR(detalhe.range.from)} a ${fmtDateBR(detalhe.range.to)}`
+    : periodLabel;
 
   return (
     <div
@@ -1243,78 +1296,155 @@ function SkuDetalheModal({
       onClick={onClose}
     >
       <div
-        className="card rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col"
+        className="card rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="p-5 pb-3 border-b border-current/10 shrink-0 flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h3 className="text-sm font-medium">
+            <h3 className="font-medium truncate" style={{ fontSize: '18px' }}>
               SKU {sku.sku_pai}
-              {sku.descricao && <span className="opacity-60"> — {sku.descricao}</span>}
+              {descricaoReal && (
+                <span className="opacity-60"> — {descricaoReal}</span>
+              )}
             </h3>
-            <p className="text-[10px] opacity-50 mt-0.5">
-              {fmtInt(sku.qtd_vendida)} vendas · {periodLabel}
+            <p className="text-[12px] opacity-60 mt-0.5">
+              {fmtInt(sku.qtd_vendida)} vendas · Período: {periodoStr}
             </p>
           </div>
-          <button onClick={onClose} className="text-lg opacity-50 hover:opacity-100">×</button>
+          <button onClick={onClose} className="text-xl opacity-50 hover:opacity-100 leading-none">×</button>
         </div>
 
         <div className="overflow-y-auto flex-1 min-h-0 px-5 py-4 space-y-5">
           {/* KPIs mini */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <MiniKpi label="Lucro total" value={fmtBRL(sku.lucro_total)} color={lucroColor} />
-            <MiniKpi label="Margem média" value={fmtPct(sku.margem_media)} color={
-              sku.margem_media < 0 ? COLORS.vermelho : sku.margem_media < 15 ? COLORS.amber : COLORS.verde
-            } />
-            <MiniKpi label="CMV médio" value={cmvMedio > 0 ? fmtBRL(cmvMedio) : '—'} />
-            <MiniKpi label="% negativos" value={fmtPct(sku.pct_negativos)} color={
-              sku.pct_negativos > 10 ? COLORS.vermelho : undefined
-            } />
+            <MiniKpi
+              label="Margem média"
+              value={fmtPct(sku.margem_media)}
+              color={margemColorFor(sku.margem_media)}
+            />
+            <MiniKpi
+              label="CMV médio"
+              value={semCmv ? 'Sem CMV' : cmvMedio > 0 ? fmtBRL(cmvMedio) : '—'}
+              color={semCmv ? COLORS.cinza : undefined}
+            />
+            <MiniKpi
+              label="% negativos"
+              value={fmtPct(sku.pct_negativos)}
+              color={sku.pct_negativos > 10 ? COLORS.vermelho : undefined}
+            />
           </div>
 
-          {/* Piores pedidos */}
-          <div>
-            <h4 className="text-[10px] uppercase tracking-wider opacity-60 mb-2">
-              Piores pedidos deste SKU (últimos 15 dias)
-            </h4>
-            {loading ? (
-              <div className="text-[11px] opacity-50">Carregando…</div>
-            ) : !piores || piores.length === 0 ? (
-              <div className="text-[11px] opacity-50">
-                Nenhum pedido negativo encontrado no período.
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-left opacity-50 border-b border-current/10">
-                      <th className="px-2 py-1.5 font-medium">Pedido</th>
-                      <th className="px-2 py-1.5 font-medium">Data</th>
-                      <th className="px-2 py-1.5 font-medium text-right">Venda</th>
-                      <th className="px-2 py-1.5 font-medium text-right">Lucro</th>
-                      <th className="px-2 py-1.5 font-medium text-right">Margem</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {piores.map(p => (
-                      <tr key={p.order_sn} className="border-t border-current/5">
-                        <td className="px-2 py-1.5 font-mono text-[11px]">{p.order_sn}</td>
-                        <td className="px-2 py-1.5 opacity-80">{fmtDateBR(p.data)}</td>
-                        <td className="px-2 py-1.5 text-right">{fmtBRL(p.venda)}</td>
-                        <td className="px-2 py-1.5 text-right font-medium"
-                            style={{ color: p.lucro > 0 ? COLORS.verde : p.lucro < 0 ? COLORS.vermelho : undefined }}>
-                          {fmtBRL(p.lucro)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right">
-                          <MargemBadge margem={p.margem_pct} />
-                        </td>
-                      </tr>
+          {loading ? (
+            <div className="text-[11px] opacity-50">Carregando detalhes…</div>
+          ) : !detalhe ? (
+            <div className="text-[11px] opacity-50">Falha ao carregar detalhes.</div>
+          ) : (
+            <>
+              {/* Seção 1: Lucro por loja */}
+              <div>
+                <h4 className="text-[11px] uppercase tracking-wider opacity-60 mb-2">
+                  Lucro por loja
+                </h4>
+                {detalhe.por_loja.length === 0 ? (
+                  <div className="text-[11px] opacity-50">—</div>
+                ) : (
+                  <ul>
+                    {detalhe.por_loja.map(l => (
+                      <li
+                        key={l.shop_id}
+                        className="flex items-center justify-between py-2 text-xs"
+                        style={{ borderBottom: '0.5px solid rgba(128,128,128,0.2)' }}
+                      >
+                        <span className="truncate pr-2">{l.shop_name_curto}</span>
+                        <span
+                          className="tabular-nums whitespace-nowrap"
+                          style={{ color: l.lucro > 0 ? COLORS.verde : l.lucro < 0 ? COLORS.vermelho : undefined }}
+                        >
+                          {fmtBRL(l.lucro)} · {fmtPct(l.margem)}
+                        </span>
+                      </li>
                     ))}
-                  </tbody>
-                </table>
+                  </ul>
+                )}
               </div>
-            )}
-          </div>
+
+              {/* Seção 2: Margem por tamanho */}
+              <div>
+                <h4 className="text-[11px] uppercase tracking-wider opacity-60 mb-2">
+                  Margem por tamanho
+                </h4>
+                {detalhe.por_tamanho.length === 0 ? (
+                  <div className="text-[11px] opacity-50">—</div>
+                ) : (
+                  <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(80px, 1fr))' }}>
+                    {detalhe.por_tamanho.map(t => (
+                      <div
+                        key={t.tamanho}
+                        className="rounded p-2"
+                        style={{ background: 'rgba(128,128,128,0.08)' }}
+                      >
+                        <div className="text-[11px] opacity-50">{t.tamanho}</div>
+                        <div
+                          className="font-medium"
+                          style={{ fontSize: '14px', color: margemColorFor(t.margem) }}
+                        >
+                          {fmtPct(t.margem)}
+                        </div>
+                        <div className="text-[10px] opacity-50 mt-0.5">{fmtInt(t.qtd)} ped.</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Seção 3: Piores pedidos deste SKU */}
+              <div>
+                <h4 className="text-[11px] uppercase tracking-wider opacity-60 mb-2">
+                  Piores pedidos deste SKU
+                </h4>
+                {detalhe.piores_pedidos.length === 0 ? (
+                  <div className="text-[11px] opacity-50">Nenhum pedido encontrado no período.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left opacity-50 border-b border-current/10">
+                          <th className="px-2 py-1.5 font-medium">Pedido</th>
+                          <th className="px-2 py-1.5 font-medium">Loja</th>
+                          <th className="px-2 py-1.5 font-medium">Tamanho</th>
+                          <th className="px-2 py-1.5 font-medium text-right">Venda</th>
+                          <th className="px-2 py-1.5 font-medium text-right">Lucro</th>
+                          <th className="px-2 py-1.5 font-medium">Causa</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detalhe.piores_pedidos.map(p => (
+                          <tr key={p.order_sn} className="border-t border-current/5">
+                            <td className="px-2 py-1.5 font-mono text-[11px]">{p.order_sn}</td>
+                            <td className="px-2 py-1.5 opacity-80 truncate max-w-[140px]" title={p.loja}>
+                              {p.loja}
+                            </td>
+                            <td className="px-2 py-1.5 opacity-80">{p.tamanho ?? '—'}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums">{fmtBRL(p.venda)}</td>
+                            <td
+                              className="px-2 py-1.5 text-right font-medium tabular-nums"
+                              style={{ color: p.lucro > 0 ? COLORS.verde : p.lucro < 0 ? COLORS.vermelho : undefined }}
+                            >
+                              {fmtBRL(p.lucro)}
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <InlineBadge label={p.causa} color={causaColor(p.causa)} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="p-4 border-t border-current/10 shrink-0 flex justify-end">
