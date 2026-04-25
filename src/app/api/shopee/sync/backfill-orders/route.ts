@@ -43,7 +43,9 @@ const DETAIL_FIELDS = [
   'actual_shipping_fee', 'cod', 'pickup_done_time',
 ].join(',');
 
-interface OrderListItem { order_sn: string }
+// order_status só vem se passarmos response_optional_fields=order_status na call.
+// Sem isso, o list devolve apenas { order_sn }.
+interface OrderListItem { order_sn: string; order_status?: string }
 interface OrderListResp { more?: boolean; next_cursor?: string; order_list?: OrderListItem[] }
 interface OrderDetailItem {
   order_sn: string;
@@ -103,6 +105,10 @@ export async function GET(request: NextRequest) {
   const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
   const from = request.nextUrl.searchParams.get('from');
   const to = request.nextUrl.searchParams.get('to');
+  // skip_detail: lista pedidos e enfileira fetch_order_detail no worker em
+  // vez de fazer get_order_detail no mesmo request. ~10x mais rápido por dia
+  // (1-2 chamadas em vez de 6-12), pago depois pelo worker em background.
+  const skipDetail = request.nextUrl.searchParams.get('skip_detail') === 'true';
 
   if (!shopIdRaw || !from || !to) {
     return NextResponse.json(
@@ -184,6 +190,10 @@ export async function GET(request: NextRequest) {
             time_to: dayToSec,
             page_size: LIST_PAGE_SIZE,
             cursor,
+            // Em modo skip_detail enriquecemos o list com order_status pra
+            // já enfileirar fetch_escrow_detail dos COMPLETED sem ter que
+            // esperar o worker rodar fetch_order_detail.
+            ...(skipDetail ? { response_optional_fields: 'order_status' } : {}),
           },
         );
         await sleep(THROTTLE_MS);
@@ -191,12 +201,74 @@ export async function GET(request: NextRequest) {
         dayStats.pages += 1;
         totalPages += 1;
 
-        const snList = (listResp.response?.order_list ?? []).map(o => o.order_sn);
+        const listItems = listResp.response?.order_list ?? [];
+        const snList = listItems.map(o => o.order_sn);
         more = listResp.response?.more === true;
         const nextCursor = listResp.response?.next_cursor || '';
 
         if (snList.length === 0) break;
 
+        // ============ MODO skip_detail ============
+        // Insere stub e enfileira fetch_order_detail. Não chama get_order_detail.
+        if (skipDetail) {
+          // Quem já está em shopee_pedidos não precisa de stub novo (mas ainda
+          // queremos enfileirar fetch_order_detail pra atualizar dados).
+          const { data: prevRows } = await supabase
+            .from('shopee_pedidos')
+            .select('order_sn, order_status')
+            .eq('shop_id', shopId)
+            .in('order_sn', snList);
+          const prevMap = new Map<string, string | null>();
+          for (const p of prevRows ?? []) {
+            prevMap.set(p.order_sn as string, (p.order_status as string | null) ?? null);
+          }
+
+          const stubs = listItems
+            .filter(it => !prevMap.has(it.order_sn))
+            .map(it => ({
+              shop_id: shopId,
+              order_sn: it.order_sn,
+              order_status: it.order_status ?? null,
+              currency: 'BRL',
+              synced_at: new Date().toISOString(),
+            }));
+
+          if (stubs.length > 0) {
+            const { error: stubErr } = await supabase
+              .from('shopee_pedidos')
+              .upsert(stubs, { onConflict: 'shop_id,order_sn' });
+            if (stubErr) throw new Error(`UPSERT stub shopee_pedidos: ${stubErr.message}`);
+          }
+
+          for (const it of listItems) {
+            const prevStatus = prevMap.get(it.order_sn);
+            if (prevStatus === undefined) dayStats.inserted += 1;
+            else dayStats.updated += 1;
+
+            // Enfileira fetch_order_detail pra preencher os campos pesados depois.
+            const enq = await enqueueAction(
+              shopId, 'order', it.order_sn, 'fetch_order_detail', 5,
+            );
+            if (enq) dayStats.enqueued += 1;
+
+            // Se já sabemos que está COMPLETED (graças ao response_optional_fields),
+            // já enfileira o escrow detail também — encurta o tempo até a Vista de
+            // lucro ficar populada.
+            if (it.order_status === 'COMPLETED' && prevStatus !== 'COMPLETED') {
+              const enqEscrow = await enqueueAction(
+                shopId, 'escrow', it.order_sn, 'fetch_escrow_detail', 5,
+              );
+              if (enqEscrow) dayStats.enqueued += 1;
+            }
+          }
+          dayStats.orders += listItems.length;
+
+          cursor = nextCursor;
+          if (!cursor) break;
+          continue;
+        }
+
+        // ============ MODO completo (default) ============
         for (let i = 0; i < snList.length; i += DETAIL_CHUNK) {
           if (timeLeft() < 5000) {
             stoppedDate = date;
@@ -316,6 +388,7 @@ export async function GET(request: NextRequest) {
     metadata: {
       from,
       to,
+      skip_detail: skipDetail,
       days_processed: daysProcessed.length,
       days_pending: daysPending.length,
       stopped_date: stoppedDate,
@@ -334,6 +407,7 @@ export async function GET(request: NextRequest) {
     shop_id: shopId,
     from,
     to,
+    skip_detail: skipDetail,
     status,
     days_processed: daysProcessed,
     days_pending: daysPending,
