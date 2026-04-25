@@ -19,6 +19,7 @@ type Ordem = 'lucro' | 'margem' | 'venda' | 'cmv' | 'data';
 type Direcao = 'asc' | 'desc';
 type StatusPedido = 'saudavel' | 'atencao' | 'prejuizo' | 'sem_cmv';
 type OrdemSkus = 'lucro_desc' | 'lucro_asc' | 'qtd_desc' | 'margem_asc';
+type DevolucaoMode = 'custo_real' | 'custo_completo';
 
 interface ItemDetalhe {
   sku: string;
@@ -34,6 +35,7 @@ interface Config {
   margemTipo: MargemTipo;
   limiarSaudavel: number;
   limiarAtencao: number;
+  devolucaoMode: DevolucaoMode;
 }
 
 interface Pedido {
@@ -60,6 +62,7 @@ interface Pedido {
   metodo_pagamento: string | null;
   tem_devolucao: boolean;
   tem_afiliado: boolean;
+  is_devolucao_total: boolean;
   breakdown: {
     cmv_pct: number;
     comissao_pct: number;
@@ -158,6 +161,7 @@ const DEFAULT_CONFIG: Config = {
   margemTipo: 'real',
   limiarSaudavel: 15,
   limiarAtencao: 0,
+  devolucaoMode: 'custo_real',
 };
 
 const CONFIG_KEY = 'naraka-bi-lucro-config';
@@ -206,6 +210,7 @@ function loadConfig(): Config {
       margemTipo: parsed.margemTipo ?? DEFAULT_CONFIG.margemTipo,
       limiarSaudavel: parsed.limiarSaudavel ?? DEFAULT_CONFIG.limiarSaudavel,
       limiarAtencao: parsed.limiarAtencao ?? DEFAULT_CONFIG.limiarAtencao,
+      devolucaoMode: parsed.devolucaoMode ?? DEFAULT_CONFIG.devolucaoMode,
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -314,6 +319,7 @@ export default function LucroPrejuizoPage() {
         visao,
         custos: custosString(config) || 'none',
         margem: config.margemTipo,
+        devolucao_mode: config.devolucaoMode,
         filtro,
         ordem,
         direcao,
@@ -842,6 +848,11 @@ function PedidoExpandedPanel({
   const showAds = config.adsAtivo;
   const showFbs = config.fbsAtivo;
 
+  // Devolução total + custo_real: o CMV existe no banco, mas não entra no
+  // lucro (o produto voltou pro estoque). UI mostra em cinza/itálico para
+  // deixar explícito que aquele valor não foi contabilizado.
+  const cmvIgnorado = pedido.is_devolucao_total && config.devolucaoMode === 'custo_real';
+
   const lucroColor = pedido.lucro > 0 ? COLORS.verde : pedido.lucro < 0 ? COLORS.vermelho : undefined;
 
   return (
@@ -861,7 +872,16 @@ function PedidoExpandedPanel({
         </div>
         <ul className="text-xs space-y-1">
           <BreakdownRow label="Venda" value={fmtBRL(pedido.venda)} />
-          <BreakdownRow label="CMV" value={pedido.cmv === 0 ? '—' : `−${fmtBRL(pedido.cmv)}`} neutral={pedido.cmv === 0} />
+          {cmvIgnorado ? (
+            <BreakdownRow
+              label="CMV"
+              value={pedido.cmv === 0 ? '—' : `${fmtBRL(pedido.cmv)} (não contabilizado — produto retornou)`}
+              neutral
+              italic
+            />
+          ) : (
+            <BreakdownRow label="CMV" value={pedido.cmv === 0 ? '—' : `−${fmtBRL(pedido.cmv)}`} neutral={pedido.cmv === 0} />
+          )}
           <BreakdownRow label="Comissão" value={sign(pedido.comissao)} neutral={pedido.comissao === 0} />
           <BreakdownRow label="Taxa de serviço" value={sign(pedido.taxa_servico)} neutral={pedido.taxa_servico === 0} />
           <BreakdownRow label="Afiliado" value={sign(pedido.afiliado)} neutral={pedido.afiliado === 0} />
@@ -926,11 +946,13 @@ function PedidoExpandedPanel({
   );
 }
 
-function BreakdownRow({ label, value, neutral }: { label: string; value: string; neutral?: boolean }) {
+function BreakdownRow({ label, value, neutral, italic }: { label: string; value: string; neutral?: boolean; italic?: boolean }) {
+  const labelCls = [neutral ? 'opacity-60' : '', italic ? 'italic' : ''].filter(Boolean).join(' ');
+  const valueCls = ['tabular-nums', neutral ? 'opacity-50' : '', italic ? 'italic' : ''].filter(Boolean).join(' ');
   return (
     <li className="flex items-center justify-between">
-      <span className={neutral ? 'opacity-60' : ''}>{label}</span>
-      <span className={`tabular-nums ${neutral ? 'opacity-50' : ''}`}>{value}</span>
+      <span className={labelCls}>{label}</span>
+      <span className={valueCls}>{value}</span>
     </li>
   );
 }
@@ -1270,6 +1292,7 @@ function SkuDetalheModal({
   // aplica a mesma fórmula de rateio de /api/lucro.
   const custosStr = custosString(config) || 'none';
   const margemStr = config.margemTipo;
+  const devolucaoStr = config.devolucaoMode;
 
   useEffect(() => {
     let cancelled = false;
@@ -1282,6 +1305,7 @@ function SkuDetalheModal({
           shop_id: shopFilter,
           custos: custosStr,
           margem: margemStr,
+          devolucao_mode: devolucaoStr,
         });
         const res = await fetch(`/api/lucro/sku-detalhe?${params.toString()}`, { cache: 'no-store' });
         const json = await res.json();
@@ -1293,7 +1317,7 @@ function SkuDetalheModal({
       }
     })();
     return () => { cancelled = true; };
-  }, [sku.sku_pai, period, shopFilter, custosStr, margemStr]);
+  }, [sku.sku_pai, period, shopFilter, custosStr, margemStr, devolucaoStr]);
 
   // KPIs derivados do endpoint sku-detalhe — não usar mais sku.* (props do
   // card), porque o agregado das props passa pelos toggles de custo da página
@@ -1620,6 +1644,32 @@ function ConfigModal({
                 hint="rateio proporcional/mês"
                 checked={draft.fbsAtivo}
                 onChange={v => setDraft({ ...draft, fbsAtivo: v })}
+              />
+            </div>
+          </div>
+
+          {/* ============ Devoluções totais ============ */}
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wider opacity-60 mb-1">
+              Devoluções totais
+            </h4>
+            <p className="text-[10px] opacity-50 mb-2">
+              Como calcular o prejuízo quando o cliente devolve o pedido inteiro
+            </p>
+            <div className="space-y-1.5">
+              <Radio
+                name="devolucao"
+                label="Custo real (só frete pago)"
+                hint="produto voltou em boas condições"
+                checked={draft.devolucaoMode === 'custo_real'}
+                onChange={() => setDraft({ ...draft, devolucaoMode: 'custo_real' })}
+              />
+              <Radio
+                name="devolucao"
+                label="Custo completo (CMV + frete)"
+                hint="produto danificado ou perdido"
+                checked={draft.devolucaoMode === 'custo_completo'}
+                onChange={() => setDraft({ ...draft, devolucaoMode: 'custo_completo' })}
               />
             </div>
           </div>

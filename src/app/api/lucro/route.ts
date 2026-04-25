@@ -28,6 +28,7 @@ type MargemTipo = 'bruta' | 'operacional' | 'real';
 type Visao = 'pedidos' | 'skus';
 type Ordem = 'lucro' | 'margem' | 'venda' | 'cmv' | 'data';
 type Direcao = 'asc' | 'desc';
+type DevolucaoMode = 'custo_real' | 'custo_completo';
 
 interface LucroRow {
   order_sn: string;
@@ -55,6 +56,7 @@ interface LucroRow {
   status_pedido: string | null;
   tem_devolucao: boolean;
   tem_afiliado: boolean;
+  seller_return_refund: number;
   cmv_pct: number;
   comissao_pct: number;
   taxa_pct: number;
@@ -228,12 +230,24 @@ interface ComputedRow extends LucroRow {
   rateio_fbs: number;
   lucro: number;
   margem_pct: number;
+  is_devolucao_total: boolean;
+}
+
+// Devolução TOTAL pré-entrega: venda zerada + qualquer um dos sinais de
+// reembolso. Mesma regra do banco (migration 055/056).
+function detectDevolucaoTotal(row: LucroRow): boolean {
+  return row.venda === 0 && (
+    row.seller_return_refund < 0
+    || row.frete_reverso > 0
+    || (row.receita_liquida <= 0 && row.tem_devolucao)
+  );
 }
 
 function computeRowMetrics(
   row: LucroRow,
   custos: Set<string>,
   margemTipo: MargemTipo,
+  devolucaoMode: DevolucaoMode,
   dayStats: DailyStatsRow | undefined,
   monthFbs: { fbs_net: number; gmv: number } | undefined,
 ): ComputedRow {
@@ -252,7 +266,12 @@ function computeRowMetrics(
     ? monthFbs.fbs_net * (row.venda / monthFbs.gmv)
     : 0;
 
-  const cmvAplicado = ativoCmv ? row.cmv : 0;
+  // Devolução total: produto voltou (custo_real) ou se perdeu (custo_completo).
+  // No modo custo_real ignoramos o CMV mesmo com toggle CMV ativo, porque o
+  // estoque retornou; no modo custo_completo o CMV entra normalmente.
+  const isDevolucaoTotal = detectDevolucaoTotal(row);
+  const ignorarCmvDevolucao = isDevolucaoTotal && devolucaoMode === 'custo_real';
+  const cmvAplicado = (ativoCmv && !ignorarCmvDevolucao) ? row.cmv : 0;
 
   // lucro "real" = receita_liquida - custos ativos
   const lucroReal = row.receita_liquida - cmvAplicado - rateioAds - rateioFbs;
@@ -272,7 +291,14 @@ function computeRowMetrics(
     }
   }
 
-  return { ...row, rateio_ads: rateioAds, rateio_fbs: rateioFbs, lucro: lucroReal, margem_pct: margemPct };
+  return {
+    ...row,
+    rateio_ads: rateioAds,
+    rateio_fbs: rateioFbs,
+    lucro: lucroReal,
+    margem_pct: margemPct,
+    is_devolucao_total: isDevolucaoTotal,
+  };
 }
 
 function applyFilter(rows: ComputedRow[], filtro: Filtro): ComputedRow[] {
@@ -386,6 +412,7 @@ function serializePedido(r: ComputedRow) {
     metodo_pagamento: r.metodo_pagamento,
     tem_devolucao: r.tem_devolucao,
     tem_afiliado: r.tem_afiliado,
+    is_devolucao_total: r.is_devolucao_total,
     breakdown: {
       cmv_pct: r.cmv_pct,
       comissao_pct: r.comissao_pct,
@@ -488,6 +515,7 @@ export async function GET(request: NextRequest) {
   const custosParam = (searchParams.get('custos') ?? 'cmv').split(',').map(s => s.trim()).filter(Boolean);
   const custos = new Set(custosParam);
   const margemTipo = (searchParams.get('margem') ?? 'operacional') as MargemTipo;
+  const devolucaoMode = (searchParams.get('devolucao_mode') ?? 'custo_real') as DevolucaoMode;
   const visao = (searchParams.get('visao') ?? 'pedidos') as Visao;
   const busca = searchParams.get('busca');
   const ordem = (searchParams.get('ordem') ?? 'lucro') as Ordem;
@@ -523,6 +551,7 @@ export async function GET(request: NextRequest) {
         r,
         custos,
         margemTipo,
+        devolucaoMode,
         dayStats.get(r.data_liberacao),
         monthlyStats.get(r.data_liberacao.slice(0, 7)),
       ),

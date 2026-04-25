@@ -19,6 +19,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 type Period = 'today' | 'yesterday' | '7d' | '15d' | 'month' | 'custom';
 type MargemTipo = 'bruta' | 'operacional' | 'real';
+type DevolucaoMode = 'custo_real' | 'custo_completo';
 
 interface LucroRow {
   order_sn: string;
@@ -40,6 +41,7 @@ interface LucroRow {
   qtd_itens: number;
   tem_devolucao: boolean;
   tem_afiliado: boolean;
+  seller_return_refund: number;
   status: string;
 }
 
@@ -56,6 +58,7 @@ interface ComputedRow extends LucroRow {
   rateio_fbs: number;
   lucro: number;
   margem_pct: number;
+  is_devolucao_total: boolean;
 }
 
 function brDateString(d: Date): string {
@@ -153,7 +156,7 @@ async function fetchLucroRowsBySkuPai(
   while (true) {
     let q = supabase
       .from('lucro_pedido_stats')
-      .select('order_sn, shop_id, data_liberacao, venda, receita_liquida, comissao, taxa_servico, afiliado, cupom_seller, frete_reverso, frete_ida_seller, difal, cmv, tem_cmv, skus, sku_pais, qtd_itens, tem_devolucao, tem_afiliado, status')
+      .select('order_sn, shop_id, data_liberacao, venda, receita_liquida, comissao, taxa_servico, afiliado, cupom_seller, frete_reverso, frete_ida_seller, difal, cmv, tem_cmv, skus, sku_pais, qtd_itens, tem_devolucao, tem_afiliado, seller_return_refund, status')
       .gte('data_liberacao', from)
       .lte('data_liberacao', to)
       .contains('sku_pais', [skuPai])
@@ -248,12 +251,25 @@ async function fetchMonthlyStats(
   return result;
 }
 
-// Mesma fórmula de /api/lucro/route.ts (rateio ads diário + FBS mensal),
-// para garantir que o modal de SKU bate com a visão de pedidos.
+// Mesma regra do banco (migration 055/056): devolução TOTAL pré-entrega tem
+// venda zerada e algum sinal de reembolso. No modo custo_real o CMV não
+// entra (estoque retornou); no modo custo_completo ele entra (perda total).
+function detectDevolucaoTotal(row: LucroRow): boolean {
+  return row.venda === 0 && (
+    row.seller_return_refund < 0
+    || row.frete_reverso > 0
+    || (row.receita_liquida <= 0 && row.tem_devolucao)
+  );
+}
+
+// Mesma fórmula de /api/lucro/route.ts (rateio ads diário + FBS mensal +
+// tratamento de devolução total) — garante que o modal de SKU bate com a
+// visão de pedidos.
 function computeRowMetrics(
   row: LucroRow,
   custos: Set<string>,
   margemTipo: MargemTipo,
+  devolucaoMode: DevolucaoMode,
   dayStats: DailyStatsRow | undefined,
   monthFbs: { fbs_net: number; gmv: number } | undefined,
 ): ComputedRow {
@@ -269,7 +285,10 @@ function computeRowMetrics(
     ? monthFbs.fbs_net * (row.venda / monthFbs.gmv)
     : 0;
 
-  const cmvAplicado = ativoCmv ? row.cmv : 0;
+  const isDevolucaoTotal = detectDevolucaoTotal(row);
+  const ignorarCmvDevolucao = isDevolucaoTotal && devolucaoMode === 'custo_real';
+  const cmvAplicado = (ativoCmv && !ignorarCmvDevolucao) ? row.cmv : 0;
+
   const lucroReal = row.receita_liquida - cmvAplicado - rateioAds - rateioFbs;
 
   let margemPct = 0;
@@ -287,7 +306,14 @@ function computeRowMetrics(
     }
   }
 
-  return { ...row, rateio_ads: rateioAds, rateio_fbs: rateioFbs, lucro: lucroReal, margem_pct: margemPct };
+  return {
+    ...row,
+    rateio_ads: rateioAds,
+    rateio_fbs: rateioFbs,
+    lucro: lucroReal,
+    margem_pct: margemPct,
+    is_devolucao_total: isDevolucaoTotal,
+  };
 }
 
 async function fetchShopNames(
@@ -457,6 +483,7 @@ export async function GET(request: NextRequest) {
   const custosParam = (searchParams.get('custos') ?? 'cmv').split(',').map(s => s.trim()).filter(Boolean);
   const custos = new Set(custosParam);
   const margemTipo = (searchParams.get('margem') ?? 'operacional') as MargemTipo;
+  const devolucaoMode = (searchParams.get('devolucao_mode') ?? 'custo_real') as DevolucaoMode;
 
   let range: { from: string; to: string };
   try {
@@ -496,6 +523,7 @@ export async function GET(request: NextRequest) {
         r,
         custos,
         margemTipo,
+        devolucaoMode,
         dayStats.get(r.data_liberacao),
         monthlyStats.get(r.data_liberacao.slice(0, 7)),
       ),
