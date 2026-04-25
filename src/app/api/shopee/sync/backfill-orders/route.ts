@@ -26,11 +26,13 @@ import { startAudit, finishAudit, type AuditResult } from '@/lib/shopee/audit';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 55;
+// Vercel Pro: até 300s. Com volume da Joy, 55s não cobre nem 1 dia.
+// Buffer de ~10s no MAX_ELAPSED_MS pra fechar audit/UPSERT antes do kill do runtime.
+export const maxDuration = 300;
 
 const JOB_NAME = 'backfill_orders';
-const MAX_ELAPSED_MS = 45 * 1000;
-const THROTTLE_MS = 300;
+const MAX_ELAPSED_MS = 290 * 1000;
+const THROTTLE_MS = 200;
 const LIST_PAGE_SIZE = 100;
 const DETAIL_CHUNK = 50;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
