@@ -1,4 +1,9 @@
-import { getShopeeConfig, getShopeeApiHost, assertShopeeConfig } from './config';
+import {
+  getShopeeApiHost,
+  assertShopeeConfig,
+  getShopeeConfigForShop,
+  type ShopeeConfig,
+} from './config';
 import { signShopPath } from './auth';
 
 export interface ShopeeApiResponse<T = unknown> {
@@ -13,28 +18,35 @@ export interface ShopeeApiResponse<T = unknown> {
 // - timestamp em SEGUNDOS
 // - query string carrega os commonParams (partner_id, timestamp, access_token, shop_id, sign)
 // - GET: params extras na query; POST: params no body JSON
+//
+// Multi-app (migration 057_shopee_apps): se `cfg` não for passado, resolvemos
+// pelo shop_id (via shopee_tokens.partner_id → shopee_apps). Sem isso, syncs
+// de lojas de partners diferentes do .env falham com "invalid_partner".
+// Callers que já têm a cfg em mãos (sync-helpers) devem passar — evita um
+// roundtrip extra por chamada.
 export async function shopeeApiCall<T = unknown>(
   path: string,
   params: Record<string, unknown>,
   shopId: number | string,
   accessToken: string,
   method: 'GET' | 'POST' = 'GET',
+  cfg?: ShopeeConfig,
 ): Promise<ShopeeApiResponse<T>> {
-  const cfg = getShopeeConfig();
-  assertShopeeConfig(cfg);
+  const c = cfg ?? await getShopeeConfigForShop(shopId);
+  assertShopeeConfig(c);
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const sign = signShopPath(path, timestamp, accessToken, shopId);
+  const sign = signShopPath(path, timestamp, accessToken, shopId, c);
 
   const commonParams = new URLSearchParams({
-    partner_id: cfg.partnerId,
+    partner_id: c.partnerId,
     timestamp: String(timestamp),
     access_token: accessToken,
     shop_id: String(shopId),
     sign,
   });
 
-  let url = `${getShopeeApiHost()}${path}?${commonParams.toString()}`;
+  let url = `${getShopeeApiHost(c)}${path}?${commonParams.toString()}`;
   let body: string | undefined;
 
   if (method === 'GET') {
@@ -47,7 +59,7 @@ export async function shopeeApiCall<T = unknown>(
   }
 
   // Log da URL SEM partes sensíveis (access_token/sign). `path` e host bastam para diagnóstico.
-  console.log(`[shopee-client] calling ${method} ${getShopeeApiHost()}${path}`);
+  console.log(`[shopee-client] calling ${method} ${getShopeeApiHost(c)}${path} (partner=${c.source ?? 'env'})`);
 
   const res = await fetch(url, {
     method,

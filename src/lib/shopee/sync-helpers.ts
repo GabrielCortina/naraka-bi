@@ -1,6 +1,7 @@
 import { createServiceClient } from '@/lib/supabase-server';
 import { shopeeApiCall, type ShopeeApiResponse } from '@/lib/shopee/client';
 import { refreshAccessToken } from '@/lib/shopee/auth';
+import { getShopeeConfigForShop } from '@/lib/shopee/config';
 
 // Utilitários compartilhados pelos jobs de sync da Shopee.
 // Convenções:
@@ -236,14 +237,21 @@ export function calculateBackoffMinutes(attemptCount: number): number {
 // Wrapper de chamadas autenticadas com refresh automático de token.
 // Muta `shop.access_token`/`shop.refresh_token` ao renovar — futuros usos no
 // mesmo request já carregam o token novo.
+//
+// Multi-app: resolve cfg uma vez via getShopeeConfigForShop e propaga pra
+// shopeeApiCall e refreshAccessToken — evita lookup repetido (cache faz a
+// 2ª chamada barata, mas tudo dentro do mesmo request usa a mesma cfg) e
+// garante que loja da Joy não vai assinar com key da Oxean.
 export async function shopeeCallWithRefresh<T>(
   shop: ActiveShop,
   path: string,
   params: Record<string, unknown>,
   method: 'GET' | 'POST' = 'GET',
 ): Promise<ShopeeApiResponse<T>> {
+  const cfg = await getShopeeConfigForShop(shop.shop_id);
+
   try {
-    return await shopeeApiCall<T>(path, params, shop.shop_id, shop.access_token, method);
+    return await shopeeApiCall<T>(path, params, shop.shop_id, shop.access_token, method, cfg);
   } catch (err) {
     const msg = err instanceof Error ? err.message.toLowerCase() : '';
     const isAuth =
@@ -256,7 +264,7 @@ export async function shopeeCallWithRefresh<T>(
 
     let newTokens;
     try {
-      newTokens = await refreshAccessToken(shop.refresh_token, shop.shop_id);
+      newTokens = await refreshAccessToken(shop.refresh_token, shop.shop_id, cfg);
     } catch (refreshErr) {
       const rmsg = refreshErr instanceof Error ? refreshErr.message : 'unknown';
       console.error(
@@ -288,7 +296,7 @@ export async function shopeeCallWithRefresh<T>(
     shop.access_token = newTokens.access_token;
     shop.refresh_token = newTokens.refresh_token;
 
-    return await shopeeApiCall<T>(path, params, shop.shop_id, shop.access_token, method);
+    return await shopeeApiCall<T>(path, params, shop.shop_id, shop.access_token, method, cfg);
   }
 }
 

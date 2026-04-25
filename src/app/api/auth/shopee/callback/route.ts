@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAccessToken } from '@/lib/shopee/auth';
 import { shopeeApiCall } from '@/lib/shopee/client';
-import { getShopeeConfig } from '@/lib/shopee/config';
+import {
+  getShopeeConfig,
+  getShopeeConfigByPartnerId,
+  type ShopeeConfig,
+} from '@/lib/shopee/config';
 import { createServiceClient } from '@/lib/supabase-server';
 
 // Rotas Shopee assinam com timestamp fresh — nunca podem ser cacheadas.
@@ -21,9 +25,13 @@ interface ShopInfoResponse {
 
 // GET /api/auth/shopee/callback
 // Recebe o code e shop_id da Shopee, troca por tokens e persiste em shopee_tokens.
+//
+// Multi-app: o `partner_id` é injetado no redirect_url por getAuthUrl, então
+// chega aqui de volta. Sem ele, caímos pra env (Oxean) — compat antiga.
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get('code');
   const shopIdRaw = request.nextUrl.searchParams.get('shop_id');
+  const partnerIdRaw = request.nextUrl.searchParams.get('partner_id');
   const error = request.nextUrl.searchParams.get('error');
 
   if (error) {
@@ -40,8 +48,28 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(buildRedirect('?error=invalid_shop_id'));
   }
 
+  // Resolve a config do app que fez a autorização. Sem partner_id no
+  // redirect, fallback pro env (caso de auth disparada antes da migração
+  // 057 — só funciona para o partner_id do .env).
+  let cfg: ShopeeConfig;
   try {
-    const tokens = await getAccessToken(code, shopId);
+    if (partnerIdRaw) {
+      const id = Number(partnerIdRaw);
+      if (!Number.isFinite(id)) {
+        return NextResponse.redirect(buildRedirect('?error=invalid_partner_id'));
+      }
+      cfg = await getShopeeConfigByPartnerId(id);
+    } else {
+      cfg = getShopeeConfig();
+    }
+  } catch (err) {
+    console.error('[shopee-callback] Falha ao resolver app:', err);
+    const msg = err instanceof Error ? err.message : 'app_resolution_failed';
+    return NextResponse.redirect(buildRedirect(`?error=${encodeURIComponent(msg)}`));
+  }
+
+  try {
+    const tokens = await getAccessToken(code, shopId, cfg);
 
     // Busca nome da loja (opcional — não bloqueia o fluxo se falhar)
     let shopName: string | null = null;
@@ -52,6 +80,7 @@ export async function GET(request: NextRequest) {
         shopId,
         tokens.access_token,
         'GET',
+        cfg,
       );
       shopName = (info.shop_name as string | undefined) ?? null;
     } catch (err) {
@@ -62,7 +91,6 @@ export async function GET(request: NextRequest) {
     const tokenExpiresAt = new Date(now + tokens.expire_in * 1000).toISOString();
     const refreshExpiresAt = new Date(now + REFRESH_TOKEN_TTL_MS).toISOString();
 
-    const cfg = getShopeeConfig();
     const supabase = createServiceClient();
     const { error: dbError } = await supabase
       .from('shopee_tokens')
@@ -86,7 +114,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(buildRedirect('?error=db_save_failed'));
     }
 
-    console.log(`[shopee-callback] Loja ${shopId} (${shopName ?? 'sem nome'}) conectada.`);
+    console.log(
+      `[shopee-callback] Loja ${shopId} (${shopName ?? 'sem nome'}) conectada via partner ${cfg.partnerId} (${cfg.source}).`,
+    );
     return NextResponse.redirect(buildRedirect('?success=true'));
   } catch (err) {
     console.error('[shopee-callback] Erro:', err);
