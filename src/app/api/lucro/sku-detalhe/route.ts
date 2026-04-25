@@ -5,7 +5,9 @@ import { createServiceClient } from '@/lib/supabase-server';
 // Retorna agregações por loja, por tamanho e a lista de piores pedidos.
 //
 // Fonte: lucro_pedido_stats com sku_pais @> [sku_pai] no intervalo.
-// Usa lucro_operacional e margem_operacional_pct (sem rateios ads/FBS).
+// Aplica os toggles de custos (CMV / Ads / FBS) e o tipo de margem usando a
+// MESMA fórmula de /api/lucro/route.ts — rateios de ads/FBS são calculados
+// aqui (não persistidos no summary porque dependem do período).
 // Descrição: dashboard_sku_daily_stats (mais recente no intervalo).
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +18,7 @@ const BR_OFFSET_MS = 3 * 3600 * 1000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 type Period = 'today' | 'yesterday' | '7d' | '15d' | 'month' | 'custom';
+type MargemTipo = 'bruta' | 'operacional' | 'real';
 
 interface LucroRow {
   order_sn: string;
@@ -35,11 +38,24 @@ interface LucroRow {
   skus: string[];
   sku_pais: string[];
   qtd_itens: number;
-  lucro_operacional: number;
-  margem_operacional_pct: number;
   tem_devolucao: boolean;
   tem_afiliado: boolean;
   status: string;
+}
+
+interface DailyStatsRow {
+  data: string;
+  ads_expense: number;
+  gmv: number;
+  fbs_wallet_debito: number;
+  fbs_wallet_credito: number;
+}
+
+interface ComputedRow extends LucroRow {
+  rateio_ads: number;
+  rateio_fbs: number;
+  lucro: number;
+  margem_pct: number;
 }
 
 function brDateString(d: Date): string {
@@ -51,6 +67,20 @@ function addDays(dateStr: string, days: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
+function num(v: unknown): number {
+  const n = typeof v === 'string' ? parseFloat(v) : typeof v === 'number' ? v : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+function monthRange(dateStr: string): { from: string; to: string } {
+  const [y, m] = dateStr.split('-').map(Number);
+  const first = `${y}-${String(m).padStart(2, '0')}-01`;
+  const nextMonth = new Date(Date.UTC(y, m, 1));
+  const lastDay = new Date(nextMonth.getTime() - 86400_000);
+  const last = `${lastDay.getUTCFullYear()}-${String(lastDay.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDay.getUTCDate()).padStart(2, '0')}`;
+  return { from: first, to: last };
 }
 
 function parsePeriod(period: Period, from: string | null, to: string | null): { from: string; to: string } {
@@ -123,7 +153,7 @@ async function fetchLucroRowsBySkuPai(
   while (true) {
     let q = supabase
       .from('lucro_pedido_stats')
-      .select('order_sn, shop_id, data_liberacao, venda, receita_liquida, comissao, taxa_servico, afiliado, cupom_seller, frete_reverso, frete_ida_seller, difal, cmv, tem_cmv, skus, sku_pais, qtd_itens, lucro_operacional, margem_operacional_pct, tem_devolucao, tem_afiliado, status')
+      .select('order_sn, shop_id, data_liberacao, venda, receita_liquida, comissao, taxa_servico, afiliado, cupom_seller, frete_reverso, frete_ida_seller, difal, cmv, tem_cmv, skus, sku_pais, qtd_itens, tem_devolucao, tem_afiliado, status')
       .gte('data_liberacao', from)
       .lte('data_liberacao', to)
       .contains('sku_pais', [skuPai])
@@ -138,6 +168,126 @@ async function fetchLucroRowsBySkuPai(
     offset += PAGE_SIZE_DB;
   }
   return rows;
+}
+
+// Carrega ads_expense / gmv / wallet por dia. Soma entre lojas quando
+// shopFilter=null (mesmo escopo do shopFilter aplicado em fetchLucroRows).
+async function fetchDailyStats(
+  supabase: ReturnType<typeof createServiceClient>,
+  from: string,
+  to: string,
+  shopFilter: number | null,
+): Promise<Map<string, DailyStatsRow>> {
+  let q = supabase
+    .from('shopee_financeiro_daily_stats')
+    .select('data, shop_id, ads_expense, gmv, fbs_wallet_debito, fbs_wallet_credito')
+    .gte('data', from)
+    .lte('data', to);
+  if (shopFilter != null) q = q.eq('shop_id', shopFilter);
+
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+
+  const map = new Map<string, DailyStatsRow>();
+  for (const r of data ?? []) {
+    const key = String(r.data);
+    const prev = map.get(key);
+    if (prev) {
+      prev.ads_expense += num(r.ads_expense);
+      prev.gmv += num(r.gmv);
+      prev.fbs_wallet_debito += num(r.fbs_wallet_debito);
+      prev.fbs_wallet_credito += num(r.fbs_wallet_credito);
+    } else {
+      map.set(key, {
+        data: key,
+        ads_expense: num(r.ads_expense),
+        gmv: num(r.gmv),
+        fbs_wallet_debito: num(r.fbs_wallet_debito),
+        fbs_wallet_credito: num(r.fbs_wallet_credito),
+      });
+    }
+  }
+  return map;
+}
+
+// FBS é mensal (débito líquido de crédito). Agrega para todo o mês de cada
+// dia que aparece na consulta — base do rateio (pelo GMV mensal).
+async function fetchMonthlyStats(
+  supabase: ReturnType<typeof createServiceClient>,
+  daysInQuery: Set<string>,
+  shopFilter: number | null,
+): Promise<Map<string, { fbs_net: number; gmv: number }>> {
+  const months = new Set<string>();
+  for (const d of Array.from(daysInQuery)) months.add(d.slice(0, 7));
+  if (months.size === 0) return new Map();
+
+  const result = new Map<string, { fbs_net: number; gmv: number }>();
+  for (const ym of Array.from(months)) {
+    const [y, m] = ym.split('-').map(Number);
+    const first = `${y}-${String(m).padStart(2, '0')}-01`;
+    const { to } = monthRange(first);
+
+    let q = supabase
+      .from('shopee_financeiro_daily_stats')
+      .select('fbs_wallet_debito, fbs_wallet_credito, gmv')
+      .gte('data', first)
+      .lte('data', to);
+    if (shopFilter != null) q = q.eq('shop_id', shopFilter);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    let fbsNet = 0;
+    let gmv = 0;
+    for (const r of data ?? []) {
+      fbsNet += Math.max(0, num(r.fbs_wallet_debito) - num(r.fbs_wallet_credito));
+      gmv += num(r.gmv);
+    }
+    result.set(ym, { fbs_net: fbsNet, gmv });
+  }
+  return result;
+}
+
+// Mesma fórmula de /api/lucro/route.ts (rateio ads diário + FBS mensal),
+// para garantir que o modal de SKU bate com a visão de pedidos.
+function computeRowMetrics(
+  row: LucroRow,
+  custos: Set<string>,
+  margemTipo: MargemTipo,
+  dayStats: DailyStatsRow | undefined,
+  monthFbs: { fbs_net: number; gmv: number } | undefined,
+): ComputedRow {
+  const ativoCmv = custos.has('cmv');
+  const ativoAds = custos.has('ads');
+  const ativoFbs = custos.has('fbs');
+
+  const rateioAds = ativoAds && dayStats && dayStats.gmv > 0
+    ? dayStats.ads_expense * (row.venda / dayStats.gmv)
+    : 0;
+
+  const rateioFbs = ativoFbs && monthFbs && monthFbs.gmv > 0
+    ? monthFbs.fbs_net * (row.venda / monthFbs.gmv)
+    : 0;
+
+  const cmvAplicado = ativoCmv ? row.cmv : 0;
+  const lucroReal = row.receita_liquida - cmvAplicado - rateioAds - rateioFbs;
+
+  let margemPct = 0;
+  if (row.venda > 0) {
+    switch (margemTipo) {
+      case 'bruta':
+        margemPct = ((row.venda - cmvAplicado) / row.venda) * 100;
+        break;
+      case 'operacional':
+        margemPct = ((row.receita_liquida - cmvAplicado) / row.venda) * 100;
+        break;
+      case 'real':
+        margemPct = (lucroReal / row.venda) * 100;
+        break;
+    }
+  }
+
+  return { ...row, rateio_ads: rateioAds, rateio_fbs: rateioFbs, lucro: lucroReal, margem_pct: margemPct };
 }
 
 async function fetchShopNames(
@@ -304,6 +454,9 @@ export async function GET(request: NextRequest) {
   const fromParam = searchParams.get('from');
   const toParam = searchParams.get('to');
   const shopParam = searchParams.get('shop_id') ?? 'all';
+  const custosParam = (searchParams.get('custos') ?? 'cmv').split(',').map(s => s.trim()).filter(Boolean);
+  const custos = new Set(custosParam);
+  const margemTipo = (searchParams.get('margem') ?? 'operacional') as MargemTipo;
 
   let range: { from: string; to: string };
   try {
@@ -323,14 +476,30 @@ export async function GET(request: NextRequest) {
     const rows = await fetchLucroRowsBySkuPai(supabase, skuPai, range.from, range.to, shopFilter);
 
     const shopIds = Array.from(new Set(rows.map(r => r.shop_id)));
-    const [shopMap, descricao, skuCustos, prefixosAceitos] = await Promise.all([
+    const [shopMap, descricao, skuCustos, prefixosAceitos, dayStats, monthlyStats] = await Promise.all([
       fetchShopNames(supabase, shopIds),
       fetchDescricao(supabase, skuPai, range.from, range.to),
       fetchSkuCusto(supabase, skuPai),
       fetchSkuPaiAliases(supabase, skuPai),
+      custos.has('ads') || custos.has('fbs')
+        ? fetchDailyStats(supabase, range.from, range.to, shopFilter)
+        : Promise.resolve(new Map<string, DailyStatsRow>()),
+      custos.has('fbs')
+        ? fetchMonthlyStats(supabase, new Set(rows.map(r => r.data_liberacao)), shopFilter)
+        : Promise.resolve(new Map<string, { fbs_net: number; gmv: number }>()),
     ]);
 
     const cmvMedio = computeCmvMedio(rows, prefixosAceitos, skuCustos);
+
+    const computed: ComputedRow[] = rows.map(r =>
+      computeRowMetrics(
+        r,
+        custos,
+        margemTipo,
+        dayStats.get(r.data_liberacao),
+        monthlyStats.get(r.data_liberacao.slice(0, 7)),
+      ),
+    );
 
     // ============ POR LOJA ============
     interface LojaAgg {
@@ -344,7 +513,7 @@ export async function GET(request: NextRequest) {
       margem_count: number;
     }
     const porLojaMap = new Map<number, LojaAgg>();
-    for (const r of rows) {
+    for (const r of computed) {
       let agg = porLojaMap.get(r.shop_id);
       if (!agg) {
         agg = {
@@ -362,9 +531,9 @@ export async function GET(request: NextRequest) {
       agg.qtd += 1;
       agg.receita += r.receita_liquida;
       agg.cmv += r.cmv;
-      agg.lucro += r.lucro_operacional;
+      agg.lucro += r.lucro;
       if (r.venda > 0) {
-        agg.margem_soma += r.margem_operacional_pct;
+        agg.margem_soma += r.margem_pct;
         agg.margem_count += 1;
       }
     }
@@ -392,7 +561,7 @@ export async function GET(request: NextRequest) {
       lucro: number;
     }
     const porTamanhoMap = new Map<string, TamAgg>();
-    for (const r of rows) {
+    for (const r of computed) {
       const tamanhosDoPedido = new Set<string>();
       for (const s of normSkus(r.skus)) {
         if (!skuBateComSkuPai(s, prefixosAceitos)) continue;
@@ -406,9 +575,9 @@ export async function GET(request: NextRequest) {
           porTamanhoMap.set(t, agg);
         }
         agg.qtd += 1;
-        agg.lucro += r.lucro_operacional;
+        agg.lucro += r.lucro;
         if (r.venda > 0) {
-          agg.margem_soma += r.margem_operacional_pct;
+          agg.margem_soma += r.margem_pct;
           agg.margem_count += 1;
         }
       }
@@ -423,8 +592,8 @@ export async function GET(request: NextRequest) {
       .sort((a, b) => a.tamanho.localeCompare(b.tamanho, 'pt-BR', { numeric: true }));
 
     // ============ PIORES PEDIDOS ============
-    const piores = [...rows]
-      .sort((a, b) => a.lucro_operacional - b.lucro_operacional)
+    const piores = [...computed]
+      .sort((a, b) => a.lucro - b.lucro)
       .slice(0, 5)
       .map(r => {
         // Tamanho representativo: o primeiro SKU do pedido que bate no sku_pai.
@@ -441,8 +610,8 @@ export async function GET(request: NextRequest) {
           loja: nomeLojaCurto(shopMap.get(r.shop_id) ?? null),
           tamanho,
           venda: round2(r.venda),
-          lucro: round2(r.lucro_operacional),
-          margem: round1(r.margem_operacional_pct),
+          lucro: round2(r.lucro),
+          margem: round1(r.margem_pct),
           causa: inferCausa(r),
           tem_devolucao: r.tem_devolucao,
           tem_afiliado: r.tem_afiliado,
@@ -453,9 +622,9 @@ export async function GET(request: NextRequest) {
     // KPI auxiliar: % de pedidos com prejuízo. Calculado aqui para o modal
     // não precisar olhar pra props do card (que vêm de uma agregação com
     // toggles de custos diferente — por isso divergiam).
-    const pedidosNegativos = rows.reduce((acc, r) => acc + (r.lucro_operacional < 0 ? 1 : 0), 0);
-    const pctNegativos = rows.length > 0
-      ? round1((pedidosNegativos / rows.length) * 100)
+    const pedidosNegativos = computed.reduce((acc, r) => acc + (r.lucro < 0 ? 1 : 0), 0);
+    const pctNegativos = computed.length > 0
+      ? round1((pedidosNegativos / computed.length) * 100)
       : 0;
 
     return NextResponse.json({

@@ -604,6 +604,7 @@ export default function LucroPrejuizoPage() {
             PERIOD_OPTIONS.find(p => p.key === period)?.label ?? 'Período'
           }
           shopFilter={shopFilter}
+          config={config}
           onClose={() => setSkuDetalhe(null)}
         />
       )}
@@ -1252,16 +1253,23 @@ function causaColor(causa: string): string {
 }
 
 function SkuDetalheModal({
-  sku, period, periodLabel, shopFilter, onClose,
+  sku, period, periodLabel, shopFilter, config, onClose,
 }: {
   sku: SkuRow;
   period: Period;
   periodLabel: string;
   shopFilter: string;
+  config: Config;
   onClose: () => void;
 }) {
   const [detalhe, setDetalhe] = useState<SkuDetalheResponse | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Custos/margem precisam ser idênticos ao da página principal — o modal lê
+  // a config (mesma do localStorage) e propaga pro endpoint sku-detalhe, que
+  // aplica a mesma fórmula de rateio de /api/lucro.
+  const custosStr = custosString(config) || 'none';
+  const margemStr = config.margemTipo;
 
   useEffect(() => {
     let cancelled = false;
@@ -1272,6 +1280,8 @@ function SkuDetalheModal({
           sku_pai: sku.sku_pai,
           period,
           shop_id: shopFilter,
+          custos: custosStr,
+          margem: margemStr,
         });
         const res = await fetch(`/api/lucro/sku-detalhe?${params.toString()}`, { cache: 'no-store' });
         const json = await res.json();
@@ -1283,7 +1293,7 @@ function SkuDetalheModal({
       }
     })();
     return () => { cancelled = true; };
-  }, [sku.sku_pai, period, shopFilter]);
+  }, [sku.sku_pai, period, shopFilter, custosStr, margemStr]);
 
   // KPIs derivados do endpoint sku-detalhe — não usar mais sku.* (props do
   // card), porque o agregado das props passa pelos toggles de custo da página
