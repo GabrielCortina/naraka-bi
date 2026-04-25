@@ -1227,6 +1227,9 @@ interface SkuDetalheResponse {
   descricao: string | null;
   range: { from: string; to: string };
   cmv_medio: number | null;
+  pedidos_total: number;
+  pedidos_negativos: number;
+  pct_negativos: number;
   por_loja: SkuDetalheLoja[];
   por_tamanho: SkuDetalheTamanho[];
   piores_pedidos: SkuDetalhePior[];
@@ -1282,9 +1285,22 @@ function SkuDetalheModal({
     return () => { cancelled = true; };
   }, [sku.sku_pai, period, shopFilter]);
 
-  const lucroColor = sku.lucro_total > 0 ? COLORS.verde : sku.lucro_total < 0 ? COLORS.vermelho : undefined;
-  // CMV médio agora vem do endpoint (ponderado por faixa/tamanho via sku_custo).
-  // Antes do fetch resolver, cai num fallback neutro.
+  // KPIs derivados do endpoint sku-detalhe — não usar mais sku.* (props do
+  // card), porque o agregado das props passa pelos toggles de custo da página
+  // (cmv/ads/fbs + tipo de margem) e divergia da query do banco.
+  // Lucro total  = SUM(por_loja.lucro)   — bate com SUM(lucro_operacional WHERE sku_pais @> [pai])
+  // Margem média = AVG(por_loja.margem)  — média simples por loja
+  const lucroTotalKpi = detalhe
+    ? detalhe.por_loja.reduce((acc, l) => acc + l.lucro, 0)
+    : null;
+  const margemMediaKpi = detalhe && detalhe.por_loja.length > 0
+    ? detalhe.por_loja.reduce((acc, l) => acc + l.margem, 0) / detalhe.por_loja.length
+    : null;
+  const lucroColor =
+    lucroTotalKpi != null && lucroTotalKpi > 0 ? COLORS.verde
+    : lucroTotalKpi != null && lucroTotalKpi < 0 ? COLORS.vermelho
+    : undefined;
+  // CMV médio vem do endpoint (ponderado por faixa/tamanho via sku_custo).
   const cmvMedio = detalhe?.cmv_medio ?? null;
   const semCmv = !loading && detalhe != null && cmvMedio == null;
 
@@ -1318,13 +1334,18 @@ function SkuDetalheModal({
         </div>
 
         <div className="overflow-y-auto flex-1 min-h-0 px-5 py-4 space-y-5">
-          {/* KPIs mini */}
+          {/* KPIs mini — todos derivados do endpoint sku-detalhe (mesmo
+              critério do banco), nunca das props do card */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <MiniKpi label="Lucro total" value={fmtBRL(sku.lucro_total)} color={lucroColor} />
+            <MiniKpi
+              label="Lucro total"
+              value={loading || lucroTotalKpi == null ? '—' : fmtBRL(lucroTotalKpi)}
+              color={lucroColor}
+            />
             <MiniKpi
               label="Margem média"
-              value={fmtPct(sku.margem_media)}
-              color={margemColorFor(sku.margem_media)}
+              value={loading || margemMediaKpi == null ? '—' : fmtPct(margemMediaKpi)}
+              color={margemMediaKpi != null ? margemColorFor(margemMediaKpi) : undefined}
             />
             <MiniKpi
               label="CMV médio"
@@ -1341,8 +1362,8 @@ function SkuDetalheModal({
             />
             <MiniKpi
               label="% negativos"
-              value={fmtPct(sku.pct_negativos)}
-              color={sku.pct_negativos > 10 ? COLORS.vermelho : undefined}
+              value={loading || !detalhe ? '—' : fmtPct(detalhe.pct_negativos)}
+              color={detalhe && detalhe.pct_negativos > 10 ? COLORS.vermelho : undefined}
             />
           </div>
 

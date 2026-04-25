@@ -450,11 +450,22 @@ export async function GET(request: NextRequest) {
         };
       });
 
+    // KPI auxiliar: % de pedidos com prejuízo. Calculado aqui para o modal
+    // não precisar olhar pra props do card (que vêm de uma agregação com
+    // toggles de custos diferente — por isso divergiam).
+    const pedidosNegativos = rows.reduce((acc, r) => acc + (r.lucro_operacional < 0 ? 1 : 0), 0);
+    const pctNegativos = rows.length > 0
+      ? round1((pedidosNegativos / rows.length) * 100)
+      : 0;
+
     return NextResponse.json({
       sku_pai: skuPai,
       descricao,
       range,
       cmv_medio: cmvMedio,
+      pedidos_total: rows.length,
+      pedidos_negativos: pedidosNegativos,
+      pct_negativos: pctNegativos,
       por_loja: porLoja,
       por_tamanho: porTamanho,
       piores_pedidos: piores,
